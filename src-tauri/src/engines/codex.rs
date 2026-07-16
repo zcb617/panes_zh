@@ -425,22 +425,9 @@ impl Engine for CodexEngine {
             requested_runtime.sandbox_policy = sandbox_policy.clone();
         }
 
-        if let Some(existing_thread_id) = resume_engine_thread_id {
-            if self.can_reuse_live_thread(existing_thread_id).await {
-                // Codex applies model and effort per `turn/start`, so a live thread can stay put
-                // while we swap the requested runtime for the next turn.
-                requested_runtime = preserve_live_thread_runtime_flags(
-                    requested_runtime,
-                    self.thread_runtime(existing_thread_id).await.as_ref(),
-                );
-                self.store_thread_runtime(existing_thread_id, requested_runtime.clone())
-                    .await;
-                return Ok(EngineThread {
-                    engine_thread_id: existing_thread_id.to_string(),
-                });
-            }
-        }
-
+        // A running app-server process does not guarantee that it still has this
+        // thread loaded. Always resume before a new turn instead of trusting the
+        // local runtime cache; `thread/resume` is the server-side liveness check.
         if let Some(existing_thread_id) = resume_engine_thread_id {
             let resume_params = build_thread_resume_params(
                 existing_thread_id,
@@ -465,7 +452,10 @@ impl Engine for CodexEngine {
                 Ok(result) => {
                     let engine_thread_id = extract_thread_id(&result)
                         .unwrap_or_else(|| existing_thread_id.to_string());
-                    let runtime = thread_runtime_from_resume_response(&result, &requested_runtime);
+                    let runtime = preserve_live_thread_runtime_flags(
+                        thread_runtime_from_resume_response(&result, &requested_runtime),
+                        self.thread_runtime(&engine_thread_id).await.as_ref(),
+                    );
                     self.store_thread_runtime(&engine_thread_id, runtime).await;
 
                     return Ok(EngineThread { engine_thread_id });
@@ -2928,27 +2918,6 @@ impl CodexEngine {
         let state = self.state.lock().await;
         state.thread_runtimes.get(engine_thread_id).cloned()
     }
-
-    async fn can_reuse_live_thread(&self, engine_thread_id: &str) -> bool {
-        let (transport, initialized, known_thread) = {
-            let state = self.state.lock().await;
-            (
-                state.transport.clone(),
-                state.initialized,
-                state.thread_runtimes.contains_key(engine_thread_id),
-            )
-        };
-
-        if !initialized || !known_thread {
-            return false;
-        }
-
-        let Some(transport) = transport else {
-            return false;
-        };
-
-        transport.is_alive().await
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -4104,11 +4073,6 @@ fn sandbox_policy_to_json(
         match sandbox.sandbox_mode.as_deref().unwrap_or("workspace-write") {
             "read-only" => serde_json::json!({
               "type": "readOnly",
-              "access": {
-                "type": "restricted",
-                "includePlatformDefaults": true,
-                "readableRoots": sandbox.writable_roots.clone(),
-              },
               "networkAccess": sandbox.allow_network,
             }),
             "danger-full-access" => serde_json::json!({
@@ -4117,11 +4081,6 @@ fn sandbox_policy_to_json(
             _ => serde_json::json!({
               "type": "workspaceWrite",
               "writableRoots": sandbox.writable_roots.clone(),
-              "readOnlyAccess": {
-                "type": "restricted",
-                "includePlatformDefaults": true,
-                "readableRoots": sandbox.writable_roots.clone(),
-              },
               "networkAccess": sandbox.allow_network,
               "excludeTmpdirEnvVar": false,
               "excludeSlashTmp": false,
@@ -6721,6 +6680,48 @@ mod tests {
     use super::*;
     use crate::engines::ActionResult;
     use serde_json::{json, Value};
+
+    fn test_sandbox_policy(sandbox_mode: Option<&str>, allow_network: bool) -> SandboxPolicy {
+        SandboxPolicy {
+            writable_roots: vec!["/tmp/workspace".to_string()],
+            allow_network,
+            approval_policy: None,
+            permission_profile: None,
+            approvals_reviewer: None,
+            reasoning_effort: None,
+            sandbox_mode: sandbox_mode.map(ToOwned::to_owned),
+            service_tier: None,
+            personality: None,
+            output_schema: None,
+            opencode_agent: None,
+        }
+    }
+
+    #[test]
+    fn sandbox_policy_omits_removed_restricted_read_fields() {
+        let workspace_write =
+            sandbox_policy_to_json(&test_sandbox_policy(Some("workspace-write"), false), false);
+        assert_eq!(
+            workspace_write,
+            json!({
+                "type": "workspaceWrite",
+                "writableRoots": ["/tmp/workspace"],
+                "networkAccess": false,
+                "excludeTmpdirEnvVar": false,
+                "excludeSlashTmp": false,
+            })
+        );
+
+        let read_only =
+            sandbox_policy_to_json(&test_sandbox_policy(Some("read-only"), true), false);
+        assert_eq!(
+            read_only,
+            json!({
+                "type": "readOnly",
+                "networkAccess": true,
+            })
+        );
+    }
 
     #[test]
     fn normalize_modern_accept_with_execpolicy_from_top_level() {
