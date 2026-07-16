@@ -15,6 +15,7 @@ use crate::{
         CodexRemoteThreadDto, CodexRemoteThreadPageDto, MessageStatusDto, OpenCodeRemoteSessionDto,
         OpenCodeRemoteSessionPageDto, RepoDto, ThreadDto, ThreadStatusDto, TrustLevelDto,
     },
+    path_utils::paths_equal,
     state::AppState,
 };
 
@@ -74,7 +75,6 @@ pub async fn list_codex_remote_threads(
     })
     .await?;
 
-    let allowed_roots = collect_remote_thread_roots(&workspace_root, &repos);
     let normalized_search_term = normalize_remote_thread_search_term(search_term);
     let remote_threads = state
         .engines
@@ -83,7 +83,9 @@ pub async fn list_codex_remote_threads(
         .map_err(err_to_string)?;
     let matching_threads = remote_threads
         .into_iter()
-        .filter(|thread| allowed_roots.contains(thread.cwd.as_str()))
+        .filter(|thread| {
+            codex_remote_thread_belongs_to_workspace(&workspace_root, &repos, &thread.cwd)
+        })
         .collect::<Vec<_>>();
 
     let offset = parse_codex_remote_thread_cursor(cursor.as_deref())?;
@@ -444,6 +446,14 @@ fn collect_remote_thread_roots(
     roots
 }
 
+fn codex_remote_thread_belongs_to_workspace(
+    workspace_root: &str,
+    repos: &[RepoDto],
+    cwd: &str,
+) -> bool {
+    paths_equal(cwd, workspace_root) || repos.iter().any(|repo| paths_equal(cwd, &repo.path))
+}
+
 fn normalize_remote_thread_search_term(search_term: Option<String>) -> Option<String> {
     search_term
         .as_deref()
@@ -503,11 +513,11 @@ fn resolve_codex_remote_thread_repo_id(
     repos: &[RepoDto],
     cwd: &str,
 ) -> Result<Option<String>, String> {
-    if cwd == workspace_root {
+    if paths_equal(cwd, workspace_root) {
         return Ok(None);
     }
 
-    if let Some(repo) = repos.iter().find(|repo| repo.path == cwd) {
+    if let Some(repo) = repos.iter().find(|repo| paths_equal(&repo.path, cwd)) {
         return Ok(Some(repo.id.clone()));
     }
 
@@ -3224,6 +3234,39 @@ mod tests {
             Some("repo-1".to_string())
         );
         assert!(resolve_codex_remote_thread_repo_id("/workspace", &repos, "/elsewhere").is_err());
+    }
+
+    #[test]
+    fn codex_remote_thread_matching_normalizes_windows_workspace_paths() {
+        let repos = vec![RepoDto {
+            id: "repo-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            name: "repo".to_string(),
+            path: r"D:\zhangcb\my_wiki\repo".to_string(),
+            default_branch: "main".to_string(),
+            is_active: true,
+            trust_level: TrustLevelDto::Standard,
+        }];
+
+        assert!(codex_remote_thread_belongs_to_workspace(
+            r"D:\zhangcb\my_wiki",
+            &repos,
+            r"d:/zhangcb/my_wiki",
+        ));
+        assert!(codex_remote_thread_belongs_to_workspace(
+            r"D:\zhangcb\my_wiki",
+            &repos,
+            r"d:\zhangcb\my_wiki\repo",
+        ));
+        assert_eq!(
+            resolve_codex_remote_thread_repo_id(
+                r"D:\zhangcb\my_wiki",
+                &repos,
+                r"d:\zhangcb\my_wiki",
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]

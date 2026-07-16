@@ -136,6 +136,78 @@ function threadMatchesRequestedModel(thread: Thread, modelId: string): boolean {
 
 const LAST_THREAD_KEY = "panes:lastActiveThreadId";
 
+const CODEX_REMOTE_THREAD_PAGE_SIZE = 100;
+const codexRemoteThreadDiscoveryInFlight = new Map<string, Promise<void>>();
+
+function defaultCodexModelId(): string | null {
+  const codexEngine = useEngineStore.getState().engines.find((engine) => engine.id === "codex");
+  if (!codexEngine) {
+    return null;
+  }
+
+  return (
+    codexEngine.models.find((model) => model.isDefault && !model.hidden) ??
+    codexEngine.models.find((model) => !model.hidden) ??
+    codexEngine.models[0]
+  )?.id ?? null;
+}
+
+async function discoverCodexRemoteThreads(workspaceId: string): Promise<void> {
+  const pending = codexRemoteThreadDiscoveryInFlight.get(workspaceId);
+  if (pending) {
+    return pending;
+  }
+
+  const modelId = defaultCodexModelId();
+  if (!modelId) {
+    return;
+  }
+
+  const discovery = (async () => {
+    try {
+      let cursor: string | null = null;
+      const seenCursors = new Set<string>();
+
+      while (true) {
+        const page = await ipc.listCodexRemoteThreads(workspaceId, {
+          cursor,
+          limit: CODEX_REMOTE_THREAD_PAGE_SIZE,
+          archived: false,
+        });
+
+        for (const remoteThread of page.threads) {
+          if (remoteThread.localThreadId != null) {
+            continue;
+          }
+
+          try {
+            await ipc.attachCodexRemoteThread(workspaceId, remoteThread.engineThreadId, modelId);
+          } catch (error) {
+            console.warn(
+              `Failed to attach discovered Codex thread ${remoteThread.engineThreadId}:`,
+              error,
+            );
+          }
+        }
+
+        const nextCursor = page.nextCursor ?? null;
+        if (!nextCursor || seenCursors.has(nextCursor)) {
+          return;
+        }
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      }
+    } catch (error) {
+      console.warn(`Failed to discover Codex threads for workspace ${workspaceId}:`, error);
+    } finally {
+      codexRemoteThreadDiscoveryInFlight.delete(workspaceId);
+    }
+  })();
+
+  codexRemoteThreadDiscoveryInFlight.set(workspaceId, discovery);
+  return discovery;
+}
+
 function resolveImplicitNewThreadRuntime(
   state: Pick<ThreadState, "threads" | "activeThreadId">,
   workspaceId: string,
@@ -308,6 +380,7 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
   refreshThreads: async (workspaceId) => {
     set({ loading: true, error: undefined });
     try {
+      await discoverCodexRemoteThreads(workspaceId);
       const workspaceThreads = await ipc.listThreads(workspaceId);
       const threadsByWorkspace = mergeWorkspaceThreads(get().threadsByWorkspace, workspaceId, workspaceThreads);
       const threads = flattenThreadsByWorkspace(threadsByWorkspace);
@@ -354,10 +427,13 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
     set({ loading: true, error: undefined });
     try {
       const results = await Promise.all(
-        workspaceIds.map(async (workspaceId) => ({
-          workspaceId,
-          threads: await ipc.listThreads(workspaceId),
-        })),
+        workspaceIds.map(async (workspaceId) => {
+          await discoverCodexRemoteThreads(workspaceId);
+          return {
+            workspaceId,
+            threads: await ipc.listThreads(workspaceId),
+          };
+        }),
       );
 
       const threadsByWorkspace = results.reduce<Record<string, Thread[]>>((acc, item) => {

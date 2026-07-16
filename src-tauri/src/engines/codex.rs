@@ -1855,7 +1855,6 @@ impl CodexEngine {
                   "searchTerm": search_term,
                   "archived": archived,
                   "sortKey": "updated_at",
-                  "sourceKinds": ["appServer"],
                 })
             })
             .await
