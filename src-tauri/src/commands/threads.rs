@@ -1102,11 +1102,18 @@ pub async fn archive_thread(state: State<'_, AppState>, thread_id: String) -> Re
                     .map_err(err_to_string)?;
             }
         } else {
-            state
-                .engines
-                .archive_thread(&thread)
-                .await
-                .map_err(err_to_string)?;
+            match state.engines.archive_thread(&thread).await {
+                Ok(()) => {}
+                Err(error)
+                    if thread.engine_id == "codex" && is_missing_codex_thread_error(&error) =>
+                {
+                    log::info!(
+                        "codex thread {} is already absent remotely; archiving its local record",
+                        thread.engine_thread_id.as_deref().unwrap_or_default()
+                    );
+                }
+                Err(error) => Err(err_to_string(error))?,
+            }
         }
 
         run_db(db, {
@@ -1119,6 +1126,24 @@ pub async fn archive_thread(state: State<'_, AppState>, thread_id: String) -> Re
     }
     .await;
 
+    state.turns.finish(&thread_id).await;
+    result
+}
+
+#[tauri::command]
+pub async fn archive_thread_locally(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> Result<(), String> {
+    archive_thread_locally_inner(state.inner(), &thread_id).await
+}
+
+async fn archive_thread_locally_inner(state: &AppState, thread_id: &str) -> Result<(), String> {
+    state.turns.cancel(thread_id).await;
+    let db = state.db.clone();
+    let thread_id = thread_id.to_string();
+    let db_thread_id = thread_id.clone();
+    let result = run_db(db, move |db| db::threads::archive_thread(db, &db_thread_id)).await;
     state.turns.finish(&thread_id).await;
     result
 }
@@ -2508,6 +2533,20 @@ fn err_to_string(error: impl std::fmt::Display) -> String {
     format!("{error:#}")
 }
 
+fn is_missing_codex_thread_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    if message.contains("method not found") || message.contains("unsupported") {
+        return false;
+    }
+
+    let mentions_thread = message.contains("thread");
+    let missing = message.contains("not found")
+        || message.contains("does not exist")
+        || message.contains("unknown thread")
+        || message.contains("no such thread");
+    mentions_thread && missing
+}
+
 fn approval_policy_metadata_key(engine_id: &str) -> &'static str {
     match engine_id {
         "claude" => "claudePermissionMode",
@@ -3255,6 +3294,46 @@ mod tests {
             codex_remote_thread_timestamp_to_rfc3339(1_777_155_663_506),
             "2026-04-25T22:21:03.506+00:00"
         );
+    }
+
+    #[tokio::test]
+    async fn archive_thread_locally_hides_thread_without_calling_the_engine() {
+        let state = test_app_state();
+        let thread = test_thread(&state, "codex", "gpt-5.4");
+        crate::db::threads::set_engine_thread_id(&state.db, &thread.id, "engine-thread-1")
+            .expect("expected engine thread id to be set");
+
+        archive_thread_locally_inner(&state, &thread.id)
+            .await
+            .expect("expected local archive to succeed");
+
+        let visible =
+            crate::db::threads::list_threads_for_workspace(&state.db, &thread.workspace_id)
+                .expect("expected visible thread list");
+        assert!(!visible.iter().any(|candidate| candidate.id == thread.id));
+
+        let archived = crate::db::threads::list_archived_threads_for_workspace(
+            &state.db,
+            &thread.workspace_id,
+        )
+        .expect("expected archived thread list");
+        assert!(archived.iter().any(|candidate| candidate.id == thread.id));
+    }
+
+    #[test]
+    fn missing_codex_thread_error_is_distinguished_from_unsupported_method() {
+        assert!(is_missing_codex_thread_error(&anyhow::anyhow!(
+            "failed to archive codex thread: rpc error: thread 123 was not found"
+        )));
+        assert!(is_missing_codex_thread_error(&anyhow::anyhow!(
+            "failed to archive codex thread: thread does not exist"
+        )));
+        assert!(!is_missing_codex_thread_error(&anyhow::anyhow!(
+            "thread/archive: rpc error -32601: method not found"
+        )));
+        assert!(!is_missing_codex_thread_error(&anyhow::anyhow!(
+            "failed to connect to codex app-server"
+        )));
     }
 
     #[test]

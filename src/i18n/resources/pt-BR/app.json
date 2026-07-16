@@ -83,6 +83,11 @@
     "archiveWorkspaceMessage": "Arquivar o workspace \"{{name}}\" e ocultar seus repositórios/threads/mensagens da sidebar? Você poderá reabrir esta pasta depois para restaurá-lo.",
     "archiveThreadTitle": "Arquivar thread",
     "archiveThreadMessage": "Arquivar a thread \"{{name}}\"? Ela ficará oculta desta lista de projetos.",
+    "codexRemoteThreadRemovedTitle": "Conversa do Codex alterada",
+    "codexRemoteThreadDeletedMessage": "O Codex excluiu a thread \"{{name}}\". Arquivar sua cópia local deste projeto?",
+    "codexRemoteThreadArchivedMessage": "O Codex arquivou a thread \"{{name}}\". Arquivar sua cópia local deste projeto?",
+    "keepLocalThread": "Manter no projeto",
+    "codexRemoteThreadArchiveFailed": "Não foi possível arquivar a cópia local desta conversa.",
     "archive": "Arquivar"
   },
   "commandPalette": {

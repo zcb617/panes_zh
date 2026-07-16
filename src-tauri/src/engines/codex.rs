@@ -70,6 +70,7 @@ const MODEL_LIST_METHODS: &[&str] = &["model/list", "models/list"];
 const ACCOUNT_RATE_LIMITS_READ_METHODS: &[&str] = &["account/rateLimits/read"];
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const LOCAL_ARCHIVE_NOTIFICATION_SUPPRESSION: Duration = Duration::from_secs(2);
 const TURN_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const HEALTH_APP_SERVER_TIMEOUT: Duration = Duration::from_secs(12);
 const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -133,6 +134,7 @@ struct CodexState {
     force_external_sandbox: bool,
     protocol_diagnostics: Option<CodexProtocolDiagnosticsDto>,
     runtime_monitor_transport_tag: Option<usize>,
+    local_archive_notification_deadlines: HashMap<String, Instant>,
 }
 
 impl Default for CodexEngine {
@@ -191,6 +193,9 @@ pub enum CodexRuntimeEvent {
         preview: Option<String>,
     },
     ThreadArchived {
+        engine_thread_id: String,
+    },
+    ThreadDeleted {
         engine_thread_id: String,
     },
     ThreadUnarchived {
@@ -1031,20 +1036,25 @@ impl Engine for CodexEngine {
 
     async fn archive_thread(&self, engine_thread_id: &str) -> Result<(), anyhow::Error> {
         let transport = self.ensure_ready_transport().await?;
+        mark_local_archive_notification_suppression(&self.state, engine_thread_id).await;
         let params = serde_json::json!({
             "threadId": engine_thread_id,
         });
 
-        request_with_fallback(
+        match request_with_fallback(
             transport.as_ref(),
             THREAD_ARCHIVE_METHODS,
             params,
             DEFAULT_TIMEOUT,
         )
         .await
-        .context("failed to archive codex thread")?;
-
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                clear_local_archive_notification_suppression(&self.state, engine_thread_id).await;
+                Err(error.context("failed to archive codex thread"))
+            }
+        }
     }
 
     async fn unarchive_thread(&self, engine_thread_id: &str) -> Result<(), anyhow::Error> {
@@ -2477,10 +2487,30 @@ impl CodexEngine {
                                 if let Some(engine_thread_id) =
                                     extract_any_string(&params, &["threadId", "thread_id"])
                                 {
+                                    if consume_local_archive_notification_suppression(
+                                        &state,
+                                        &engine_thread_id,
+                                    )
+                                    .await
+                                    {
+                                        log::debug!(
+                                            "ignoring Codex archive notification for local archive request {engine_thread_id}"
+                                        );
+                                        continue;
+                                    }
                                     let _ =
                                         runtime_events.send(CodexRuntimeEvent::ThreadArchived {
                                             engine_thread_id,
                                         });
+                                }
+                            }
+                            "thread/deleted" => {
+                                if let Some(engine_thread_id) =
+                                    extract_any_string(&params, &["threadId", "thread_id"])
+                                {
+                                    let _ = runtime_events.send(CodexRuntimeEvent::ThreadDeleted {
+                                        engine_thread_id,
+                                    });
                                 }
                             }
                             "thread/unarchived" => {
@@ -3896,6 +3926,47 @@ async fn request_with_fallback(
     }
 
     anyhow::bail!("all rpc methods failed: {}", errors.join(" | "))
+}
+
+async fn mark_local_archive_notification_suppression(
+    state: &Arc<Mutex<CodexState>>,
+    engine_thread_id: &str,
+) {
+    let now = Instant::now();
+    let mut state = state.lock().await;
+    state
+        .local_archive_notification_deadlines
+        .retain(|_, deadline| *deadline > now);
+    state.local_archive_notification_deadlines.insert(
+        engine_thread_id.to_string(),
+        now + LOCAL_ARCHIVE_NOTIFICATION_SUPPRESSION,
+    );
+}
+
+async fn clear_local_archive_notification_suppression(
+    state: &Arc<Mutex<CodexState>>,
+    engine_thread_id: &str,
+) {
+    state
+        .lock()
+        .await
+        .local_archive_notification_deadlines
+        .remove(engine_thread_id);
+}
+
+async fn consume_local_archive_notification_suppression(
+    state: &Arc<Mutex<CodexState>>,
+    engine_thread_id: &str,
+) -> bool {
+    let now = Instant::now();
+    let mut state = state.lock().await;
+    state
+        .local_archive_notification_deadlines
+        .retain(|_, deadline| *deadline > now);
+    state
+        .local_archive_notification_deadlines
+        .remove(engine_thread_id)
+        .is_some()
 }
 
 fn scope_cwd(scope: &ThreadScope) -> String {
@@ -6635,6 +6706,7 @@ fn is_known_codex_notification_method(normalized_method: &str) -> bool {
             | "thread/status/changed"
             | "thread/name/updated"
             | "thread/archived"
+            | "thread/deleted"
             | "thread/unarchived"
             | "thread/closed"
             | "thread/tokenusage/updated"
@@ -7888,6 +7960,9 @@ mod tests {
         )));
         assert!(is_known_codex_notification_method(&normalize_method(
             "thread/archived"
+        )));
+        assert!(is_known_codex_notification_method(&normalize_method(
+            "thread/deleted"
         )));
         assert!(is_known_codex_notification_method(&normalize_method(
             "thread/unarchived"

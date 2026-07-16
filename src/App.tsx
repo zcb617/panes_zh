@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ThreeColumnLayout } from "./components/layout/ThreeColumnLayout";
 import { CommandPalette } from "./components/shared/CommandPalette";
+import { ConfirmDialog } from "./components/shared/ConfirmDialog";
 import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 import { ToastContainer } from "./components/shared/ToastContainer";
 import { PowerSettingsModal } from "./components/shared/PowerSettingsModal";
@@ -12,9 +13,11 @@ import {
   ipc,
   listenChatApprovalRequested,
   listenChatTurnFinished,
+  listenCodexRemoteThreadRemoved,
   listenEngineRuntimeUpdated,
   listenMenuAction,
   listenThreadUpdated,
+  type CodexRemoteThreadRemovedEvent,
 } from "./lib/ipc";
 import { useWorkspaceStore } from "./stores/workspaceStore";
 import { useEngineStore } from "./stores/engineStore";
@@ -134,6 +137,10 @@ export function App() {
   const closeCommandPalette = useUiStore((s) => s.closeCommandPalette);
   const checkForUpdate = useUpdateStore((s) => s.checkForUpdate);
   const customWindowFrame = usesCustomWindowFrame();
+  const [codexRemoteThreadPrompts, setCodexRemoteThreadPrompts] = useState<
+    CodexRemoteThreadRemovedEvent[]
+  >([]);
+  const codexRemoteThreadPrompt = codexRemoteThreadPrompts[0] ?? null;
   const customWindowFrameState = useCustomWindowFrameState();
 
   useEffect(() => {
@@ -202,6 +209,32 @@ export function App() {
       }
     };
   }, [applyThreadUpdateLocal, refreshArchivedThreads, refreshThreads]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenCodexRemoteThreadRemoved((event) => {
+      setCodexRemoteThreadPrompts((current) => {
+        if (current.some((item) => item.thread.id === event.thread.id)) {
+          return current;
+        }
+        return [...current, event];
+      });
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -627,6 +660,30 @@ export function App() {
     };
   }, []);
 
+  function dismissCodexRemoteThreadPrompt() {
+    setCodexRemoteThreadPrompts((current) => current.slice(1));
+  }
+
+  async function archiveCodexRemoteThreadLocally() {
+    const prompt = codexRemoteThreadPrompt;
+    if (!prompt) return;
+
+    const wasActive = useThreadStore.getState().activeThreadId === prompt.thread.id;
+    try {
+      await ipc.archiveThreadLocally(prompt.thread.id);
+      if (wasActive) {
+        useThreadStore.getState().setActiveThread(null);
+        await useChatStore.getState().setActiveThread(null);
+      }
+      await refreshThreads(prompt.thread.workspaceId);
+      await refreshArchivedThreads(prompt.thread.workspaceId);
+      dismissCodexRemoteThreadPrompt();
+    } catch (error) {
+      console.warn(`Failed to archive local Codex thread ${prompt.thread.id}:`, error);
+      toast.error(t("app:sidebar.codexRemoteThreadArchiveFailed"));
+    }
+  }
+
   return (
     <div
       className={`app-shell${customWindowFrame ? " app-shell-custom-frame" : ""}${
@@ -642,6 +699,24 @@ export function App() {
       <TerminalNotificationSettingsModal />
       <UsageLimitsModal />
       <OnboardingWizard />
+      <ConfirmDialog
+        open={codexRemoteThreadPrompt !== null}
+        title={t("app:sidebar.codexRemoteThreadRemovedTitle")}
+        message={
+          codexRemoteThreadPrompt
+            ? t(
+                codexRemoteThreadPrompt.remoteAction === "deleted"
+                  ? "app:sidebar.codexRemoteThreadDeletedMessage"
+                  : "app:sidebar.codexRemoteThreadArchivedMessage",
+                { name: codexRemoteThreadPrompt.thread.title || t("app:sidebar.untitledThread") },
+              )
+            : ""
+        }
+        confirmLabel={t("app:sidebar.archive")}
+        cancelLabel={t("app:sidebar.keepLocalThread")}
+        onConfirm={() => void archiveCodexRemoteThreadLocally()}
+        onCancel={dismissCodexRemoteThreadPrompt}
+      />
       <ToastContainer />
     </div>
   );
