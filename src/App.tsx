@@ -67,8 +67,13 @@ async function createNewWorkspaceThread() {
   await createAndActivateWorkspaceThread(activeWorkspaceId);
 }
 
-function isCodexSyncRequired(thread: Thread | null | undefined): boolean {
-  return thread?.engineId === "codex" && thread.engineMetadata?.codexSyncRequired === true;
+function shouldSyncCodexThread(thread: Thread | null | undefined): boolean {
+  return (
+    thread?.engineId === "codex" &&
+    Boolean(thread.engineThreadId?.trim()) &&
+    thread.status !== "streaming" &&
+    thread.status !== "awaiting_approval"
+  );
 }
 
 function showRuntimeToast(runtimeToast?: RuntimeToast) {
@@ -123,6 +128,7 @@ export function App() {
   const loadWorkspaces = useWorkspaceStore((s) => s.loadWorkspaces);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const loadEngines = useEngineStore((s) => s.load);
+  const engines = useEngineStore((s) => s.engines);
   const applyEngineRuntimeUpdate = useEngineStore((s) => s.applyRuntimeUpdate);
   const loadKeepAwake = useKeepAwakeStore((s) => s.load);
   const loadTerminalNotificationSettings = useTerminalNotificationSettingsStore((s) => s.load);
@@ -152,7 +158,7 @@ export function App() {
 
   useEffect(() => {
     void refreshAllThreads(workspaces.map((workspace) => workspace.id));
-  }, [workspaces, refreshAllThreads]);
+  }, [engines, workspaces, refreshAllThreads]);
 
   useEffect(() => {
     const hasSessionTimer = keepAwakeSessionTimer != null;
@@ -175,7 +181,7 @@ export function App() {
       if (thread) {
         const applied = applyThreadUpdateLocal(thread);
         const activeThreadId = useThreadStore.getState().activeThreadId;
-        if (thread.id === activeThreadId && isCodexSyncRequired(thread)) {
+        if (thread.id === activeThreadId && shouldSyncCodexThread(thread)) {
           try {
             const syncedThread = await ipc.syncThreadFromEngine(thread.id);
             if (useThreadStore.getState().applyThreadUpdateLocal(syncedThread)) {
