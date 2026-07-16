@@ -1977,7 +1977,7 @@ async fn run_turn(
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             blocks.push(ContentBlock::Error {
-                message: format!("Engine error: {error}"),
+                message: format!("Engine error: {error:#}"),
             });
             blocks_dirty = true;
             if message_status != MessageStatusDto::Error {
@@ -1991,7 +1991,7 @@ async fn run_turn(
             let _ = app.emit(
                 &stream_event_topic,
                 EngineEvent::Error {
-                    message: format!("{error}"),
+                    message: format!("{error:#}"),
                     recoverable: false,
                 },
             );
