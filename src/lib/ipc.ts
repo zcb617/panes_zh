@@ -330,6 +330,8 @@ export const ipc = {
       agent: patch.agent ?? null,
     }),
   archiveThread: (threadId: string) => invoke<void>("archive_thread", { threadId }),
+  archiveThreadLocally: (threadId: string) =>
+    invoke<void>("archive_thread_locally", { threadId }),
   restoreThread: (threadId: string) => invoke<Thread>("restore_thread", { threadId }),
   syncThreadFromEngine: (threadId: string) =>
     invoke<Thread>("sync_thread_from_engine", { threadId }),
@@ -668,6 +670,11 @@ export interface ThreadUpdatedEvent {
   thread?: Thread | null;
 }
 
+export interface CodexRemoteThreadRemovedEvent {
+  thread: Thread;
+  remoteAction: "archived" | "deleted";
+}
+
 export interface ChatTurnFinishedEvent {
   threadId: string;
   workspaceId: string;
@@ -681,6 +688,12 @@ export async function listenThreadUpdated(
   onEvent: (event: ThreadUpdatedEvent) => void
 ): Promise<UnlistenFn> {
   return listen<ThreadUpdatedEvent>("thread-updated", ({ payload }) => onEvent(payload));
+}
+
+export async function listenCodexRemoteThreadRemoved(
+  onEvent: (event: CodexRemoteThreadRemovedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<CodexRemoteThreadRemovedEvent>("codex-remote-thread-removed", ({ payload }) => onEvent(payload));
 }
 
 export async function listenChatTurnFinished(
