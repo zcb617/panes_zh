@@ -726,7 +726,7 @@ fn autonomy_policy_for_preset(
                 allow_network: Some(false),
             },
             "auto" => AutonomyPresetPolicy {
-                approval_policy: json!("on-failure"),
+                approval_policy: json!("on-request"),
                 sandbox_mode: (!codex_external_sandbox).then_some("workspace-write"),
                 allow_network: Some(true),
             },
@@ -1347,7 +1347,7 @@ pub async fn fork_codex_thread(
     }
 
     let db = state.db.clone();
-    let thread = run_db(db.clone(), {
+    let mut thread = run_db(db.clone(), {
         let thread_id = thread_id.clone();
         move |db| db::threads::get_thread(db, &thread_id)
     })
@@ -1357,6 +1357,7 @@ pub async fn fork_codex_thread(
     if thread.engine_id != "codex" {
         return Err("native fork is only available for Codex threads".to_string());
     }
+    migrate_legacy_codex_on_failure_thread_metadata(state.inner(), &mut thread).await;
     let engine_thread_id = thread
         .engine_thread_id
         .clone()
@@ -1397,7 +1398,7 @@ pub async fn rollback_codex_thread(
     }
 
     let db = state.db.clone();
-    let thread = run_db(db.clone(), {
+    let mut thread = run_db(db.clone(), {
         let thread_id = thread_id.clone();
         move |db| db::threads::get_thread(db, &thread_id)
     })
@@ -1407,6 +1408,7 @@ pub async fn rollback_codex_thread(
     if thread.engine_id != "codex" {
         return Err("native rollback is only available for Codex threads".to_string());
     }
+    migrate_legacy_codex_on_failure_thread_metadata(state.inner(), &mut thread).await;
     let engine_thread_id = thread
         .engine_thread_id
         .clone()
@@ -2275,6 +2277,68 @@ fn allow_network_for_trust_level(trust_level: &TrustLevelDto) -> bool {
     matches!(trust_level, TrustLevelDto::Trusted)
 }
 
+pub(crate) async fn migrate_legacy_codex_on_failure_thread_metadata(
+    state: &AppState,
+    thread: &mut ThreadDto,
+) {
+    if thread.engine_id != "codex"
+        || !is_legacy_codex_on_failure_metadata(thread.engine_metadata.as_ref())
+    {
+        return;
+    }
+
+    let codex_external_sandbox_active = state.engines.codex_uses_external_sandbox().await;
+    let Some(metadata) = migrate_legacy_codex_on_failure_metadata(
+        thread.engine_metadata.as_ref(),
+        codex_external_sandbox_active,
+    ) else {
+        return;
+    };
+
+    let db = state.db.clone();
+    let thread_id = thread.id.clone();
+    let metadata_for_db = metadata.clone();
+    if let Err(error) = run_db(db, move |db| {
+        db::threads::update_engine_metadata(db, &thread_id, &metadata_for_db)
+    })
+    .await
+    {
+        log::warn!(
+            "failed to persist legacy Codex on-failure policy migration for thread {}: {error}",
+            thread.id
+        );
+    }
+
+    thread.engine_metadata = Some(metadata);
+}
+
+fn is_legacy_codex_on_failure_metadata(metadata: Option<&Value>) -> bool {
+    metadata
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("sandboxApprovalPolicy"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("on-failure"))
+}
+
+fn migrate_legacy_codex_on_failure_metadata(
+    metadata: Option<&Value>,
+    codex_external_sandbox_active: bool,
+) -> Option<Value> {
+    if !is_legacy_codex_on_failure_metadata(metadata) {
+        return None;
+    }
+
+    let mut metadata = metadata?.clone();
+    let object = metadata.as_object_mut()?;
+    object.insert("sandboxApprovalPolicy".to_string(), json!("on-request"));
+    if codex_external_sandbox_active {
+        object.remove("sandboxMode");
+    } else {
+        object.insert("sandboxMode".to_string(), json!("workspace-write"));
+    }
+
+    Some(metadata)
+}
 fn thread_approval_policy_override_value(
     engine_id: &str,
     metadata: Option<&Value>,
@@ -2619,11 +2683,12 @@ fn normalize_codex_approval_policy(value: Value) -> Result<Value, String> {
         Value::String(raw) => {
             let normalized = raw.trim().to_lowercase();
             match normalized.as_str() {
-                "untrusted" | "on-failure" | "on-request" | "never" => {
+                "on-failure" => Ok(Value::String("on-request".to_string())),
+                "untrusted" | "on-request" | "never" => {
                     Ok(Value::String(normalized))
                 }
                 _ => Err(format!(
-                    "invalid approval policy `{normalized}`. expected one of: untrusted, on-failure, on-request, never"
+                    "invalid approval policy `{normalized}`. expected one of: untrusted, on-request, never"
                 )),
             }
         }
@@ -3039,6 +3104,49 @@ mod tests {
             normalize_thread_approval_policy_for_engine("claude", Some(json!("STANDARD"))).unwrap(),
             Some(json!("standard"))
         );
+    }
+    #[test]
+    fn normalize_thread_approval_policy_migrates_legacy_codex_on_failure() {
+        assert_eq!(
+            normalize_thread_approval_policy_for_engine("codex", Some(json!("on-failure")))
+                .unwrap(),
+            Some(json!("on-request"))
+        );
+    }
+
+    #[test]
+    fn legacy_codex_on_failure_metadata_restores_workspace_auto() {
+        let metadata = json!({
+            "sandboxApprovalPolicy": "on-failure",
+            "sandboxMode": "read-only",
+            "sandboxAllowNetwork": false,
+        });
+
+        assert_eq!(
+            migrate_legacy_codex_on_failure_metadata(Some(&metadata), false),
+            Some(json!({
+                "sandboxApprovalPolicy": "on-request",
+                "sandboxMode": "workspace-write",
+                "sandboxAllowNetwork": false,
+            }))
+        );
+    }
+
+    #[test]
+    fn legacy_codex_on_failure_metadata_keeps_external_sandbox_handling() {
+        let metadata = json!({
+            "sandboxApprovalPolicy": "on-failure",
+            "sandboxMode": "workspace-write",
+        });
+
+        let migrated = migrate_legacy_codex_on_failure_metadata(Some(&metadata), true)
+            .expect("legacy metadata should migrate");
+
+        assert_eq!(
+            migrated.get("sandboxApprovalPolicy"),
+            Some(&json!("on-request"))
+        );
+        assert!(migrated.get("sandboxMode").is_none());
     }
 
     #[test]
@@ -3640,6 +3748,14 @@ mod tests {
 
     #[test]
     fn autonomy_policy_for_preset_matches_engine_contracts() {
+        assert_eq!(
+            autonomy_policy_for_preset("codex", "auto", false).unwrap(),
+            AutonomyPresetPolicy {
+                approval_policy: json!("on-request"),
+                sandbox_mode: Some("workspace-write"),
+                allow_network: Some(true),
+            }
+        );
         assert_eq!(
             autonomy_policy_for_preset("codex", "read-only", false).unwrap(),
             AutonomyPresetPolicy {

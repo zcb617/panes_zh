@@ -27,6 +27,13 @@ const COMPACT_LABELS: Record<AppLocale, {
     day: "d",
     month: "mo",
   },
+  "zh-CN": {
+    now: "刚刚",
+    minute: "分钟",
+    hour: "小时",
+    day: "天",
+    month: "个月",
+  },
 };
 
 function asLocale(locale?: string | null): AppLocale {
@@ -39,10 +46,25 @@ function toDate(value: string | number | Date): Date | null {
 }
 
 function formatCompactAmount(amount: number, unit: string, locale: AppLocale): string {
-  if (locale === "en") {
+  if (locale === "en" || locale === "zh-CN") {
     return `${amount}${unit}`;
   }
   return `${amount} ${unit}`;
+}
+
+function formatRelativeTimeWithSuffix(
+  amount: number,
+  unit: string,
+  compact: string,
+  locale: AppLocale,
+): string {
+  if (locale === "pt-BR") {
+    return `há ${amount} ${unit}`;
+  }
+  if (locale === "zh-CN") {
+    return `${amount}${unit}前`;
+  }
+  return `${compact} ago`;
 }
 
 export function formatRelativeTime(
@@ -66,9 +88,7 @@ export function formatRelativeTime(
   if (minutes < 60) {
     const compact = formatCompactAmount(minutes, labels.minute, resolvedLocale);
     return options.style === "short-with-suffix"
-      ? resolvedLocale === "pt-BR"
-        ? `há ${minutes} ${labels.minute}`
-        : `${compact} ago`
+      ? formatRelativeTimeWithSuffix(minutes, labels.minute, compact, resolvedLocale)
       : compact;
   }
 
@@ -76,9 +96,7 @@ export function formatRelativeTime(
   if (hours < 24) {
     const compact = formatCompactAmount(hours, labels.hour, resolvedLocale);
     return options.style === "short-with-suffix"
-      ? resolvedLocale === "pt-BR"
-        ? `há ${hours} ${labels.hour}`
-        : `${compact} ago`
+      ? formatRelativeTimeWithSuffix(hours, labels.hour, compact, resolvedLocale)
       : compact;
   }
 
@@ -86,18 +104,14 @@ export function formatRelativeTime(
   if (days < 30) {
     const compact = formatCompactAmount(days, labels.day, resolvedLocale);
     return options.style === "short-with-suffix"
-      ? resolvedLocale === "pt-BR"
-        ? `há ${days} ${labels.day}`
-        : `${compact} ago`
+      ? formatRelativeTimeWithSuffix(days, labels.day, compact, resolvedLocale)
       : compact;
   }
 
   const months = Math.floor(days / 30);
   const compact = formatCompactAmount(months, labels.month, resolvedLocale);
   return options.style === "short-with-suffix"
-    ? resolvedLocale === "pt-BR"
-      ? `há ${months} ${labels.month}`
-      : `${compact} ago`
+    ? formatRelativeTimeWithSuffix(months, labels.month, compact, resolvedLocale)
     : compact;
 }
 

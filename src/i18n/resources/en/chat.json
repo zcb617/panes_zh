@@ -359,7 +359,7 @@
       "codexExternal": {
         "read-only": "Use untrusted approvals and block network. The external sandbox controls filesystem access.",
         "ask": "Use on-request approvals and block network. The external sandbox controls filesystem access.",
-        "auto": "Use on-failure approvals with network enabled. The external sandbox controls filesystem access."
+        "auto": "Use on-request approvals with network enabled. The external sandbox controls filesystem access."
       }
     },
     "defaultForNewThreads": "Default for new threads",

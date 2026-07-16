@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    commands::threads::migrate_legacy_codex_on_failure_thread_metadata,
     db,
     engines::{
         approval_response_route_for_engine, normalize_approval_response_for_engine,
@@ -418,6 +419,7 @@ pub async fn send_message(
     })
     .await?
     .ok_or_else(|| format!("thread not found: {thread_id}"))?;
+    migrate_legacy_codex_on_failure_thread_metadata(state.inner(), &mut thread).await;
     let requested_model_id = model_id
         .as_deref()
         .map(str::trim)
@@ -4180,14 +4182,13 @@ fn normalize_codex_approval_policy_value(value: &Value) -> Result<Value, String>
         Value::String(raw) => {
             let normalized = raw.trim().to_lowercase();
             let normalized = normalized.as_str();
-            if matches!(
-                normalized,
-                "untrusted" | "on-failure" | "on-request" | "never"
-            ) {
+            if matches!(normalized, "untrusted" | "on-request" | "never") {
                 Ok(Value::String(normalized.to_string()))
+            } else if normalized == "on-failure" {
+                Ok(Value::String("on-request".to_string()))
             } else {
                 Err(format!(
-                    "invalid approval policy `{normalized}`. expected one of: untrusted, on-failure, on-request, never"
+                    "invalid approval policy `{normalized}`. expected one of: untrusted, on-request, never"
                 ))
             }
         }
@@ -4785,6 +4786,18 @@ mod tests {
         assert_eq!(
             thread_approval_policy_override_value("codex", Some(&metadata)).unwrap(),
             Some(Value::String("never".to_string()))
+        );
+    }
+
+    #[test]
+    fn legacy_codex_on_failure_override_is_migrated_before_thread_start() {
+        let metadata = serde_json::json!({
+            "sandboxApprovalPolicy": "on-failure",
+        });
+
+        assert_eq!(
+            thread_approval_policy_override_value("codex", Some(&metadata)).unwrap(),
+            Some(Value::String("on-request".to_string()))
         );
     }
 

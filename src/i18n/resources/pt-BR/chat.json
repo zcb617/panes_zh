@@ -359,7 +359,7 @@
       "codexExternal": {
         "read-only": "Usa aprovações não confiáveis e bloqueia a rede. O sandbox externo controla o acesso aos arquivos.",
         "ask": "Usa aprovações sob demanda e bloqueia a rede. O sandbox externo controla o acesso aos arquivos.",
-        "auto": "Usa aprovações ao falhar com rede habilitada. O sandbox externo controla o acesso aos arquivos."
+        "auto": "Usa aprovações sob demanda com rede habilitada. O sandbox externo controla o acesso aos arquivos."
       }
     },
     "defaultForNewThreads": "Padrão para novas conversas",

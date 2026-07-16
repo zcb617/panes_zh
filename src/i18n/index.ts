@@ -15,6 +15,13 @@ import workspacePtBr from "./resources/pt-BR/workspace.json";
 import setupPtBr from "./resources/pt-BR/setup.json";
 import gitPtBr from "./resources/pt-BR/git.json";
 import nativePtBr from "./resources/pt-BR/native.json";
+import commonZhCn from "./resources/zh-CN/common.json";
+import appZhCn from "./resources/zh-CN/app.json";
+import chatZhCn from "./resources/zh-CN/chat.json";
+import workspaceZhCn from "./resources/zh-CN/workspace.json";
+import setupZhCn from "./resources/zh-CN/setup.json";
+import gitZhCn from "./resources/zh-CN/git.json";
+import nativeZhCn from "./resources/zh-CN/native.json";
 
 const resources = {
   en: {
@@ -34,6 +41,15 @@ const resources = {
     setup: setupPtBr,
     git: gitPtBr,
     native: nativePtBr,
+  },
+  "zh-CN": {
+    common: commonZhCn,
+    app: appZhCn,
+    chat: chatZhCn,
+    workspace: workspaceZhCn,
+    setup: setupZhCn,
+    git: gitZhCn,
+    native: nativeZhCn,
   },
 } as const;
 

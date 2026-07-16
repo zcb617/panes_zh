@@ -13,7 +13,7 @@ describe("resolveEngineCapabilities", () => {
 
   it("falls back to Codex defaults when capabilities are unavailable", () => {
     expect(resolveEngineCapabilities("codex", undefined)).toEqual({
-      permissionModes: ["untrusted", "on-failure", "on-request", "never"],
+      permissionModes: ["untrusted", "on-request", "never"],
       sandboxModes: ["read-only", "workspace-write", "danger-full-access"],
       approvalDecisions: ["accept", "decline", "cancel", "accept_for_session"],
     });

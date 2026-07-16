@@ -13,6 +13,13 @@ import workspacePtBr from "./resources/pt-BR/workspace.json";
 import setupPtBr from "./resources/pt-BR/setup.json";
 import gitPtBr from "./resources/pt-BR/git.json";
 import nativePtBr from "./resources/pt-BR/native.json";
+import commonZhCn from "./resources/zh-CN/common.json";
+import appZhCn from "./resources/zh-CN/app.json";
+import chatZhCn from "./resources/zh-CN/chat.json";
+import workspaceZhCn from "./resources/zh-CN/workspace.json";
+import setupZhCn from "./resources/zh-CN/setup.json";
+import gitZhCn from "./resources/zh-CN/git.json";
+import nativeZhCn from "./resources/zh-CN/native.json";
 
 function flattenKeys(value: unknown, prefix = ""): string[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -63,6 +70,29 @@ describe("i18n resources", () => {
     ].sort();
 
     expect(ptBrKeys).toEqual(enKeys);
+  });
+
+  it("keeps zh-CN keys aligned with en", () => {
+    const enKeys = [
+      ...flattenKeys(commonEn, "common"),
+      ...flattenKeys(appEn, "app"),
+      ...flattenKeys(chatEn, "chat"),
+      ...flattenKeys(workspaceEn, "workspace"),
+      ...flattenKeys(setupEn, "setup"),
+      ...flattenKeys(gitEn, "git"),
+      ...flattenKeys(nativeEn, "native"),
+    ].sort();
+    const zhCnKeys = [
+      ...flattenKeys(commonZhCn, "common"),
+      ...flattenKeys(appZhCn, "app"),
+      ...flattenKeys(chatZhCn, "chat"),
+      ...flattenKeys(workspaceZhCn, "workspace"),
+      ...flattenKeys(setupZhCn, "setup"),
+      ...flattenKeys(gitZhCn, "git"),
+      ...flattenKeys(nativeZhCn, "native"),
+    ].sort();
+
+    expect(zhCnKeys).toEqual(enKeys);
   });
 
   it("defines fallback thread titles used by the chat panel", () => {

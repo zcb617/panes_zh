@@ -45,6 +45,7 @@ import {
   MIN_TERMINAL_FONT_SIZE,
 } from "../../lib/terminalFontSizeSettings";
 import {
+  getLocaleDisplayName,
   normalizeAppLocale,
   SUPPORTED_APP_LOCALES,
   type AppLocale,
@@ -731,7 +732,7 @@ export function SettingsPage() {
                     value={activeLocale}
                     options={SUPPORTED_APP_LOCALES.map((locale) => ({
                       value: locale,
-                      label: locale === "en" ? t("common:language.english") : t("common:language.portugueseBrazil"),
+                      label: getLocaleDisplayName(locale),
                     }))}
                     onChange={(value) => void changeLocale(value as AppLocale)}
                     triggerStyle={{ minWidth: 154, height: 32 }}

@@ -4,6 +4,7 @@ use sys_locale::get_locale as get_system_locale;
 
 pub const DEFAULT_APP_LOCALE: &str = "en";
 pub const PT_BR_APP_LOCALE: &str = "pt-BR";
+pub const ZH_CN_APP_LOCALE: &str = "zh-CN";
 
 #[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +50,12 @@ pub fn normalize_app_locale(input: &str) -> Option<&'static str> {
 
     if normalized == "pt" || normalized.starts_with("pt-") {
         Some(PT_BR_APP_LOCALE)
+    } else if normalized == "zh"
+        || normalized == "zh-cn"
+        || normalized == "zh-sg"
+        || normalized.starts_with("zh-hans")
+    {
+        Some(ZH_CN_APP_LOCALE)
     } else if normalized == "en" || normalized.starts_with("en-") {
         Some(DEFAULT_APP_LOCALE)
     } else {
@@ -107,6 +114,26 @@ pub fn native_strings(locale: &str) -> NativeStrings {
             toggle_terminal: "Alternar terminal",
             close: "Fechar",
         },
+        ZH_CN_APP_LOCALE => NativeStrings {
+            app_menu: "Panes",
+            about_comments: "面向 AI 辅助编程的开源工作台",
+            edit_menu: "编辑",
+            undo: "撤销",
+            redo: "重做",
+            cut: "剪切",
+            copy: "复制",
+            paste: "粘贴",
+            select_all: "全选",
+            view_menu: "视图",
+            window_menu: "窗口",
+            toggle_sidebar: "切换侧边栏",
+            toggle_git_panel: "切换 Git 面板",
+            toggle_focus_mode: "切换专注模式",
+            toggle_fullscreen: "切换全屏",
+            search: "搜索工作区",
+            toggle_terminal: "切换终端",
+            close: "关闭",
+        },
         _ => NativeStrings {
             app_menu: "Panes",
             about_comments: "The open-source cockpit for AI-assisted coding",
@@ -134,7 +161,7 @@ pub fn native_strings(locale: &str) -> NativeStrings {
 mod tests {
     use super::{
         native_strings, normalize_app_locale, resolve_app_locale_with_system, DEFAULT_APP_LOCALE,
-        PT_BR_APP_LOCALE,
+        PT_BR_APP_LOCALE, ZH_CN_APP_LOCALE,
     };
 
     #[test]
@@ -143,6 +170,12 @@ mod tests {
         assert_eq!(normalize_app_locale("en-US"), Some(DEFAULT_APP_LOCALE));
         assert_eq!(normalize_app_locale("pt"), Some(PT_BR_APP_LOCALE));
         assert_eq!(normalize_app_locale("pt_BR.UTF-8"), Some(PT_BR_APP_LOCALE));
+        assert_eq!(normalize_app_locale("zh"), Some(ZH_CN_APP_LOCALE));
+        assert_eq!(
+            normalize_app_locale("zh_Hans_CN.UTF-8"),
+            Some(ZH_CN_APP_LOCALE)
+        );
+        assert_eq!(normalize_app_locale("zh-TW"), None);
     }
 
     #[test]
@@ -154,6 +187,10 @@ mod tests {
         assert_eq!(
             resolve_app_locale_with_system(Some("pt"), Some("en-US")),
             PT_BR_APP_LOCALE
+        );
+        assert_eq!(
+            resolve_app_locale_with_system(Some("zh-CN"), Some("en-US")),
+            ZH_CN_APP_LOCALE
         );
     }
 
@@ -179,5 +216,12 @@ mod tests {
 
         assert_eq!(strings.edit_menu, "Editar");
         assert_eq!(strings.close, "Fechar");
+    }
+    #[test]
+    fn returns_zh_cn_native_strings() {
+        let strings = native_strings("zh-CN");
+
+        assert_eq!(strings.edit_menu, "编辑");
+        assert_eq!(strings.close, "关闭");
     }
 }

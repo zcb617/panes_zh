@@ -1,4 +1,4 @@
-export const SUPPORTED_APP_LOCALES = ["en", "pt-BR"] as const;
+export const SUPPORTED_APP_LOCALES = ["en", "pt-BR", "zh-CN"] as const;
 
 export type AppLocale = (typeof SUPPORTED_APP_LOCALES)[number];
 
@@ -10,6 +10,15 @@ export function normalizeAppLocale(value?: string | null): AppLocale {
 
   if (normalized === "pt" || normalized.startsWith("pt-")) {
     return "pt-BR";
+  }
+
+  if (
+    normalized === "zh" ||
+    normalized === "zh-cn" ||
+    normalized === "zh-sg" ||
+    normalized.startsWith("zh-hans")
+  ) {
+    return "zh-CN";
   }
 
   if (normalized === "en" || normalized.startsWith("en-")) {
@@ -34,6 +43,8 @@ export function getLocaleDisplayName(locale: AppLocale): string {
   switch (locale) {
     case "pt-BR":
       return "Português (Brasil)";
+    case "zh-CN":
+      return "简体中文";
     case "en":
     default:
       return "English";

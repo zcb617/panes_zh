@@ -341,7 +341,6 @@ const MODEL_TOKEN_LABELS: Record<string, string> = {
 type CodexThreadApprovalPolicyValue =
   | "inherit"
   | "untrusted"
-  | "on-failure"
   | "on-request"
   | "never"
   | "custom";
@@ -416,11 +415,6 @@ function getCodexThreadApprovalPolicyOptions(
       value: "on-request",
       label: t("policy.onRequest"),
       description: t("policy.onRequestDescription"),
-    },
-    {
-      value: "on-failure",
-      label: t("policy.onFailure"),
-      description: t("policy.onFailureDescription"),
     },
     {
       value: "never",
@@ -785,9 +779,11 @@ function isCustomCodexApprovalPolicyValue(
 
 function readCodexThreadApprovalPolicyValue(thread: Thread | null): CodexThreadApprovalPolicyValue {
   const value = thread?.engineMetadata?.sandboxApprovalPolicy;
+  if (value === "on-failure") {
+    return "on-request";
+  }
   if (
     value === "untrusted" ||
-    value === "on-failure" ||
     value === "on-request" ||
     value === "never"
   ) {
@@ -964,7 +960,6 @@ function applyThreadExecutionPolicyPatch(
       metadata.sandboxApprovalPolicy = nextState.approvalPolicy;
     } else if (
       nextState.approvalPolicy === "untrusted" ||
-      nextState.approvalPolicy === "on-failure" ||
       nextState.approvalPolicy === "on-request" ||
       nextState.approvalPolicy === "never"
     ) {

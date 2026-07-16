@@ -1,7 +1,7 @@
 import type { EngineCapabilities } from "../../types";
 
 const CODEX_CAPABILITIES: EngineCapabilities = {
-  permissionModes: ["untrusted", "on-failure", "on-request", "never"],
+  permissionModes: ["untrusted", "on-request", "never"],
   sandboxModes: ["read-only", "workspace-write", "danger-full-access"],
   approvalDecisions: ["accept", "decline", "cancel", "accept_for_session"],
 };
