@@ -28,6 +28,7 @@ import {
   AlertTriangle,
   AtSign,
   DollarSign,
+  Puzzle,
   Plus,
   ListChecks,
   Copy,
@@ -47,6 +48,7 @@ import {
   Eye,
   Compass,
   BookOpen,
+  X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
@@ -84,7 +86,12 @@ import { recordPerfMetric } from "../../lib/perfTelemetry";
 import { isMacDesktop, usesCustomWindowFrame } from "../../lib/windowActions";
 import { MessageBlocks, shouldShowClaudeUnsupportedApproval } from "./MessageBlocks";
 import { resolveEngineCapabilities } from "./engineCapabilities";
-import { buildCodexInputItems } from "./codexInputItems";
+import { buildCodexInputItems, buildSelectedCodexInputItems } from "./codexInputItems";
+import {
+  filterClassicSlashItems,
+  findClassicSlashQuery,
+  removeClassicSlashToken,
+} from "./slashCommandMatching";
 import {
   getPlanImplementationCodingMessage,
   shouldPromptToImplementPlan,
@@ -127,6 +134,7 @@ import type {
   ApprovalResponse,
   ChatAttachment,
   ChatInputItem,
+  ChatInputReference,
   CodexApprovalsReviewer,
   CodexApp,
   CodexSkill,
@@ -144,20 +152,30 @@ const MESSAGE_VIRTUALIZATION_THRESHOLD = 40;
 const MESSAGE_ESTIMATED_ROW_HEIGHT = 220;
 const MESSAGE_ROW_GAP = 12;
 const EMPTY_CHAT_ATTACHMENTS: ChatAttachment[] = [];
+const EMPTY_CHAT_INPUT_REFERENCES: ChatInputReference[] = [];
+
+type ClassicSlashCommand = SlashCommand & {
+  reference?: ChatInputReference;
+  panel?: ActiveSlashCommand;
+};
 
 function createPendingSubmissionMessage(
   threadId: string,
   text: string,
   attachments: ChatAttachment[],
+  references: ChatInputReference[],
   planMode: boolean,
 ): Message {
-  const blocks: ContentBlock[] = attachments.map((attachment) => ({
-    type: "attachment",
-    fileName: attachment.fileName,
-    filePath: attachment.filePath,
-    sizeBytes: attachment.sizeBytes,
-    mimeType: attachment.mimeType,
-  }));
+  const blocks: ContentBlock[] = [
+    ...references.map((reference) => ({ ...reference })),
+    ...attachments.map((attachment) => ({
+      type: "attachment" as const,
+      fileName: attachment.fileName,
+      filePath: attachment.filePath,
+      sizeBytes: attachment.sizeBytes,
+      mimeType: attachment.mimeType,
+    })),
+  ];
   blocks.push({ type: "text", content: text, planMode: planMode || undefined });
 
   return {
@@ -1828,7 +1846,16 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const setWorkspaceAttachments = useChatComposerStore(
     (state) => state.setWorkspaceAttachments,
   );
+  const references = useChatComposerStore((state) =>
+    activeWorkspaceId
+      ? state.referencesByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_INPUT_REFERENCES
+      : EMPTY_CHAT_INPUT_REFERENCES,
+  );
+  const setWorkspaceReferences = useChatComposerStore(
+    (state) => state.setWorkspaceReferences,
+  );
   const sendShortcut = useChatComposerStore((state) => state.sendShortcut);
+  const chatInputMode = useChatComposerStore((state) => state.chatInputMode);
   const setComposerRuntime = useChatComposerStore((state) => state.setWorkspaceRuntime);
   const clearComposerRuntime = useChatComposerStore((state) => state.clearWorkspaceRuntime);
   const setInput = useCallback(
@@ -1860,6 +1887,30 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       );
     },
     [activeWorkspaceId, setWorkspaceAttachments],
+  );
+  const setReferences = useCallback(
+    (
+      nextReferences:
+        | ChatInputReference[]
+        | ((
+            currentReferences: ChatInputReference[],
+          ) => ChatInputReference[]),
+    ) => {
+      if (!activeWorkspaceId) {
+        return;
+      }
+
+      const currentReferences =
+        useChatComposerStore.getState().referencesByWorkspace[activeWorkspaceId] ??
+        EMPTY_CHAT_INPUT_REFERENCES;
+      setWorkspaceReferences(
+        activeWorkspaceId,
+        typeof nextReferences === "function"
+          ? nextReferences(currentReferences)
+          : nextReferences,
+      );
+    },
+    [activeWorkspaceId, setWorkspaceReferences],
   );
   const terminalWorkspaceState = useTerminalStore((s) =>
     activeWorkspaceId ? s.workspaces[activeWorkspaceId] : undefined,
@@ -1894,6 +1945,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     threadPaths: string[];
     text: string;
     attachments: ChatAttachment[];
+    references: ChatInputReference[];
     inputItems: ChatInputItem[] | null;
     planMode: boolean;
     engineId: string;
@@ -2169,9 +2221,17 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }, [codexReferenceRoot]);
 
   const resolveCodexInputItems = useCallback(
-    async (message: string, engineId: string): Promise<ChatInputItem[] | undefined> => {
+    async (
+      message: string,
+      engineId: string,
+      references: ChatInputReference[] = EMPTY_CHAT_INPUT_REFERENCES,
+    ): Promise<ChatInputItem[] | undefined> => {
       if (engineId !== "codex") {
         return undefined;
+      }
+
+      if (references.length > 0 || chatInputMode === "classic") {
+        return buildSelectedCodexInputItems(message, references);
       }
 
       let skills = codexSkills;
@@ -2199,6 +2259,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       return buildCodexInputItems(message, skills, apps);
     },
     [
+      chatInputMode,
       codexApps,
       codexReferenceCatalogState.appsLoaded,
       codexReferenceCatalogState.skillsLoaded,
@@ -3966,26 +4027,196 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     ],
   );
 
+  const classicSlashCommands = useMemo<ClassicSlashCommand[]>(() => {
+    const commandGroup = t("slashCommands.groups.commands");
+    const skillGroup = t("slashCommands.groups.skills");
+    const appGroup = t("slashCommands.groups.apps");
+    const pluginGroup = t("slashCommands.groups.plugins");
+    const mcpGroup = t("slashCommands.groups.mcp");
+    const commandItems = slashCommands
+      .filter((command) => command.id !== "skills" && command.id !== "mcp")
+      .map((command) => ({ ...command, group: commandGroup }));
+    const skillItems = isCodexEngine
+      ? codexSkills.map((skill) => ({
+          id: `skill:${skill.path}`,
+          name: skill.name,
+          description: skill.description || skill.scope,
+          icon: Sparkles,
+          group: skillGroup,
+          searchTerms: [skill.path, skill.scope],
+          reference: {
+            type: "skill" as const,
+            name: skill.name,
+            path: skill.path,
+          },
+        }))
+      : [];
+    const appItems = isCodexEngine
+      ? codexApps.map((app) => ({
+          id: `app:${app.id}`,
+          name: app.name,
+          description: app.description || app.id,
+          icon: AtSign,
+          group: appGroup,
+          searchTerms: [app.id],
+          reference: {
+            type: "mention" as const,
+            name: app.name,
+            path: `app://${app.id}`,
+          },
+        }))
+      : [];
+    const pluginItems = isCodexEngine
+      ? (codexProtocolDiagnostics?.pluginMarketplaces ?? []).flatMap((marketplace) =>
+          marketplace.plugins.map((plugin) => ({
+            id: `plugin:${marketplace.path}:${plugin.id}`,
+            name: plugin.name,
+            description:
+              plugin.description || plugin.capabilities.join(", ") || marketplace.name,
+            icon: Puzzle,
+            group: pluginGroup,
+            searchTerms: [
+              plugin.id,
+              plugin.developerName ?? "",
+              marketplace.name,
+              ...plugin.capabilities,
+            ],
+            panel: { type: "plugins" as const },
+          })),
+        )
+      : [];
+    const mcpItems = isCodexEngine
+      ? (codexProtocolDiagnostics?.mcpServers ?? []).map((server) => ({
+          id: `mcp:${server.name}`,
+          name: server.name,
+          description: `${server.toolCount} tools · ${server.resourceCount} resources`,
+          icon: Server,
+          group: mcpGroup,
+          searchTerms: [server.authStatus],
+          panel: { type: "mcp" as const },
+        }))
+      : isOpenCodeEngine
+        ? (openCodeCatalog?.mcpServers ?? []).map((server) => ({
+            id: `mcp:${server.name}`,
+            name: server.name,
+            description: server.detail ?? server.status,
+            icon: Server,
+            group: mcpGroup,
+            searchTerms: [server.status],
+            panel: { type: "mcp" as const },
+          }))
+        : [];
+
+    return [
+      ...commandItems,
+      ...skillItems,
+      ...appItems,
+      ...pluginItems,
+      ...mcpItems,
+    ];
+  }, [
+    codexApps,
+    codexProtocolDiagnostics?.mcpServers,
+    codexProtocolDiagnostics?.pluginMarketplaces,
+    codexSkills,
+    isCodexEngine,
+    isOpenCodeEngine,
+    openCodeCatalog?.mcpServers,
+    slashCommands,
+    t,
+  ]);
+
+  const displayedSlashCommands =
+    chatInputMode === "classic" ? classicSlashCommands : slashCommands;
+
   const filteredSlashCommands = useMemo(() => {
-    if (!slashMenuQuery) return slashCommands;
+    if (chatInputMode === "classic") {
+      return filterClassicSlashItems(displayedSlashCommands, slashMenuQuery);
+    }
+
+    if (!slashMenuQuery) return displayedSlashCommands;
     const q = slashMenuQuery.toLowerCase();
-    return slashCommands.filter(
+    return displayedSlashCommands.filter(
       (c) =>
         c.name.toLowerCase().startsWith(q) ||
         c.id.startsWith(q) ||
         c.description.toLowerCase().includes(q),
     );
-  }, [slashCommands, slashMenuQuery]);
+  }, [chatInputMode, displayedSlashCommands, slashMenuQuery]);
 
   function handleSlashCommandSelect(commandId: string) {
     setSlashMenuOpen(false);
     setSlashMenuQuery("");
 
-    const cmd = slashCommands.find((c) => c.id === commandId);
+    const cmd = displayedSlashCommands.find((c) => c.id === commandId);
     if (!cmd || cmd.disabled) return;
+
+    const classicCommand =
+      chatInputMode === "classic"
+        ? classicSlashCommands.find((command) => command.id === commandId)
+        : null;
+    const selectedReference = classicCommand?.reference;
+    if (selectedReference) {
+      const cursorPosition = inputRef.current?.selectionStart ?? input.length;
+      const replacement = removeClassicSlashToken(input, cursorPosition);
+      setReferences((currentReferences) =>
+        currentReferences.some(
+          (reference) =>
+            reference.type === selectedReference.type &&
+            reference.path === selectedReference.path,
+        )
+          ? currentReferences
+          : [...currentReferences, selectedReference],
+      );
+      setInput(replacement.value);
+      requestAnimationFrame(() => {
+        const element = inputRef.current;
+        element?.focus();
+        element?.setSelectionRange(
+          replacement.cursorPosition,
+          replacement.cursorPosition,
+        );
+      });
+      return;
+    }
+
+    const commandPanel = classicCommand?.panel;
+    if (commandPanel) {
+      const cursorPosition = inputRef.current?.selectionStart ?? input.length;
+      const replacement = removeClassicSlashToken(input, cursorPosition);
+      setInput(replacement.value);
+      setActiveCommandPanel(commandPanel);
+      setCommandPanelError(null);
+      requestAnimationFrame(() => {
+        const element = inputRef.current;
+        element?.focus();
+        element?.setSelectionRange(
+          replacement.cursorPosition,
+          replacement.cursorPosition,
+        );
+      });
+      return;
+    }
 
     if (commandId.startsWith("opencode-command:")) {
       const commandName = commandId.slice("opencode-command:".length);
+      if (chatInputMode === "classic") {
+        const cursorPosition = inputRef.current?.selectionStart ?? input.length;
+        const slashPosition = input.slice(0, cursorPosition).lastIndexOf("/");
+        if (slashPosition >= 0) {
+          const suffix = input.slice(cursorPosition);
+          const insertedCommand = `/${commandName}${/^\s/.test(suffix) ? "" : " "}`;
+          const nextInput = `${input.slice(0, slashPosition)}${insertedCommand}${suffix}`;
+          setInput(nextInput);
+          requestAnimationFrame(() => {
+            const element = inputRef.current;
+            element?.focus();
+            const nextCursor = slashPosition + insertedCommand.length;
+            element?.setSelectionRange(nextCursor, nextCursor);
+          });
+          return;
+        }
+      }
       setInput(`/${commandName} `);
       requestAnimationFrame(() => inputRef.current?.focus());
       return;
@@ -4087,11 +4318,13 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }
 
   function handleSlashDetection(value: string, cursorPos: number) {
-    const textBeforeCursor = value.slice(0, cursorPos);
-    const slashMatch = /(?:^|\s)(\/([a-z]*))$/.exec(textBeforeCursor);
-    if (slashMatch) {
+    const slashQuery =
+      chatInputMode === "classic"
+        ? findClassicSlashQuery(value, cursorPos)
+        : /(?:^|\s)(\/([a-z]*))$/.exec(value.slice(0, cursorPos))?.[2] ?? null;
+    if (slashQuery !== null) {
       setSlashMenuOpen(true);
-      setSlashMenuQuery(slashMatch[2] ?? "");
+      setSlashMenuQuery(slashQuery);
       setSlashMenuActiveIndex(0);
     } else if (slashMenuOpen) {
       setSlashMenuOpen(false);
@@ -4103,6 +4336,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     const preflightStartedAt = performance.now();
     const text = input.trim();
     const currentAttachments = [...attachments];
+    const currentReferences = [...references];
 
     if (streaming) {
       if (!canSteerActiveTurn) {
@@ -4114,7 +4348,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         return false;
       }
 
-      const inputItems = await resolveCodexInputItems(text, "codex");
+      const inputItems = await resolveCodexInputItems(text, "codex", currentReferences);
       const steered = await steer(text, {
         threadIdOverride: activeThreadId,
         attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
@@ -4133,6 +4367,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         inputLiveDraftRef.current = "";
         setInput("");
         setAttachments([]);
+        setReferences([]);
       }
       return steered;
     }
@@ -4199,7 +4434,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       }
     }
 
-    const inputItems = await resolveCodexInputItems(text, submitEngineId);
+    const inputItems = await resolveCodexInputItems(text, submitEngineId, currentReferences);
 
     const currentThread =
       useThreadStore.getState().threads.find((thread) => thread.id === targetThreadId) ??
@@ -4226,6 +4461,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
           threadPaths: availableRepoPaths,
           text,
           attachments: [...attachments],
+          references: currentReferences,
           inputItems: inputItems ?? null,
           planMode: submitPlanMode,
           engineId: submitEngineId,
@@ -4300,6 +4536,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       inputLiveDraftRef.current = "";
       setInput("");
       setAttachments([]);
+      setReferences([]);
     }
     return sent;
   }
@@ -4312,12 +4549,14 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
 
     const submittedText = input.trim();
     const submittedAttachments = [...attachments];
+    const submittedReferences = [...references];
     if (!streaming) {
       setPendingSubmission(
         createPendingSubmissionMessage(
           threadId ?? activeThread?.id ?? "pending",
           submittedText,
           submittedAttachments,
+          submittedReferences,
           planMode,
         ),
       );
@@ -4328,15 +4567,18 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     const submission = submitMessage();
     setInput("");
     setAttachments([]);
+    setReferences([]);
     try {
       const accepted = await submission;
       if (!accepted) {
         setInput(submittedText);
         setAttachments(submittedAttachments);
+        setReferences(submittedReferences);
       }
     } catch (error) {
       setInput(submittedText);
       setAttachments(submittedAttachments);
+      setReferences(submittedReferences);
       throw error;
     } finally {
       setPendingSubmission(null);
@@ -4353,6 +4595,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         prompt.threadId,
         prompt.text,
         prompt.attachments,
+        prompt.references,
         prompt.planMode,
       ),
     );
@@ -4374,6 +4617,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       }))) {
         setInput(prompt.text);
         setAttachments(prompt.attachments);
+        setReferences(prompt.references);
         return;
       }
       if (!(await applyOpenCodeConfigToThread(prompt.threadId, {
@@ -4382,6 +4626,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       }))) {
         setInput(prompt.text);
         setAttachments(prompt.attachments);
+        setReferences(prompt.references);
         return;
       }
       setThreadLastModelLocal(prompt.threadId, prompt.modelId);
@@ -4399,17 +4644,20 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       if (!sent) {
         setInput(prompt.text);
         setAttachments(prompt.attachments);
+        setReferences(prompt.references);
         return;
       }
 
       pendingPlanImplementationThreadIdRef.current = promptPlanMode ? prompt.threadId : null;
       setInput("");
       setAttachments([]);
+      setReferences([]);
 
       await refreshThreads(prompt.workspaceId);
     } catch {
       setInput(prompt.text);
       setAttachments(prompt.attachments);
+      setReferences(prompt.references);
     } finally {
       setPendingSubmission(null);
     }
@@ -4452,6 +4700,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
           threadPaths: availableRepoPaths,
           text: implementationMessage,
           attachments: [],
+          references: [],
           inputItems: null,
           planMode: false,
           engineId: prompt.engineId,
@@ -4543,6 +4792,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     if (prompt) {
       setInput(prompt.text);
       setAttachments(prompt.attachments);
+      setReferences(prompt.references);
     }
     setPendingSubmission(null);
     setWorkspaceOptInPrompt(null);
@@ -5987,9 +6237,45 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
               />
             ) : (
               <>
-                {/* Attachment chips */}
-                {attachments.length > 0 && (
+                {/* Composer references and attachments */}
+                {(references.length > 0 || attachments.length > 0) && (
                   <div className="chat-attachments-bar">
+                    {references.map((reference) => (
+                      <span
+                        key={`${reference.type}:${reference.path}`}
+                        className={`chat-attachment-chip ${
+                          reference.type === "skill"
+                            ? "chat-attachment-chip--skill"
+                            : "chat-attachment-chip--mention"
+                        }`}
+                      >
+                        {reference.type === "skill" ? (
+                          <DollarSign size={12} />
+                        ) : (
+                          <AtSign size={12} />
+                        )}
+                        <span className="chat-attachment-chip-name">
+                          {reference.name}
+                        </span>
+                        <button
+                          type="button"
+                          className="chat-attachment-chip-remove"
+                          onClick={() =>
+                            setReferences((currentReferences) =>
+                              currentReferences.filter(
+                                (candidate) =>
+                                  candidate.type !== reference.type ||
+                                  candidate.path !== reference.path,
+                              ),
+                            )
+                          }
+                          title={t("attachments.remove")}
+                          aria-label={t("attachments.remove")}
+                        >
+                          <X size={10} />
+                        </button>
+                      </span>
+                    ))}
                     {attachments.map((attachment) => {
                       return (
                         <AttachmentChip
@@ -6023,6 +6309,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                         ? codexSkills
                         : (codexProtocolDiagnostics?.skills ?? [])
                     }
+                    pluginMarketplaces={codexProtocolDiagnostics?.pluginMarketplaces}
                     openCodeAgents={openCodeCatalog?.agents}
                     openCodeCommands={openCodeCatalog?.commands}
                     openCodeMcpServers={

@@ -1,4 +1,4 @@
-import type { ChatInputItem, CodexApp, CodexSkill } from "../../types";
+import type { ChatInputItem, ChatInputReference, CodexApp, CodexSkill } from "../../types";
 
 const TOKEN_PATTERN = /\$([A-Za-z0-9._-]+)/g;
 
@@ -43,6 +43,26 @@ function pushTextItem(items: ChatInputItem[], text: string) {
     return;
   }
   items.push({ type: "text", text });
+}
+
+export function buildSelectedCodexInputItems(
+  message: string,
+  references: ChatInputReference[],
+): ChatInputItem[] {
+  const seen = new Set<string>();
+  const selectedReferences = references.filter((reference) => {
+    const key = `${reference.type}:${reference.path}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+
+  return [
+    ...selectedReferences.map((reference) => ({ ...reference })),
+    { type: "text", text: message },
+  ];
 }
 
 export function buildCodexInputItems(

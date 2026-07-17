@@ -4,6 +4,7 @@ import {
   FlaskConical,
   GitBranch,
   Minimize2,
+  Puzzle,
   RefreshCw,
   RotateCcw,
   Scissors,
@@ -19,6 +20,7 @@ import { ipc } from "../../lib/ipc";
 import type {
   CodexExperimentalFeature,
   CodexMcpServer,
+  CodexPluginMarketplace,
   CodexReviewDelivery,
   CodexReviewTarget,
   CodexSkill,
@@ -42,6 +44,7 @@ export type ActiveSlashCommand =
   | { type: "fast" }
   | { type: "personality" }
   | { type: "skills" }
+  | { type: "plugins" }
   | { type: "agents" }
   | { type: "commands" }
   | { type: "sessions" }
@@ -67,6 +70,7 @@ interface ChatCommandPanelProps {
   personalitySupported?: boolean;
   /** Data for info panels */
   skills?: CodexSkill[];
+  pluginMarketplaces?: CodexPluginMarketplace[];
   openCodeAgents?: OpenCodeAgent[];
   openCodeCommands?: OpenCodeCommand[];
   openCodeMcpServers?: OpenCodeMcpServer[];
@@ -91,6 +95,7 @@ export function ChatCommandPanel({
   currentPersonality,
   personalitySupported,
   skills,
+  pluginMarketplaces,
   openCodeAgents,
   openCodeCommands,
   openCodeMcpServers,
@@ -191,6 +196,28 @@ export function ChatCommandPanel({
             detail: s.description || s.scope,
             enabled: s.enabled,
           }))}
+          onDismiss={onDismiss}
+        />
+      );
+    case "plugins":
+      return (
+        <InfoListPanel
+          icon={Puzzle}
+          title={t("slashCommands.panels.plugins.title")}
+          emptyLabel={t("slashCommands.panels.plugins.empty")}
+          items={(pluginMarketplaces ?? []).flatMap((marketplace) =>
+            marketplace.plugins.map((plugin) => ({
+              name: plugin.name,
+              detail: [
+                plugin.description,
+                plugin.capabilities.length > 0 ? plugin.capabilities.join(", ") : null,
+                marketplace.name,
+              ]
+                .filter(Boolean)
+                .join(" · "),
+              enabled: plugin.enabled && plugin.installed,
+            })),
+          )}
           onDismiss={onDismiss}
         />
       );

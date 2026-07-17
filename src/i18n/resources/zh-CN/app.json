@@ -620,6 +620,12 @@
       "composerDescription": "选择在输入对话消息时，Enter 键的行为。",
       "sendShortcut": "发送快捷键",
       "sendShortcutDescription": "选择 Enter 是发送消息还是插入换行。Ctrl/Cmd+Enter 始终发送消息。",
+      "inputMode": "输入模式",
+      "inputModeDescription": "默认保留当前输入方式；经典使用 Codex、Claude、OpenCode 常见的 / 搜索习惯。",
+      "inputModes": {
+        "default": "默认",
+        "classic": "经典"
+      },
       "shortcuts": {
         "shiftEnter": "Enter 换行 · Shift+Enter 发送",
         "enter": "Enter 发送 · Shift+Enter 换行"

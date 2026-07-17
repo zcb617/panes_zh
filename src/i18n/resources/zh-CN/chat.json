@@ -606,11 +606,23 @@
     "contextRingTitle": "剩余上下文：{{percent}}。打开用量限制。"
   },
   "slashCommands": {
+    "groups": {
+      "commands": "命令",
+      "skills": "技能",
+      "apps": "App",
+      "plugins": "插件",
+      "mcp": "MCP"
+    },
     "panels": {
       "skills": {
         "title": "技能",
         "empty": "此运行时未加载技能。",
         "description": "查看已加载的 Codex 技能"
+      },
+      "plugins": {
+        "title": "插件",
+        "empty": "此运行时未加载插件。",
+        "description": "查看已启用的 Codex 插件"
       },
       "mcp": {
         "title": "MCP 服务器",

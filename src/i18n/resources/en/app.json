@@ -621,6 +621,12 @@
       "composerDescription": "Choose how Enter behaves while you write a chat message.",
       "sendShortcut": "Send shortcut",
       "sendShortcutDescription": "Choose whether Enter sends the message or adds a new line. Ctrl/Cmd+Enter always sends the message.",
+      "inputMode": "Input mode",
+      "inputModeDescription": "Default keeps the current behavior; Classic uses the familiar / search pattern from Codex, Claude, and OpenCode.",
+      "inputModes": {
+        "default": "Default",
+        "classic": "Classic"
+      },
       "shortcuts": {
         "shiftEnter": "New line with Enter · Send with Shift+Enter",
         "enter": "Send with Enter · New line with Shift+Enter"

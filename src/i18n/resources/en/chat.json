@@ -606,11 +606,23 @@
     "contextRingTitle": "Context left: {{percent}}. Open usage limits."
   },
   "slashCommands": {
+    "groups": {
+      "commands": "Commands",
+      "skills": "Skills",
+      "apps": "Apps",
+      "plugins": "Plugins",
+      "mcp": "MCP"
+    },
     "panels": {
       "skills": {
         "title": "Skills",
         "empty": "No skills loaded on this runtime.",
         "description": "View loaded Codex skills"
+      },
+      "plugins": {
+        "title": "Plugins",
+        "empty": "No plugins are loaded on this runtime.",
+        "description": "View enabled Codex plugins"
       },
       "mcp": {
         "title": "MCP servers",

@@ -1,11 +1,14 @@
 import { create } from "zustand";
 import {
+  DEFAULT_CHAT_INPUT_MODE,
   DEFAULT_CHAT_INPUT_SEND_SHORTCUT,
+  isChatInputMode,
   isChatInputSendShortcut,
+  type ChatInputMode,
   type ChatInputSendShortcut,
 } from "../lib/chatInputSettings";
 import type { ComposerRuntimeSnapshot } from "../lib/newThreadRuntime";
-import type { ChatAttachment } from "../types";
+import type { ChatAttachment, ChatInputReference } from "../types";
 import {
   DEFAULT_LINK_OPEN_GESTURE,
   isLinkOpenGesture,
@@ -13,6 +16,8 @@ import {
 } from "../lib/linkOpenSettings";
 
 const CHAT_INPUT_SEND_SHORTCUT_STORAGE_KEY = "panes:chatInputSendShortcut";
+
+const CHAT_INPUT_MODE_STORAGE_KEY = "panes:chatInputMode";
 
 const LINK_OPEN_GESTURE_STORAGE_KEY = "panes:linkOpenGesture";
 function readChatInputSendShortcut(): ChatInputSendShortcut {
@@ -31,6 +36,25 @@ function persistChatInputSendShortcut(sendShortcut: ChatInputSendShortcut): void
     localStorage.setItem(CHAT_INPUT_SEND_SHORTCUT_STORAGE_KEY, sendShortcut);
   } catch {
     // The shortcut still applies to this session if storage is unavailable.
+  }
+}
+
+function readChatInputMode(): ChatInputMode {
+  try {
+    const stored = localStorage.getItem(CHAT_INPUT_MODE_STORAGE_KEY);
+    return stored && isChatInputMode(stored)
+      ? stored
+      : DEFAULT_CHAT_INPUT_MODE;
+  } catch {
+    return DEFAULT_CHAT_INPUT_MODE;
+  }
+}
+
+function persistChatInputMode(chatInputMode: ChatInputMode): void {
+  try {
+    localStorage.setItem(CHAT_INPUT_MODE_STORAGE_KEY, chatInputMode);
+  } catch {
+    // The mode still applies to this session if storage is unavailable.
   }
 }
 
@@ -57,7 +81,9 @@ interface ChatComposerState {
   runtimeByWorkspace: Record<string, ComposerRuntimeSnapshot>;
   draftByWorkspace: Record<string, string>;
   attachmentsByWorkspace: Record<string, ChatAttachment[]>;
+  referencesByWorkspace: Record<string, ChatInputReference[]>;
   sendShortcut: ChatInputSendShortcut;
+  chatInputMode: ChatInputMode;
   linkOpenGesture: LinkOpenGesture;
   setWorkspaceRuntime: (
     workspaceId: string,
@@ -68,7 +94,13 @@ interface ChatComposerState {
   clearWorkspaceDraft: (workspaceId: string) => void;
   setWorkspaceAttachments: (workspaceId: string, attachments: ChatAttachment[]) => void;
   clearWorkspaceAttachments: (workspaceId: string) => void;
+  setWorkspaceReferences: (
+    workspaceId: string,
+    references: ChatInputReference[],
+  ) => void;
+  clearWorkspaceReferences: (workspaceId: string) => void;
   setSendShortcut: (sendShortcut: ChatInputSendShortcut) => void;
+  setChatInputMode: (chatInputMode: ChatInputMode) => void;
   setLinkOpenGesture: (linkOpenGesture: LinkOpenGesture) => void;
 }
 
@@ -76,7 +108,9 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
   runtimeByWorkspace: {},
   draftByWorkspace: {},
   attachmentsByWorkspace: {},
+  referencesByWorkspace: {},
   sendShortcut: readChatInputSendShortcut(),
+  chatInputMode: readChatInputMode(),
   linkOpenGesture: readLinkOpenGesture(),
   setWorkspaceRuntime: (workspaceId, runtime) =>
     set((state) => ({
@@ -128,9 +162,31 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
       const { [workspaceId]: _removed, ...rest } = state.attachmentsByWorkspace;
       return { attachmentsByWorkspace: rest };
     }),
+  setWorkspaceReferences: (workspaceId, references) =>
+    set((state) => {
+      if (references.length === 0) {
+        const { [workspaceId]: _removed, ...rest } = state.referencesByWorkspace;
+        return { referencesByWorkspace: rest };
+      }
+      return {
+        referencesByWorkspace: {
+          ...state.referencesByWorkspace,
+          [workspaceId]: [...references],
+        },
+      };
+    }),
+  clearWorkspaceReferences: (workspaceId) =>
+    set((state) => {
+      const { [workspaceId]: _removed, ...rest } = state.referencesByWorkspace;
+      return { referencesByWorkspace: rest };
+    }),
   setSendShortcut: (sendShortcut) => {
     persistChatInputSendShortcut(sendShortcut);
     set({ sendShortcut });
+  },
+  setChatInputMode: (chatInputMode) => {
+    persistChatInputMode(chatInputMode);
+    set({ chatInputMode });
   },
   setLinkOpenGesture: (linkOpenGesture) => {
     persistLinkOpenGesture(linkOpenGesture);

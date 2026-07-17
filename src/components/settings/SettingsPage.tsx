@@ -30,6 +30,7 @@ import {
   Sun,
   TerminalSquare,
   Clock3,
+  SquareCode,
   Volume2,
   Zap,
 } from "lucide-react";
@@ -61,7 +62,7 @@ import { toast } from "../../stores/toastStore";
 import { useUiStore, type SettingsSection } from "../../stores/uiStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
-import { isChatInputSendShortcut } from "../../lib/chatInputSettings";
+import { isChatInputMode, isChatInputSendShortcut } from "../../lib/chatInputSettings";
 import { getHarnessIcon } from "../shared/HarnessLogos";
 import { isLinkOpenGesture } from "../../lib/linkOpenSettings";
 import { Dropdown } from "../shared/Dropdown";
@@ -187,6 +188,8 @@ export function SettingsPage() {
   const setThemePreference = useThemeStore((state) => state.setPreference);
   const chatSendShortcut = useChatComposerStore((state) => state.sendShortcut);
   const setChatSendShortcut = useChatComposerStore((state) => state.setSendShortcut);
+  const chatInputMode = useChatComposerStore((state) => state.chatInputMode);
+  const setChatInputMode = useChatComposerStore((state) => state.setChatInputMode);
   const updateStatus = useUpdateStore((state) => state.status);
   const linkOpenGesture = useChatComposerStore((state) => state.linkOpenGesture);
   const setLinkOpenGesture = useChatComposerStore((state) => state.setLinkOpenGesture);
@@ -780,6 +783,31 @@ export function SettingsPage() {
                     onChange={(value) => {
                       if (isChatInputSendShortcut(value)) {
                         setChatSendShortcut(value);
+                      }
+                    }}
+                    triggerStyle={{ minWidth: 270, height: 32 }}
+                  />
+                </SettingsRow>
+                <SettingsRow
+                  icon={<SquareCode size={17} />}
+                  title={t("app:settingsPage.chat.inputMode")}
+                  description={t("app:settingsPage.chat.inputModeDescription")}
+                >
+                  <Dropdown
+                    value={chatInputMode}
+                    options={[
+                      {
+                        value: "default",
+                        label: t("app:settingsPage.chat.inputModes.default"),
+                      },
+                      {
+                        value: "classic",
+                        label: t("app:settingsPage.chat.inputModes.classic"),
+                      },
+                    ]}
+                    onChange={(value) => {
+                      if (isChatInputMode(value)) {
+                        setChatInputMode(value);
                       }
                     }}
                     triggerStyle={{ minWidth: 270, height: 32 }}

@@ -8188,6 +8188,21 @@ button.chat-context-section:hover {
   max-height: 300px;
 }
 
+.slash-menu-group {
+  padding: 7px 10px 4px;
+  color: var(--text-3);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.slash-menu-group:not(:first-child) {
+  margin-top: 3px;
+  padding-top: 8px;
+  border-top: 1px solid var(--wash-06);
+}
+
 .slash-menu-item {
   display: flex;
   align-items: center;

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { LucideIcon } from "lucide-react";
 
@@ -7,6 +7,8 @@ export interface SlashCommand {
   name: string;
   description: string;
   icon: LucideIcon;
+  group?: string;
+  searchTerms?: string[];
   codexOnly?: boolean;
   disabled?: boolean;
 }
@@ -84,29 +86,37 @@ export function ChatSlashMenu({
       {commands.map((cmd, i) => {
         const Icon = cmd.icon;
         const isActive = i === activeIndex;
+        const previousGroup = i > 0 ? commands[i - 1]?.group : undefined;
+        const showGroupHeading = Boolean(cmd.group && cmd.group !== previousGroup);
         return (
-          <button
-            key={cmd.id}
-            type="button"
-            data-slash-index={i}
-            className={`slash-menu-item${isActive ? " slash-menu-item-active" : ""}${cmd.disabled ? " slash-menu-item-disabled" : ""}`}
-            onPointerEnter={() => onActiveChange(i)}
-            onClick={() => {
-              if (!cmd.disabled) onSelect(cmd.id);
-            }}
-            disabled={cmd.disabled}
-          >
-            <span className="slash-menu-item-icon">
-              <Icon size={14} />
-            </span>
-            <span className="slash-menu-item-text">
-              <span className="slash-menu-item-name">{cmd.name[0].toUpperCase() + cmd.name.slice(1)}</span>
-              <span className="slash-menu-item-desc">{cmd.description}</span>
-            </span>
-            {cmd.codexOnly && (
-              <span className="slash-menu-item-badge">Codex</span>
+          <Fragment key={cmd.id}>
+            {showGroupHeading && (
+              <div className="slash-menu-group">{cmd.group}</div>
             )}
-          </button>
+            <button
+              type="button"
+              data-slash-index={i}
+              className={`slash-menu-item${isActive ? " slash-menu-item-active" : ""}${cmd.disabled ? " slash-menu-item-disabled" : ""}`}
+              onPointerEnter={() => onActiveChange(i)}
+              onClick={() => {
+                if (!cmd.disabled) onSelect(cmd.id);
+              }}
+              disabled={cmd.disabled}
+            >
+              <span className="slash-menu-item-icon">
+                <Icon size={14} />
+              </span>
+              <span className="slash-menu-item-text">
+                <span className="slash-menu-item-name">
+                  {cmd.name[0].toUpperCase() + cmd.name.slice(1)}
+                </span>
+                <span className="slash-menu-item-desc">{cmd.description}</span>
+              </span>
+              {cmd.codexOnly && (
+                <span className="slash-menu-item-badge">Codex</span>
+              )}
+            </button>
+          </Fragment>
         );
       })}
     </div>,

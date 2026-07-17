@@ -1303,6 +1303,8 @@ export type ChatInputItem =
       path: string;
     };
 
+export type ChatInputReference = Exclude<ChatInputItem, { type: "text" }>;
+
 // ── Context Usage ───────────────────────────────────────────────────
 
 export interface ContextUsage {

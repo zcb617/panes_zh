@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCodexInputItems } from "./codexInputItems";
+import { buildCodexInputItems, buildSelectedCodexInputItems } from "./codexInputItems";
 
 describe("buildCodexInputItems", () => {
   it("converts matching $skill and $app tokens into typed input items", () => {
@@ -58,6 +58,20 @@ describe("buildCodexInputItems", () => {
     ).toEqual([
       { type: "text", text: "Keep $unknown and use " },
       { type: "skill", name: "lint", path: "/skills/lint" },
+    ]);
+  });
+
+  it("prepends classic picker references and ignores duplicate selections", () => {
+    expect(
+      buildSelectedCodexInputItems("Run the checks", [
+        { type: "skill", name: "lint", path: "/skills/lint" },
+        { type: "mention", name: "Docs", path: "app://docs" },
+        { type: "skill", name: "lint", path: "/skills/lint" },
+      ]),
+    ).toEqual([
+      { type: "skill", name: "lint", path: "/skills/lint" },
+      { type: "mention", name: "Docs", path: "app://docs" },
+      { type: "text", text: "Run the checks" },
     ]);
   });
 });

@@ -606,11 +606,23 @@
     "contextRingTitle": "Contexto restante: {{percent}}. Abrir limites de uso."
   },
   "slashCommands": {
+    "groups": {
+      "commands": "Comandos",
+      "skills": "Skills",
+      "apps": "Apps",
+      "plugins": "Plugins",
+      "mcp": "MCP"
+    },
     "panels": {
       "skills": {
         "title": "Skills",
         "empty": "Nenhuma skill carregada neste runtime.",
         "description": "Ver skills carregadas do Codex"
+      },
+      "plugins": {
+        "title": "Plugins",
+        "empty": "Nenhum plugin foi carregado neste runtime.",
+        "description": "Ver plugins Codex habilitados"
       },
       "mcp": {
         "title": "Servidores MCP",
