@@ -83,6 +83,8 @@ import {
   getWorkspacePaneLeafIdFromEventTarget,
   navigateLinkTarget,
 } from "../../lib/fileLinkNavigation";
+import { shouldOpenLink } from "../../lib/linkOpenSettings";
+import { useChatComposerStore } from "../../stores/chatComposerStore";
 interface Props {
   blocks?: ContentBlock[];
   status?: MessageStatus;
@@ -158,13 +160,14 @@ function handlePlainTextLinkClick(
   }
 
   event.preventDefault();
-  if (!event.shiftKey) {
+  const linkOpenGesture = useChatComposerStore.getState().linkOpenGesture;
+  if (!shouldOpenLink(event.shiftKey, linkOpenGesture)) {
     return;
   }
 
   event.stopPropagation();
   void navigateLinkTarget(target, {
-    shiftKey: true,
+    shiftKey: event.shiftKey,
     sourceLeafId: getWorkspacePaneLeafIdFromEventTarget(event.currentTarget),
   });
 }

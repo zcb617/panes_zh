@@ -540,6 +540,7 @@
     "nav": {
       "overview": "Overview",
       "appearance": "Appearance",
+      "chat": "Chat",
       "terminal": "Terminal",
       "notifications": "Notifications",
       "usage": "Usage limits",
@@ -554,6 +555,10 @@
       "appearance": {
         "title": "Appearance",
         "description": "Choose how Panes looks and which language it uses."
+      },
+      "chat": {
+        "title": "Chat",
+        "description": "Configure message composition and send shortcuts."
       },
       "terminal": {
         "title": "Terminal",
@@ -610,6 +615,24 @@
       "interfaceDescription": "Theme changes apply to chat, terminal, Git, and editor surfaces.",
       "themeDescription": "Use a fixed theme or follow the operating system.",
       "languageDescription": "Used across navigation, dialogs, and status messages."
+    },
+    "chat": {
+      "composer": "Message composition",
+      "composerDescription": "Choose how Enter behaves while you write a chat message.",
+      "sendShortcut": "Send shortcut",
+      "sendShortcutDescription": "Choose whether Enter sends the message or adds a new line. Ctrl/Cmd+Enter always sends the message.",
+      "shortcuts": {
+        "shiftEnter": "New line with Enter · Send with Shift+Enter",
+        "enter": "Send with Enter · New line with Shift+Enter"
+      },
+      "linkOpening": "Link opening",
+      "linkOpeningDescription": "Control how links in chat and the terminal are opened.",
+      "linkOpenGesture": "Open shortcut",
+      "linkOpenGestureDescription": "Choose between clicking directly and Shift-clicking.",
+      "linkOpenGestures": {
+        "shiftClick": "Open with Shift-click",
+        "click": "Open with a click"
+      }
     },
     "usage": {
       "providerLimits": "Connected provider limits",

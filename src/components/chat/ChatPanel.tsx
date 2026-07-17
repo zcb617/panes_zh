@@ -143,6 +143,7 @@ import type {
 const MESSAGE_VIRTUALIZATION_THRESHOLD = 40;
 const MESSAGE_ESTIMATED_ROW_HEIGHT = 220;
 const MESSAGE_ROW_GAP = 12;
+const EMPTY_CHAT_ATTACHMENTS: ChatAttachment[] = [];
 
 function createPendingSubmissionMessage(
   threadId: string,
@@ -1650,14 +1651,12 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const renderStartedAtRef = useRef(performance.now());
   renderStartedAtRef.current = performance.now();
 
-  const [input, setInput] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [pendingSubmission, setPendingSubmission] = useState<Message | null>(null);
   const isSubmittingRef = useRef(false);
   const inputHistoryRef = useRef<string[]>([]);
   const inputHistCursorRef = useRef(-1);
   const inputLiveDraftRef = useRef("");
-  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [isFileDropOver, setIsFileDropOver] = useState(false);
   const [planMode, setPlanMode] = useState(false);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
@@ -1817,8 +1816,51 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     })),
   );
   const gitStatus = useGitStore((s) => s.status);
+  const input = useChatComposerStore((state) =>
+    activeWorkspaceId ? state.draftByWorkspace[activeWorkspaceId] ?? "" : "",
+  );
+  const setWorkspaceDraft = useChatComposerStore((state) => state.setWorkspaceDraft);
+  const attachments = useChatComposerStore((state) =>
+    activeWorkspaceId
+      ? state.attachmentsByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_ATTACHMENTS
+      : EMPTY_CHAT_ATTACHMENTS,
+  );
+  const setWorkspaceAttachments = useChatComposerStore(
+    (state) => state.setWorkspaceAttachments,
+  );
+  const sendShortcut = useChatComposerStore((state) => state.sendShortcut);
   const setComposerRuntime = useChatComposerStore((state) => state.setWorkspaceRuntime);
   const clearComposerRuntime = useChatComposerStore((state) => state.clearWorkspaceRuntime);
+  const setInput = useCallback(
+    (draft: string) => {
+      if (activeWorkspaceId) {
+        setWorkspaceDraft(activeWorkspaceId, draft);
+      }
+    },
+    [activeWorkspaceId, setWorkspaceDraft],
+  );
+  const setAttachments = useCallback(
+    (
+      nextAttachments:
+        | ChatAttachment[]
+        | ((currentAttachments: ChatAttachment[]) => ChatAttachment[]),
+    ) => {
+      if (!activeWorkspaceId) {
+        return;
+      }
+
+      const currentAttachments =
+        useChatComposerStore.getState().attachmentsByWorkspace[activeWorkspaceId] ??
+        EMPTY_CHAT_ATTACHMENTS;
+      setWorkspaceAttachments(
+        activeWorkspaceId,
+        typeof nextAttachments === "function"
+          ? nextAttachments(currentAttachments)
+          : nextAttachments,
+      );
+    },
+    [activeWorkspaceId, setWorkspaceAttachments],
+  );
   const terminalWorkspaceState = useTerminalStore((s) =>
     activeWorkspaceId ? s.workspaces[activeWorkspaceId] : undefined,
   );
@@ -6080,7 +6122,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                       metaKey: e.metaKey,
                       shiftKey: e.shiftKey,
                       isComposing: e.nativeEvent.isComposing,
-                    })) {
+                    }, sendShortcut)) {
                       e.preventDefault();
                       if (streaming && !canSteerActiveTurn) {
                         return;

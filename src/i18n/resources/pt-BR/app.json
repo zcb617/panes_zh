@@ -540,6 +540,7 @@
     "nav": {
       "overview": "Visão geral",
       "appearance": "Aparência",
+      "chat": "Chat",
       "terminal": "Terminal",
       "notifications": "Notificações",
       "usage": "Limites de uso",
@@ -554,6 +555,10 @@
       "appearance": {
         "title": "Aparência",
         "description": "Escolha a aparência e o idioma usados pelo Panes."
+      },
+      "chat": {
+        "title": "Chat",
+        "description": "Configure a composição de mensagens e os atalhos de envio."
       },
       "terminal": {
         "title": "Terminal",
@@ -610,6 +615,24 @@
       "interfaceDescription": "Mudanças de tema se aplicam ao chat, terminal, Git e editor.",
       "themeDescription": "Use um tema fixo ou acompanhe o sistema operacional.",
       "languageDescription": "Usado na navegação, diálogos e mensagens de status."
+    },
+    "chat": {
+      "composer": "Composição de mensagens",
+      "composerDescription": "Escolha como Enter se comporta enquanto você escreve uma mensagem de chat.",
+      "sendShortcut": "Atalho de envio",
+      "sendShortcutDescription": "Escolha se Enter envia a mensagem ou insere uma nova linha. Ctrl/Cmd+Enter sempre envia a mensagem.",
+      "shortcuts": {
+        "shiftEnter": "Nova linha com Enter · Enviar com Shift+Enter",
+        "enter": "Enviar com Enter · Nova linha com Shift+Enter"
+      },
+      "linkOpening": "Abertura de links",
+      "linkOpeningDescription": "Controle como os links no chat e no terminal são abertos.",
+      "linkOpenGesture": "Atalho de abertura",
+      "linkOpenGestureDescription": "Escolha entre clicar diretamente e usar Shift-clique.",
+      "linkOpenGestures": {
+        "shiftClick": "Abrir com Shift-clique",
+        "click": "Abrir com um clique"
+      }
     },
     "usage": {
       "providerLimits": "Limites dos provedores conectados",

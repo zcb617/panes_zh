@@ -1316,6 +1316,13 @@ button, input, textarea, select {
   text-decoration: underline;
 }
 
+/* Chat text inherits the application-wide selection lock by default. Restore
+   native selection inside a rendered message so partial text can be copied. */
+.msg-row {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 /* ── Timestamp hover-reveal ── */
 .msg-row-timestamp {
   font-size: 10px; color: var(--text-3);

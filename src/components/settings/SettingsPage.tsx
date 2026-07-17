@@ -17,7 +17,9 @@ import {
   Gauge,
   LayoutGrid,
   LockKeyhole,
+  MessageSquare,
   Minus,
+  MousePointer2,
   Monitor,
   Moon,
   Palette,
@@ -52,13 +54,16 @@ import {
 } from "../../lib/locale";
 import { THEME_PREFERENCES, type ThemePreference } from "../../lib/theme";
 import { useKeepAwakeStore, canToggleKeepAwake } from "../../stores/keepAwakeStore";
+import { useChatComposerStore } from "../../stores/chatComposerStore";
 import { useTerminalNotificationSettingsStore } from "../../stores/terminalNotificationSettingsStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { toast } from "../../stores/toastStore";
 import { useUiStore, type SettingsSection } from "../../stores/uiStore";
 import { useUpdateStore } from "../../stores/updateStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { isChatInputSendShortcut } from "../../lib/chatInputSettings";
 import { getHarnessIcon } from "../shared/HarnessLogos";
+import { isLinkOpenGesture } from "../../lib/linkOpenSettings";
 import { Dropdown } from "../shared/Dropdown";
 import { PanesMark, PanesWordmark } from "../shared/PanesBrand";
 import { WorkspaceSettingsPage } from "../workspace/WorkspaceSettingsPage";
@@ -180,7 +185,11 @@ export function SettingsPage() {
   const activeRepos = useWorkspaceStore((state) => state.repos);
   const themePreference = useThemeStore((state) => state.preference);
   const setThemePreference = useThemeStore((state) => state.setPreference);
+  const chatSendShortcut = useChatComposerStore((state) => state.sendShortcut);
+  const setChatSendShortcut = useChatComposerStore((state) => state.setSendShortcut);
   const updateStatus = useUpdateStore((state) => state.status);
+  const linkOpenGesture = useChatComposerStore((state) => state.linkOpenGesture);
+  const setLinkOpenGesture = useChatComposerStore((state) => state.setLinkOpenGesture);
   const availableVersion = useUpdateStore((state) => state.version);
   const updateError = useUpdateStore((state) => state.error);
   const lastCheckedAt = useUpdateStore((state) => state.lastCheckedAt);
@@ -311,6 +320,7 @@ export function SettingsPage() {
     () => [
       { id: "overview" as const, icon: <LayoutGrid size={15} />, label: t("app:settingsPage.nav.overview") },
       { id: "appearance" as const, icon: <Palette size={15} />, label: t("app:settingsPage.nav.appearance") },
+      { id: "chat" as const, icon: <MessageSquare size={15} />, label: t("app:settingsPage.nav.chat") },
       { id: "terminal" as const, icon: <TerminalSquare size={15} />, label: t("app:settingsPage.nav.terminal") },
       { id: "notifications" as const, icon: <BellRing size={15} />, label: t("app:settingsPage.nav.notifications") },
       { id: "usage" as const, icon: <Gauge size={15} />, label: t("app:settingsPage.nav.usage") },
@@ -740,6 +750,78 @@ export function SettingsPage() {
                 </SettingsRow>
               </div>
             </section>
+          ) : null}
+
+          {section === "chat" ? (
+            <>
+            <section className="usp-section usp-section-first">
+              <div className="usp-section-header">
+                <h2>{t("app:settingsPage.chat.composer")}</h2>
+                <p>{t("app:settingsPage.chat.composerDescription")}</p>
+              </div>
+              <div className="usp-group">
+                <SettingsRow
+                  icon={<MessageSquare size={17} />}
+                  title={t("app:settingsPage.chat.sendShortcut")}
+                  description={t("app:settingsPage.chat.sendShortcutDescription")}
+                >
+                  <Dropdown
+                    value={chatSendShortcut}
+                    options={[
+                      {
+                        value: "shift-enter",
+                        label: t("app:settingsPage.chat.shortcuts.shiftEnter"),
+                      },
+                      {
+                        value: "enter",
+                        label: t("app:settingsPage.chat.shortcuts.enter"),
+                      },
+                    ]}
+                    onChange={(value) => {
+                      if (isChatInputSendShortcut(value)) {
+                        setChatSendShortcut(value);
+                      }
+                    }}
+                    triggerStyle={{ minWidth: 270, height: 32 }}
+                  />
+                </SettingsRow>
+              </div>
+            </section>
+
+            <section className="usp-section">
+              <div className="usp-section-header">
+                <h2>{t("app:settingsPage.chat.linkOpening")}</h2>
+                <p>{t("app:settingsPage.chat.linkOpeningDescription")}</p>
+              </div>
+              <div className="usp-group">
+                <SettingsRow
+                  icon={<MousePointer2 size={17} />}
+                  title={t("app:settingsPage.chat.linkOpenGesture")}
+                  description={t("app:settingsPage.chat.linkOpenGestureDescription")}
+                >
+                  <Dropdown
+                    value={linkOpenGesture}
+                    options={[
+                      {
+                        value: "shift-click",
+                        label: t("app:settingsPage.chat.linkOpenGestures.shiftClick"),
+                      },
+                      {
+                        value: "click",
+                        label: t("app:settingsPage.chat.linkOpenGestures.click"),
+                      },
+                    ]}
+                    onChange={(value) => {
+                      if (isLinkOpenGesture(value)) {
+                        setLinkOpenGesture(value);
+                      }
+                    }}
+                    triggerStyle={{ minWidth: 270, height: 32 }}
+                  />
+                </SettingsRow>
+              </div>
+            </section>
+            </>
           ) : null}
 
           {section === "terminal" ? (

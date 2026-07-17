@@ -96,10 +96,13 @@ import {
   navigateLinkTarget,
   resolveLocalFileLinkTarget,
 } from "./fileLinkNavigation";
+import { DEFAULT_LINK_OPEN_GESTURE } from "./linkOpenSettings";
+import { useChatComposerStore } from "../stores/chatComposerStore";
 
 describe("fileLinkNavigation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useChatComposerStore.setState({ linkOpenGesture: DEFAULT_LINK_OPEN_GESTURE });
     mockWorkspaceState.activeWorkspaceId = "ws-1";
     mockWorkspaceState.activeRepoId = "repo-1";
     mockWorkspaceState.workspaces = [
@@ -374,6 +377,18 @@ describe("fileLinkNavigation", () => {
     expect(mockSetActiveView).toHaveBeenCalledWith("chat");
     expect(mockSetExplorerOpen).toHaveBeenCalledWith(false);
     expect(mockSetLayoutMode).not.toHaveBeenCalled();
+  });
+
+  it("opens local links on a plain click when configured", async () => {
+    useChatComposerStore.getState().setLinkOpenGesture("click");
+
+    await expect(
+      navigateLinkTarget("/workspace/apps/app/src/main.ts#L12C4", { shiftKey: false }),
+    ).resolves.toBe("internal");
+
+    expect(mockOpenFileAtLocation).toHaveBeenCalledWith(
+      "/workspace/apps/app", "src/main.ts", { line: 12, column: 4 },
+    );
   });
 
   it("opens repo-relative local links against the active repo on shift-click", async () => {

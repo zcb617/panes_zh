@@ -6,6 +6,8 @@ import { useTerminalStore } from "../stores/terminalStore";
 import { useUiStore } from "../stores/uiStore";
 import { toast } from "../stores/toastStore";
 
+import { useChatComposerStore } from "../stores/chatComposerStore";
+import { shouldOpenLink } from "./linkOpenSettings";
 export interface EditorFileReferenceContext {
   workspaceId: string | null;
   preferredRepoPath?: string | null;
@@ -43,7 +45,8 @@ export function handleEditorFileReferenceClick(
   context: EditorFileReferenceContext,
 ): void {
   event.preventDefault();
-  if (!event.shiftKey) {
+  const linkOpenGesture = useChatComposerStore.getState().linkOpenGesture;
+  if (!shouldOpenLink(event.shiftKey, linkOpenGesture)) {
     return;
   }
   void openEditorFileReference(rawReference, context);

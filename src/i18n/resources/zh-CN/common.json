@@ -14,7 +14,8 @@
   },
   "fileReferences": {
     "resolveFailed": "在此工作区中找不到 {{reference}}。",
-    "shiftClickHint": "按住 Shift 并单击可在编辑器中打开"
+    "shiftClickHint": "按住 Shift 并单击可在编辑器中打开",
+    "clickHint": "单击可在编辑器中打开"
   },
   "language": {
     "label": "语言",

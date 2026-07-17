@@ -44,6 +44,32 @@ describe("shouldSubmitChatInput", () => {
     ).toBe(false);
   });
 
+  it("submits on plain Enter when the configured shortcut is Enter", () => {
+    expect(
+      shouldSubmitChatInput(
+        {
+          key: "Enter",
+          ctrlKey: false,
+          metaKey: false,
+          shiftKey: false,
+        },
+        "enter",
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldSubmitChatInput(
+        {
+          key: "Enter",
+          ctrlKey: false,
+          metaKey: false,
+          shiftKey: true,
+        },
+        "enter",
+      ),
+    ).toBe(false);
+  });
+
   it("does not submit while composing with an IME", () => {
     expect(
       shouldSubmitChatInput({

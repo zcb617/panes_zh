@@ -539,6 +539,7 @@
     "nav": {
       "overview": "概览",
       "appearance": "外观",
+      "chat": "对话",
       "terminal": "终端",
       "notifications": "通知",
       "usage": "用量限制",
@@ -553,6 +554,10 @@
       "appearance": {
         "title": "外观",
         "description": "选择 Panes 的外观和所用语言。"
+      },
+      "chat": {
+        "title": "对话",
+        "description": "配置消息输入和发送快捷键。"
       },
       "terminal": {
         "title": "终端",
@@ -609,6 +614,24 @@
       "interfaceDescription": "主题更改会应用到对话、终端、Git 和编辑器界面。",
       "themeDescription": "使用固定主题或跟随操作系统。",
       "languageDescription": "用于导航、对话框和状态消息。"
+    },
+    "chat": {
+      "composer": "消息输入",
+      "composerDescription": "选择在输入对话消息时，Enter 键的行为。",
+      "sendShortcut": "发送快捷键",
+      "sendShortcutDescription": "选择 Enter 是发送消息还是插入换行。Ctrl/Cmd+Enter 始终发送消息。",
+      "shortcuts": {
+        "shiftEnter": "Enter 换行 · Shift+Enter 发送",
+        "enter": "Enter 发送 · Shift+Enter 换行"
+      },
+      "linkOpening": "链接打开",
+      "linkOpeningDescription": "控制对话和终端链接的打开方式。",
+      "linkOpenGesture": "打开快捷键",
+      "linkOpenGestureDescription": "选择直接单击或按住 Shift 单击。",
+      "linkOpenGestures": {
+        "shiftClick": "按住 Shift 单击打开",
+        "click": "直接单击打开"
+      }
     },
     "usage": {
       "providerLimits": "已连接提供方的限制",
