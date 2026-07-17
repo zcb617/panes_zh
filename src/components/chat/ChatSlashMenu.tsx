@@ -15,7 +15,6 @@ export interface SlashCommand {
 
 interface ChatSlashMenuProps {
   visible: boolean;
-  query: string;
   commands: SlashCommand[];
   anchorRef: React.RefObject<HTMLElement | null>;
   activeIndex: number;
@@ -26,7 +25,6 @@ interface ChatSlashMenuProps {
 
 export function ChatSlashMenu({
   visible,
-  query,
   commands,
   anchorRef,
   activeIndex,
@@ -39,13 +37,29 @@ export function ChatSlashMenu({
 
   useLayoutEffect(() => {
     if (!visible || !anchorRef.current) return;
-    const rect = anchorRef.current.getBoundingClientRect();
-    setPos({
-      bottom: window.innerHeight - rect.top + 6,
-      left: rect.left,
-      width: Math.min(340, rect.width),
-    });
-  }, [visible, anchorRef, query]);
+    const anchor = anchorRef.current;
+    const updatePosition = () => {
+      const rect = anchor.getBoundingClientRect();
+      setPos({
+        bottom: window.innerHeight - rect.top + 6,
+        left: rect.left,
+        width: rect.width,
+      });
+    };
+
+    updatePosition();
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(updatePosition);
+    resizeObserver?.observe(anchor);
+    window.addEventListener("resize", updatePosition);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updatePosition);
+    };
+  }, [visible, anchorRef]);
 
   // Close on outside click
   useEffect(() => {

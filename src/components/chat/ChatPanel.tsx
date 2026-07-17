@@ -6445,7 +6445,6 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                 {/* Slash command menu (portal) */}
                 <ChatSlashMenu
                   visible={slashMenuOpen && filteredSlashCommands.length > 0}
-                  query={slashMenuQuery}
                   commands={filteredSlashCommands}
                   anchorRef={inputRef}
                   activeIndex={slashMenuActiveIndex}
