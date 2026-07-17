@@ -59,6 +59,11 @@ import { useFileStore } from "../../stores/fileStore";
 import { useOnboardingStore } from "../../stores/onboardingStore";
 import { useThreadStore } from "../../stores/threadStore";
 import { useUiStore } from "../../stores/uiStore";
+import {
+  buildExtensionCacheKey,
+  getEffectiveExtensionItems,
+  useExtensionStore,
+} from "../../stores/extensionStore";
 import { getHarnessIcon } from "../shared/HarnessLogos";
 import { showWorkspaceEditorForDirectFileOpen } from "../../lib/workspacePaneNavigation";
 import {
@@ -141,6 +146,7 @@ import type {
   ContentBlock,
   EngineHealth,
   EngineModel,
+  ExtensionProviderId,
   Message,
   OpenCodeRemoteSession,
   OpenCodeRuntimeCatalog,
@@ -157,6 +163,7 @@ const EMPTY_CHAT_INPUT_REFERENCES: ChatInputReference[] = [];
 type ClassicSlashCommand = SlashCommand & {
   reference?: ChatInputReference;
   panel?: ActiveSlashCommand;
+  insertText?: string;
 };
 
 function createPendingSubmissionMessage(
@@ -2006,6 +2013,30 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   );
   const codexReferenceRoot = activeRepo?.path ?? activeWorkspace?.rootPath ?? null;
   const openCodeRuntimeRoot = codexReferenceRoot;
+  const extensionProviderId: ExtensionProviderId =
+    selectedEngineId === "claude"
+      ? "claude"
+      : selectedEngineId === "opencode"
+        ? "opencode"
+        : "codex";
+  const extensionContext = useMemo(
+    () => ({
+      providerId: extensionProviderId,
+      workspaceId: activeWorkspaceId,
+      repoId: activeRepo?.id ?? null,
+      cwd: codexReferenceRoot,
+    }),
+    [activeRepo?.id, activeWorkspaceId, codexReferenceRoot, extensionProviderId],
+  );
+  const extensionCacheKey = buildExtensionCacheKey(extensionContext);
+  const extensionCatalog = useExtensionStore(
+    (state) => state.entries[extensionCacheKey]?.catalog,
+  );
+  const loadExtensionCatalog = useExtensionStore((state) => state.loadCatalog);
+  const effectiveExtensionItems = useMemo(
+    () => getEffectiveExtensionItems(extensionCatalog),
+    [extensionCatalog],
+  );
 
   const legacyModels = useMemo(
     () => availableModels.filter((m) => m.hidden),
@@ -3093,6 +3124,10 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }, [activeWorkspaceId, activeThread?.engineId, engines, selectedEngineId]);
 
   useEffect(() => {
+    void loadExtensionCatalog(extensionContext);
+  }, [extensionContext, loadExtensionCatalog]);
+
+  useEffect(() => {
     if (selectedEngineId !== "codex" || !activeWorkspaceId || !codexReferenceRoot) {
       setCodexSkills([]);
       setCodexApps([]);
@@ -4036,21 +4071,27 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     const commandItems = slashCommands
       .filter((command) => command.id !== "skills" && command.id !== "mcp")
       .map((command) => ({ ...command, group: commandGroup }));
-    const skillItems = isCodexEngine
-      ? codexSkills.map((skill) => ({
-          id: `skill:${skill.path}`,
+    const skillItems = effectiveExtensionItems
+      .filter(
+        (item) =>
+          item.kind === "skill" && (isCodexEngine || selectedEngineId === "claude"),
+      )
+      .map((skill) => ({
+          id: `skill:${skill.id}`,
           name: skill.name,
           description: skill.description || skill.scope,
           icon: Sparkles,
           group: skillGroup,
-          searchTerms: [skill.path, skill.scope],
-          reference: {
-            type: "skill" as const,
-            name: skill.name,
-            path: skill.path,
-          },
-        }))
-      : [];
+          searchTerms: [skill.id, skill.path ?? "", skill.scope],
+          reference: isCodexEngine
+            ? {
+                type: "skill" as const,
+                name: skill.name,
+                path: skill.path || skill.id,
+              }
+            : undefined,
+          insertText: selectedEngineId === "claude" ? `/${skill.name} ` : undefined,
+        }));
     const appItems = isCodexEngine
       ? codexApps.map((app) => ({
           id: `app:${app.id}`,
@@ -4067,45 +4108,36 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         }))
       : [];
     const pluginItems = isCodexEngine
-      ? (codexProtocolDiagnostics?.pluginMarketplaces ?? []).flatMap((marketplace) =>
-          marketplace.plugins.map((plugin) => ({
-            id: `plugin:${marketplace.path}:${plugin.id}`,
+      ? effectiveExtensionItems
+          .filter((item) => item.kind === "plugin")
+          .map((plugin) => ({
+            id: `plugin:${plugin.id}`,
             name: plugin.name,
-            description:
-              plugin.description || plugin.capabilities.join(", ") || marketplace.name,
+            description: plugin.description || plugin.marketplace || plugin.scope,
             icon: Puzzle,
             group: pluginGroup,
             searchTerms: [
               plugin.id,
-              plugin.developerName ?? "",
-              marketplace.name,
-              ...plugin.capabilities,
+              plugin.marketplace ?? "",
+              plugin.source ?? "",
+              plugin.scope,
             ],
             panel: { type: "plugins" as const },
-          })),
-        )
+          }))
       : [];
-    const mcpItems = isCodexEngine
-      ? (codexProtocolDiagnostics?.mcpServers ?? []).map((server) => ({
-          id: `mcp:${server.name}`,
+    const mcpItems = isCodexEngine || isOpenCodeEngine
+      ? effectiveExtensionItems
+          .filter((item) => item.kind === "mcp")
+          .map((server) => ({
+          id: `mcp:${server.id}`,
           name: server.name,
-          description: `${server.toolCount} tools · ${server.resourceCount} resources`,
+          description: server.warning || server.description || server.health,
           icon: Server,
           group: mcpGroup,
-          searchTerms: [server.authStatus],
+          searchTerms: [server.health, server.authState ?? "", server.scope],
           panel: { type: "mcp" as const },
         }))
-      : isOpenCodeEngine
-        ? (openCodeCatalog?.mcpServers ?? []).map((server) => ({
-            id: `mcp:${server.name}`,
-            name: server.name,
-            description: server.detail ?? server.status,
-            icon: Server,
-            group: mcpGroup,
-            searchTerms: [server.status],
-            panel: { type: "mcp" as const },
-          }))
-        : [];
+      : [];
 
     return [
       ...commandItems,
@@ -4116,12 +4148,10 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     ];
   }, [
     codexApps,
-    codexProtocolDiagnostics?.mcpServers,
-    codexProtocolDiagnostics?.pluginMarketplaces,
-    codexSkills,
+    effectiveExtensionItems,
     isCodexEngine,
     isOpenCodeEngine,
-    openCodeCatalog?.mcpServers,
+    selectedEngineId,
     slashCommands,
     t,
   ]);
@@ -4176,6 +4206,22 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
           replacement.cursorPosition,
           replacement.cursorPosition,
         );
+      });
+      return;
+    }
+
+    if (classicCommand?.insertText) {
+      const cursorPosition = inputRef.current?.selectionStart ?? input.length;
+      const replacement = removeClassicSlashToken(input, cursorPosition);
+      const suffix = replacement.value.slice(replacement.cursorPosition);
+      const prefix = replacement.value.slice(0, replacement.cursorPosition);
+      const insertText = classicCommand.insertText;
+      const nextInput = `${prefix}${insertText}${suffix}`;
+      const nextCursor = prefix.length + insertText.length;
+      setInput(nextInput);
+      requestAnimationFrame(() => {
+        inputRef.current?.focus();
+        inputRef.current?.setSelectionRange(nextCursor, nextCursor);
       });
       return;
     }

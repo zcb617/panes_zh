@@ -13,6 +13,7 @@ use rusqlite::{params, Connection, Transaction};
 use crate::{path_utils, runtime_env};
 
 pub mod actions;
+pub mod extensions;
 pub mod messages;
 pub mod repos;
 pub mod threads;
@@ -123,6 +124,10 @@ impl Database {
         let mut conn = self.connect()?;
         conn.execute_batch(include_str!("migrations/001_initial.sql"))
             .context("failed to apply migrations")?;
+        conn.execute_batch(include_str!(
+            "migrations/002_extension_catalog_snapshots.sql"
+        ))
+        .context("failed to apply extension catalog snapshot migrations")?;
         ensure_archived_columns(&conn)?;
         ensure_workspace_git_columns(&conn)?;
         ensure_repo_columns(&conn)?;

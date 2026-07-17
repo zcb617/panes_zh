@@ -20,6 +20,7 @@ import {
   Rocket,
   RefreshCw,
   Gauge,
+  Boxes,
 } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import { useThreadStore } from "../../stores/threadStore";
@@ -329,6 +330,16 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
           >
             <Terminal size={16} strokeWidth={1.5} style={{ flexShrink: 0 }} />
             {t("app:sidebar.agents")}
+          </button>
+
+          {/* Extensions */}
+          <button
+            type="button"
+            className={`sb-nav-item${activeView === "extensions" ? " sb-nav-item-active" : ""}`}
+            onClick={() => setActiveView(activeView === "extensions" ? "chat" : "extensions")}
+          >
+            <Boxes size={16} strokeWidth={1.5} style={{ flexShrink: 0 }} />
+            {t("app:sidebar.extensions")}
           </button>
         </div>
       </div>

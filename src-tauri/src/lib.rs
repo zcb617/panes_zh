@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod db;
 mod engines;
+mod extensions;
 mod fs_ops;
 mod git;
 #[cfg(any(target_os = "linux", test))]
@@ -26,6 +27,7 @@ use rusqlite::OptionalExtension;
 use config::app_config::AppConfig;
 use db::Database;
 use engines::{CodexRuntimeEvent, EngineManager};
+use extensions::refresh::{spawn_catalog_refresh_scheduler, ExtensionCatalogRefreshManager};
 use git::repo::FileTreeCache;
 use git::watcher::GitWatcherManager;
 #[cfg(target_os = "macos")]
@@ -91,6 +93,7 @@ pub fn run() {
         keep_awake,
         turns: Arc::new(TurnManager::default()),
         file_tree_cache: Arc::new(FileTreeCache::new()),
+        extension_catalog_refreshes: Arc::new(ExtensionCatalogRefreshManager::default()),
     };
 
     let app = tauri::Builder::default()
@@ -162,6 +165,7 @@ pub fn run() {
             }
             state.engines.set_resource_dir(resource_dir);
             tauri::async_runtime::spawn(run_codex_runtime_bridge(handle.clone(), state.clone()));
+            spawn_catalog_refresh_scheduler(handle.clone(), state.clone());
             app.on_menu_event(move |_app, event| {
                 let id = event.id().as_ref();
                 match id {
@@ -287,6 +291,10 @@ pub fn run() {
             commands::engines::list_codex_apps,
             commands::engines::get_opencode_runtime_catalog,
             commands::engines::run_engine_check,
+            commands::extensions::get_extension_catalog,
+            commands::extensions::request_extension_catalog_refresh,
+            commands::extensions::get_extension_details,
+            commands::extensions::perform_extension_action,
             commands::threads::list_threads,
             commands::threads::list_archived_threads,
             commands::threads::list_codex_remote_threads,

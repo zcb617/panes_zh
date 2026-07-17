@@ -4264,6 +4264,9 @@ mod tests {
             keep_awake: Arc::new(KeepAwakeManager::new()),
             turns: Arc::new(TurnManager::default()),
             file_tree_cache: Arc::new(FileTreeCache::new()),
+            extension_catalog_refreshes: Arc::new(
+                crate::extensions::refresh::ExtensionCatalogRefreshManager::default(),
+            ),
         }
     }
 

@@ -8,6 +8,7 @@ import workspaceEn from "./resources/en/workspace.json";
 import setupEn from "./resources/en/setup.json";
 import gitEn from "./resources/en/git.json";
 import nativeEn from "./resources/en/native.json";
+import extensionsEn from "./resources/en/extensions.json";
 import commonPtBr from "./resources/pt-BR/common.json";
 import appPtBr from "./resources/pt-BR/app.json";
 import chatPtBr from "./resources/pt-BR/chat.json";
@@ -15,6 +16,7 @@ import workspacePtBr from "./resources/pt-BR/workspace.json";
 import setupPtBr from "./resources/pt-BR/setup.json";
 import gitPtBr from "./resources/pt-BR/git.json";
 import nativePtBr from "./resources/pt-BR/native.json";
+import extensionsPtBr from "./resources/pt-BR/extensions.json";
 import commonZhCn from "./resources/zh-CN/common.json";
 import appZhCn from "./resources/zh-CN/app.json";
 import chatZhCn from "./resources/zh-CN/chat.json";
@@ -22,6 +24,7 @@ import workspaceZhCn from "./resources/zh-CN/workspace.json";
 import setupZhCn from "./resources/zh-CN/setup.json";
 import gitZhCn from "./resources/zh-CN/git.json";
 import nativeZhCn from "./resources/zh-CN/native.json";
+import extensionsZhCn from "./resources/zh-CN/extensions.json";
 
 const resources = {
   en: {
@@ -32,6 +35,7 @@ const resources = {
     setup: setupEn,
     git: gitEn,
     native: nativeEn,
+    extensions: extensionsEn,
   },
   "pt-BR": {
     common: commonPtBr,
@@ -41,6 +45,7 @@ const resources = {
     setup: setupPtBr,
     git: gitPtBr,
     native: nativePtBr,
+    extensions: extensionsPtBr,
   },
   "zh-CN": {
     common: commonZhCn,
@@ -50,6 +55,7 @@ const resources = {
     setup: setupZhCn,
     git: gitZhCn,
     native: nativeZhCn,
+    extensions: extensionsZhCn,
   },
 } as const;
 
@@ -64,7 +70,7 @@ export async function initializeI18n(locale?: string | null) {
       lng: language,
       fallbackLng: "en",
       defaultNS: "common",
-      ns: ["common", "app", "chat", "workspace", "setup", "git", "native"],
+      ns: ["common", "app", "chat", "workspace", "setup", "git", "native", "extensions"],
       interpolation: {
         escapeValue: false,
       },
