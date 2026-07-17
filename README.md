@@ -36,6 +36,31 @@ Panes wraps a native desktop UI around external coding agents, git, terminal wor
 
 Panes is not a full IDE, but it does ship with a built-in multi-tab editor for quick review and edits without leaving the app.
 
+## 本分支相对上游原版的更新
+
+本仓库以 [`wygoralves/panes` v0.63.0（`90e101f`）](https://github.com/wygoralves/panes/tree/90e101f) 为基线。以下仅记录已提交到本仓库的用户可见更新；工作区中尚未提交的本地修改不在此列。
+
+### 简体中文
+
+- 新增完整的 `zh-CN` 前端文案和原生桌面菜单文案；`zh`、`zh-CN`、`zh-SG` 及 `zh-Hans-*` 系统语言会归一为简体中文。
+
+### Codex 会话与权限
+
+- Codex 会话会发现和刷新远端线程；删除线程时会先确认远端删除结果，再同步本地状态。
+- Codex 权限模式和“自动”预设与 `codex app-server` 的有效策略保持一致，避免向服务端传递不支持的 `on-failure` 策略。
+
+### 对话输入与文件链接
+
+- 对话草稿、图片附件和已选的技能／应用引用按工作区保存；切换到设置或其他页面后返回对话，内容仍会保留。
+- 设置 → 对话支持配置发送快捷键（`Enter` 或 `Shift+Enter` 发送；`Ctrl/Cmd+Enter` 始终发送）以及文件链接的打开方式（单击或按住 `Shift` 单击）。
+- 本地 `file://` 链接会先解码百分号编码的路径，避免已有文件因 URL 编码无法打开。
+
+### 经典斜杠菜单
+
+- 设置 → 对话新增“输入模式”：`默认` 保持原交互；`经典` 提供 Codex、Claude、OpenCode 常见的 `/` 操作习惯。
+- 经典模式支持 `/` 模糊搜索、方向键选择和 `Enter` 确认，并按命令、技能、应用、插件、MCP 分类显示。
+- 菜单宽度实时跟随输入框；每个条目以“名称 + 说明”单行显示，超过可用宽度时自动省略。技能和应用会作为可移除引用加入输入框；MCP 与插件仍由已配置的运行时连接提供能力。
+
 ## Features
 
 ### Chat & Agents
