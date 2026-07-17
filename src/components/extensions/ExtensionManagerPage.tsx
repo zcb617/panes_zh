@@ -5,8 +5,10 @@ import {
   ArrowLeft,
   Boxes,
   Check,
+  CheckCircle2,
   ChevronRight,
   CircleOff,
+  Clock3,
   Loader2,
   Package,
   Plug,
@@ -40,6 +42,7 @@ import {
   groupExtensionItemsByCategory,
   type ExtensionCategoryDescriptor,
 } from "./extensionCategories";
+import { formatRefreshAge, nextRefreshAgeUpdateDelay } from "./refreshAge";
 
 type StatusFilter = "all" | "installed" | "available" | "disabled" | "issues";
 
@@ -50,6 +53,29 @@ const PROVIDERS: Array<{ id: ExtensionProviderId; label: string }> = [
 ];
 const KINDS: ExtensionKind[] = ["skill", "plugin", "mcp"];
 const DESTRUCTIVE_ACTIONS = new Set<ExtensionAction>(["uninstall", "remove"]);
+
+function useRefreshAgeClock(timestamp: string | null | undefined): number {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!timestamp) return;
+    let timer: number | undefined;
+    const scheduleNextUpdate = () => {
+      const updatedNow = Date.now();
+      setNow(updatedNow);
+      const delay = nextRefreshAgeUpdateDelay(timestamp, updatedNow);
+      if (delay !== null) {
+        timer = window.setTimeout(scheduleNextUpdate, delay);
+      }
+    };
+    scheduleNextUpdate();
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [timestamp]);
+
+  return now;
+}
 
 function ExtensionKindIcon({ kind, size = 16 }: { kind: ExtensionKind; size?: number }) {
   if (kind === "skill") return <Puzzle size={size} />;
@@ -122,7 +148,7 @@ function ExtensionCard({
 }
 
 export function ExtensionManagerPage() {
-  const { t } = useTranslation(["extensions", "workspace", "common"]);
+  const { t, i18n } = useTranslation(["extensions", "workspace", "common"]);
   const setActiveView = useUiStore((state) => state.setActiveView);
   const { workspaces, activeWorkspaceId, repos, activeRepoId } = useWorkspaceStore();
   const { threads, activeThreadId } = useThreadStore();
@@ -158,6 +184,9 @@ export function ExtensionManagerPage() {
   const catalog = entry?.catalog;
 
   const [kind, setKind] = useState<ExtensionKind>("skill");
+  const kindFetchedAt = catalog?.kindFetchedAt?.[kind] ?? null;
+  const refreshAgeNow = useRefreshAgeClock(kindFetchedAt);
+  const refreshAge = formatRefreshAge(kindFetchedAt, i18n.language, refreshAgeNow);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("all");
@@ -543,6 +572,12 @@ export function ExtensionManagerPage() {
           )}
           {loading && catalog && (
             <div className="em-notice"><Loader2 size={14} className="em-spin" />{t("extensions:cache.refreshing")}</div>
+          )}
+          {refreshAge && (
+            <div className="em-notice"><Clock3 size={14} />{t("extensions:cache.refreshedAt", { age: refreshAge })}</div>
+          )}
+          {!loading && catalog?.refreshCompletedAt && (
+            <div className="em-notice"><CheckCircle2 size={14} />{t("extensions:cache.refreshFinished")}</div>
           )}
           {entry?.phase === "error" && (
             <div className="em-error">

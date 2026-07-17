@@ -368,6 +368,8 @@ export const ipc = {
       providerId,
       cwd: cwd ?? null,
     }),
+  scheduleExtensionCatalogWorkspaceRefresh: (workspaceId: string) =>
+    invoke<void>("schedule_extension_catalog_workspace_refresh", { workspaceId }),
   requestExtensionCatalogRefresh: (
     providerId: ExtensionProviderId,
     cwd?: string | null,

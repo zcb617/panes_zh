@@ -55,9 +55,9 @@ pub fn ensure_context(
     Ok(())
 }
 
-/// Schedule a fresh background read when the application starts. A persisted
-/// failure remains governed by its retry backoff so restarting the app cannot
-/// turn into a minute-level retry loop.
+/// Schedule one fresh background read when the application starts. This honors
+/// the startup-immediate refresh contract while retaining failure count so
+/// retries within the running application still use the documented backoff.
 pub fn schedule_startup_refresh(
     db: &Database,
     provider_id: &str,
@@ -71,8 +71,7 @@ pub fn schedule_startup_refresh(
          SET next_refresh_at = ?4
          WHERE provider_id = ?1
            AND context_key = ?2
-           AND kind = ?3
-           AND (last_error IS NULL OR failure_count = 0)",
+           AND kind = ?3",
         params![provider_id, context_key, kind, observed_at],
     )
     .context("failed schedule extension catalog startup refresh")?;
@@ -376,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_refresh_reschedules_success_but_keeps_failure_backoff() {
+    fn startup_refresh_reschedules_success_and_failure() {
         let db = test_database();
         let first_attempt = Utc::now().to_rfc3339();
         ensure_context(&db, "codex", "workspace:/demo", &first_attempt).unwrap();
@@ -408,27 +407,14 @@ mod tests {
             "refresh_failed",
         )
         .unwrap();
-        let failed_next_refresh_at = load_snapshots(&db, "codex", "workspace:/demo")
-            .unwrap()
-            .into_iter()
-            .find(|snapshot| snapshot.kind == "skill")
-            .and_then(|snapshot| snapshot.next_refresh_at)
-            .unwrap();
-
-        schedule_startup_refresh(
-            &db,
-            "codex",
-            "workspace:/demo",
-            "skill",
-            "2030-01-02T04:05:06+00:00",
-        )
-        .unwrap();
+        let restarted_at = "2030-01-02T04:05:06+00:00";
+        schedule_startup_refresh(&db, "codex", "workspace:/demo", "skill", restarted_at).unwrap();
         let after_restart = load_snapshots(&db, "codex", "workspace:/demo")
             .unwrap()
             .into_iter()
             .find(|snapshot| snapshot.kind == "skill")
             .and_then(|snapshot| snapshot.next_refresh_at)
             .unwrap();
-        assert_eq!(after_restart, failed_next_refresh_at);
+        assert_eq!(after_restart, restarted_at);
     }
 }

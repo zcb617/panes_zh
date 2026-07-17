@@ -683,9 +683,11 @@ export interface ExtensionCatalog {
   sources: ExtensionSource[];
   capabilities: ExtensionProviderCapabilities;
   fetchedAt?: string | null;
+  kindFetchedAt?: Partial<Record<ExtensionKind, string | null>>;
   lastAttemptAt?: string | null;
   nextRefreshAt?: string | null;
   refreshing?: boolean;
+  refreshCompletedAt?: string | null;
   hasSnapshot?: boolean;
   refreshErrors?: Array<{
     kind: ExtensionKind;

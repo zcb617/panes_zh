@@ -292,6 +292,7 @@ pub fn run() {
             commands::engines::get_opencode_runtime_catalog,
             commands::engines::run_engine_check,
             commands::extensions::get_extension_catalog,
+            commands::extensions::schedule_extension_catalog_workspace_refresh,
             commands::extensions::request_extension_catalog_refresh,
             commands::extensions::get_extension_details,
             commands::extensions::perform_extension_action,

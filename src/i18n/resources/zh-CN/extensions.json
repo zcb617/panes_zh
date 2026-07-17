@@ -71,7 +71,9 @@
   "cache": {
     "notFetched": "尚未获取扩展目录；后台正在异步刷新，也可立即请求刷新。",
     "requestNow": "请求后台刷新",
-    "refreshing": "正在后台刷新，当前列表会保留到新数据写入。"
+    "refreshing": "正在后台刷新，当前列表会保留到新数据写入。",
+    "refreshFinished": "本次后台刷新已结束。",
+    "refreshedAt": "当前数据{{age}}刷新。"
   },
   "refreshErrors": {
     "refreshFailed": "{{kind}} 目录刷新失败，已保留上次成功的数据。"
@@ -117,6 +119,7 @@
   },
   "readOnly": {
     "codex_skill_toggle": "Codex 当前没有稳定的非交互式技能启停命令。",
+    "codex_remote_plugin_managed": "此 Codex 远程插件由 Codex 桌面端管理，当前不提供可验证的命令行卸载操作。",
     "claude_skill_toggle": "Claude Code 当前没有稳定的非交互式技能启停命令。",
     "plugin_managed_mcp": "此 MCP 服务由所属插件管理。",
     "mcp_details_unavailable": "当前运行时无法提供此 MCP 的配置详情。",

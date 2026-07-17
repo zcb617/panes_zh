@@ -42,3 +42,5 @@ remotion/
 # Local flatpak-builder build output
 .flatpak-builder/
 build-flatpak/
+
+.tmp

@@ -614,9 +614,12 @@ pub struct CachedExtensionCatalogDto {
     pub sources: Vec<ExtensionSourceDto>,
     pub capabilities: ExtensionProviderCapabilitiesDto,
     pub fetched_at: Option<String>,
+    #[serde(default)]
+    pub kind_fetched_at: std::collections::BTreeMap<String, Option<String>>,
     pub last_attempt_at: Option<String>,
     pub next_refresh_at: Option<String>,
     pub refreshing: bool,
+    pub refresh_completed_at: Option<String>,
     pub has_snapshot: bool,
     #[serde(default)]
     pub refresh_errors: Vec<ExtensionCatalogRefreshErrorDto>,

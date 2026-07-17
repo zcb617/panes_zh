@@ -110,6 +110,13 @@ function rememberLastRepo(workspaceId: string, repoId: string): void {
   writeLastRepoByWorkspace(current);
 }
 
+function scheduleActiveWorkspaceExtensionRefresh(workspaceId: string): void {
+  void Promise.resolve(ipc.scheduleExtensionCatalogWorkspaceRefresh(workspaceId)).catch(() => {
+    // Catalog refresh is background work. It must not block workspace startup
+    // or turn an unavailable provider into a workspace-loading failure.
+  });
+}
+
 export function resolveActiveRepoId(
   workspaceId: string,
   repos: Repo[],
@@ -147,6 +154,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const activeWorkspaceId = resolveStartupWorkspaceId(workspaces, savedId);
       set({ workspaces, activeWorkspaceId, loading: false });
       if (activeWorkspaceId) {
+        scheduleActiveWorkspaceExtensionRefresh(activeWorkspaceId);
         await useTerminalStore.getState().prepareWorkspaceActivation(activeWorkspaceId);
         useGitStore.getState().loadDraftsForWorkspace(activeWorkspaceId);
         await get().loadRepos(activeWorkspaceId);
@@ -176,6 +184,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         activeWorkspaceId: workspace.id,
         loading: false,
       }));
+      scheduleActiveWorkspaceExtensionRefresh(workspace.id);
       await useTerminalStore.getState().prepareWorkspaceActivation(workspace.id);
       await get().loadRepos(workspace.id);
       return workspace;
@@ -291,6 +300,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
     localStorage.setItem(LAST_WORKSPACE_KEY, workspaceId);
     set({ activeWorkspaceId: workspaceId, activeRepoId: null, repos: [], error: undefined });
+    scheduleActiveWorkspaceExtensionRefresh(workspaceId);
     await useTerminalStore.getState().prepareWorkspaceActivation(workspaceId);
     await get().loadRepos(workspaceId);
     useGitStore.getState().loadDraftsForWorkspace(workspaceId);

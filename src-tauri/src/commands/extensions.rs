@@ -19,6 +19,20 @@ pub async fn get_extension_catalog(
 }
 
 #[tauri::command]
+pub async fn schedule_extension_catalog_workspace_refresh(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<(), String> {
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return Err("workspace id is required".to_string());
+    }
+    extensions::refresh::schedule_workspace_catalog_refresh(&state, workspace_id)
+        .await
+        .map_err(err_to_string)
+}
+
+#[tauri::command]
 pub async fn request_extension_catalog_refresh(
     app: AppHandle,
     state: State<'_, AppState>,

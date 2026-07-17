@@ -71,7 +71,9 @@
   "cache": {
     "notFetched": "The extension catalog has not been fetched yet. The background service is refreshing it asynchronously; you can also request a refresh now.",
     "requestNow": "Request background refresh",
-    "refreshing": "Refreshing in the background. The current list stays visible until new data is saved."
+    "refreshing": "Refreshing in the background. The current list stays visible until new data is saved.",
+    "refreshFinished": "The current background refresh has finished.",
+    "refreshedAt": "Current data was refreshed {{age}}."
   },
   "refreshErrors": {
     "refreshFailed": "The {{kind}} catalog refresh failed. The last successful data is still shown."
@@ -117,6 +119,7 @@
   },
   "readOnly": {
     "codex_skill_toggle": "Codex does not expose a stable non-interactive skill toggle command.",
+    "codex_remote_plugin_managed": "This Codex remote plugin is managed by the Codex desktop app; no verified CLI uninstall action is available here.",
     "claude_skill_toggle": "Claude Code does not expose a stable non-interactive skill toggle command.",
     "plugin_managed_mcp": "This MCP server is managed by its parent plugin.",
     "mcp_details_unavailable": "MCP configuration details are unavailable from the current runtime.",
