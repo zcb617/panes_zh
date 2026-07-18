@@ -41,6 +41,7 @@
     "workspaceFallback": "工作区",
     "noThreads": "没有会话",
     "untitledThread": "未命名会话",
+    "running": "正在进行",
     "needsApproval": "需要批准",
     "archiveThread": "归档会话",
     "showMore": "再显示 {{count}} 项",

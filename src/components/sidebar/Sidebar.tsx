@@ -110,7 +110,7 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
   const workspaceIds = useMemo(() => workspaces.map((workspace) => workspace.id), [workspaces]);
 
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() =>
-    normalizeSidebarCollapsedState(workspaceIds, activeWorkspaceId, {}, null),
+    normalizeSidebarCollapsedState(workspaceIds, null, {}, null),
   );
   const [showAll, setShowAll] = useState<Record<string, boolean>>({});
   const [archivedOpen, setArchivedOpen] = useState(false);
@@ -124,7 +124,6 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
   const [settingsMenuPos, setSettingsMenuPos] = useState({ top: 0, left: 0 });
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const settingsTriggerRef = useRef<HTMLButtonElement>(null);
-  const previousSyncedActiveWorkspaceIdRef = useRef<string | null>(activeWorkspaceId);
 
   const closeSettingsMenu = useCallback(() => setSettingsMenuOpen(false), []);
 
@@ -162,15 +161,14 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
     setCollapsed((prev) => ({ ...prev, [wsId]: !prev[wsId] }));
 
   useEffect(() => {
-    setCollapsed((prev) =>
-      normalizeSidebarCollapsedState(
-        workspaceIds,
-        activeWorkspaceId,
-        prev,
-        previousSyncedActiveWorkspaceIdRef.current,
-      ),
-    );
-    previousSyncedActiveWorkspaceIdRef.current = activeWorkspaceId;
+    setCollapsed((prev) => {
+      const next = normalizeSidebarCollapsedState(workspaceIds, null, prev, null);
+
+      // Expanding the newly active workspace must not collapse the rest of the tree.
+      return activeWorkspaceId && workspaceIds.includes(activeWorkspaceId)
+        ? { ...next, [activeWorkspaceId]: false }
+        : next;
+    });
   }, [workspaceIds, activeWorkspaceId]);
 
   useEffect(() => {
@@ -204,9 +202,7 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
 
   async function onSelectProject(wsId: string) {
     if (activeView !== "chat") setActiveView("chat");
-    setCollapsed(
-      Object.fromEntries(projects.map((p) => [p.workspace.id, p.workspace.id !== wsId]))
-    );
+    setCollapsed((prev) => ({ ...prev, [wsId]: false }));
     await setActiveWorkspace(wsId);
   }
 
@@ -432,6 +428,13 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
                       <>
                         {visibleThreads.map((thread, i) => {
                           const isActive = thread.id === activeThreadId;
+                          const isRunning = thread.status === "streaming";
+                          const isAwaitingApproval = thread.status === "awaiting_approval";
+                          const statusLabel = isRunning
+                            ? t("app:sidebar.running")
+                            : isAwaitingApproval
+                              ? t("app:sidebar.needsApproval")
+                              : null;
                           return (
                             <div
                               key={thread.id}
@@ -451,14 +454,13 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
                                 {getThreadLabel(thread)}
                               </span>
                               <span className="sb-thread-trailing">
-                                {thread.status === "awaiting_approval" ? (
+                                {statusLabel ? (
                                   <span
-                                    className="sb-thread-approval"
-                                    title={t("app:sidebar.needsApproval")}
-                                  >
-                                    <span className="sb-thread-approval-dot" />
-                                    {t("app:sidebar.needsApproval")}
-                                  </span>
+                                    className={`sb-thread-status-ring sb-thread-status-ring--${isRunning ? "running" : "approval"}`}
+                                    role="img"
+                                    aria-label={statusLabel}
+                                    title={statusLabel}
+                                  />
                                 ) : (
                                   <span className="sb-thread-time">
                                     {thread.lastActivityAt
