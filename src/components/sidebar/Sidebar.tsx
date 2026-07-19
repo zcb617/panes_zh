@@ -6,6 +6,7 @@ import {
   Command,
   Plus,
   FolderGit2,
+  Pin,
   MessageSquare,
   Cog,
   ChevronDown,
@@ -46,6 +47,7 @@ const MAX_VISIBLE_THREADS = 8;
 const LEGACY_SCAN_DEPTH_STORAGE_KEY = "panes.workspace.scanDepth";
 const LEGACY_SCAN_DEPTH_MIN = 0;
 const LEGACY_SCAN_DEPTH_MAX = 12;
+const PINNED_WORKSPACE_IDS_STORAGE_KEY = "panes:sidebar:pinnedWorkspaceIds";
 
 function readLegacyDefaultScanDepth(): number | undefined {
   const stored = window.localStorage.getItem(LEGACY_SCAN_DEPTH_STORAGE_KEY);
@@ -56,6 +58,28 @@ function readLegacyDefaultScanDepth(): number | undefined {
     return undefined;
   }
   return parsed;
+}
+
+function readPinnedWorkspaceIds(): string[] {
+  try {
+    const stored = window.localStorage.getItem(PINNED_WORKSPACE_IDS_STORAGE_KEY);
+    if (!stored) return [];
+
+    const parsed = JSON.parse(stored) as unknown;
+    if (!Array.isArray(parsed)) return [];
+
+    return [...new Set(parsed.filter((workspaceId): workspaceId is string => typeof workspaceId === "string"))];
+  } catch {
+    return [];
+  }
+}
+
+function writePinnedWorkspaceIds(workspaceIds: string[]): void {
+  try {
+    window.localStorage.setItem(PINNED_WORKSPACE_IDS_STORAGE_KEY, JSON.stringify(workspaceIds));
+  } catch {
+    // Keep the current session usable if localStorage is unavailable or full.
+  }
 }
 
 /* ─────────────────────────────────────────────────────
@@ -106,6 +130,27 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
         threads: threads.filter((t) => t.workspaceId === ws.id),
       })),
     [workspaces, threads],
+  );
+  const [pinnedWorkspaceIds, setPinnedWorkspaceIds] = useState(readPinnedWorkspaceIds);
+  const pinnedWorkspaceIdSet = useMemo(
+    () => new Set(pinnedWorkspaceIds),
+    [pinnedWorkspaceIds],
+  );
+  const projectByWorkspaceId = useMemo(
+    () => new Map(projects.map((project) => [project.workspace.id, project])),
+    [projects],
+  );
+  const pinnedProjects = useMemo(
+    () =>
+      pinnedWorkspaceIds.flatMap((workspaceId) => {
+        const project = projectByWorkspaceId.get(workspaceId);
+        return project ? [project] : [];
+      }),
+    [pinnedWorkspaceIds, projectByWorkspaceId],
+  );
+  const unpinnedProjects = useMemo(
+    () => projects.filter((project) => !pinnedWorkspaceIdSet.has(project.workspace.id)),
+    [projects, pinnedWorkspaceIdSet],
   );
   const workspaceIds = useMemo(() => workspaces.map((workspace) => workspace.id), [workspaces]);
 
@@ -159,6 +204,16 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
 
   const toggleCollapse = (wsId: string) =>
     setCollapsed((prev) => ({ ...prev, [wsId]: !prev[wsId] }));
+
+  const toggleWorkspacePin = useCallback((workspaceId: string) => {
+    setPinnedWorkspaceIds((previous) => {
+      const next = previous.includes(workspaceId)
+        ? previous.filter((id) => id !== workspaceId)
+        : [workspaceId, ...previous];
+      writePinnedWorkspaceIds(next);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     setCollapsed((prev) => {
@@ -256,6 +311,180 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
     return thread.title?.trim() || t("app:sidebar.untitledThread");
   }
 
+  function renderProject(project: ProjectGroup, isPinned: boolean) {
+    const isActiveProject = project.workspace.id === activeWorkspaceId;
+    const isCollapsed = collapsed[project.workspace.id] ?? false;
+    const projectName = getWorkspaceLabel(project.workspace);
+    const isShowingAll = showAll[project.workspace.id] ?? false;
+    const visibleThreads = isShowingAll
+      ? project.threads
+      : project.threads.slice(0, MAX_VISIBLE_THREADS);
+    const hasMore = project.threads.length > MAX_VISIBLE_THREADS;
+    const constrainExpandedThreads = isShowingAll && hasMore;
+
+    return (
+      <div key={project.workspace.id} style={{ marginBottom: 2 }}>
+        {/* Workspace header */}
+        <div
+          role="button"
+          tabIndex={0}
+          className={`sb-project ${isActiveProject ? "sb-project-active" : ""}`}
+          onClick={() => {
+            if (isActiveProject) {
+              toggleCollapse(project.workspace.id);
+            } else {
+              void onSelectProject(project.workspace.id);
+            }
+          }}
+          onKeyDown={(event) => {
+            if (event.target !== event.currentTarget) return;
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              if (isActiveProject) {
+                toggleCollapse(project.workspace.id);
+              } else {
+                void onSelectProject(project.workspace.id);
+              }
+            }
+          }}
+        >
+          {isCollapsed ? (
+            <ChevronRight size={12} style={{ flexShrink: 0, opacity: 0.4 }} />
+          ) : (
+            <ChevronDown size={12} style={{ flexShrink: 0, opacity: 0.4 }} />
+          )}
+          <FolderGit2
+            size={14}
+            style={{
+              flexShrink: 0,
+              color: isActiveProject ? "var(--accent)" : "var(--text-3)",
+            }}
+          />
+          <span className="sb-project-name">{projectName}</span>
+
+          <span className="sb-project-trailing">
+            {project.threads.length > 0 && (
+              <span className="sb-project-count">
+                {project.threads.length}
+              </span>
+            )}
+            <span className="sb-project-actions">
+              <button
+                type="button"
+                className="sb-project-action sb-project-pin"
+                title={t(isPinned ? "app:sidebar.unpinWorkspace" : "app:sidebar.pinWorkspace")}
+                aria-label={t(isPinned ? "app:sidebar.unpinWorkspace" : "app:sidebar.pinWorkspace")}
+                aria-pressed={isPinned}
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  toggleWorkspacePin(project.workspace.id);
+                }}
+              >
+                <Pin size={12} fill={isPinned ? "currentColor" : "none"} />
+              </button>
+              <WorkspaceMoreMenu
+                workspace={project.workspace}
+                onOpenSettings={() => openWorkspaceSettings(project.workspace.id)}
+                onArchive={() => onDeleteWorkspace(project.workspace)}
+              />
+            </span>
+          </span>
+        </div>
+
+        {/* Threads — tree-line indented */}
+        {!isCollapsed && (
+          <div
+            className={`sb-thread-tree${constrainExpandedThreads ? " sb-thread-tree-scrollable" : ""}`}
+          >
+            {project.threads.length === 0 ? (
+              <div className="sb-no-threads">{t("app:sidebar.noThreads")}</div>
+            ) : (
+              <>
+                {visibleThreads.map((thread, i) => {
+                  const isActive = thread.id === activeThreadId;
+                  const isRunning = thread.status === "streaming";
+                  const isAwaitingApproval = thread.status === "awaiting_approval";
+                  const statusLabel = isRunning
+                    ? t("app:sidebar.running")
+                    : isAwaitingApproval
+                      ? t("app:sidebar.needsApproval")
+                      : null;
+                  return (
+                    <div
+                      key={thread.id}
+                      role="button"
+                      tabIndex={0}
+                      className={`sb-thread sb-thread-animate ${isActive ? "sb-thread-active" : ""}`}
+                      style={{ animationDelay: `${i * 20}ms` }}
+                      onClick={() => void onSelectThread(thread)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          void onSelectThread(thread);
+                        }
+                      }}
+                    >
+                      <span className="sb-thread-title">
+                        {getThreadLabel(thread)}
+                      </span>
+                      <span className="sb-thread-trailing">
+                        {statusLabel ? (
+                          <span
+                            className={`sb-thread-status-ring sb-thread-status-ring--${isRunning ? "running" : "approval"}`}
+                            role="img"
+                            aria-label={statusLabel}
+                            title={statusLabel}
+                          />
+                        ) : (
+                          <span className="sb-thread-time">
+                            {thread.lastActivityAt
+                              ? formatRelativeTime(thread.lastActivityAt, i18n.language)
+                              : ""}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          title={t("app:sidebar.archiveThread")}
+                          aria-label={t("app:sidebar.archiveThread")}
+                          className="sb-thread-archive"
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void onDeleteThread(thread);
+                          }}
+                        >
+                          <Archive size={11} />
+                        </button>
+                      </span>
+                    </div>
+                  );
+                })}
+
+                {hasMore && !isShowingAll && (
+                  <button
+                    type="button"
+                    className="sb-show-more"
+                    onClick={() =>
+                      setShowAll((previous) => ({
+                        ...previous,
+                        [project.workspace.id]: true,
+                      }))
+                    }
+                  >
+                    {t("app:sidebar.showMore", {
+                      count: project.threads.length - MAX_VISIBLE_THREADS,
+                    })}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div
       style={{
@@ -343,6 +572,11 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
       {/* ── Scrollable content ── */}
       <div style={{ flex: 1, minHeight: 0, overflow: "auto", paddingBottom: 4, borderTop: "1px solid var(--wash-06)", marginTop: 4 }}>
         <div className="sb-section-label">
+          <span>{t("app:sidebar.pinnedWorkspaces")}</span>
+        </div>
+        {pinnedProjects.map((project) => renderProject(project, true))}
+
+        <div className="sb-section-label">
           <span>{t("app:sidebar.workspaces")}</span>
           <button
             type="button"
@@ -364,151 +598,7 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
             {t("app:sidebar.openFolder")}
           </div>
         ) : (
-          projects.map((project) => {
-            const isActiveProject = project.workspace.id === activeWorkspaceId;
-            const isCollapsed = collapsed[project.workspace.id] ?? false;
-            const projectName = getWorkspaceLabel(project.workspace);
-            const isShowingAll = showAll[project.workspace.id] ?? false;
-            const visibleThreads = isShowingAll
-              ? project.threads
-              : project.threads.slice(0, MAX_VISIBLE_THREADS);
-            const hasMore = project.threads.length > MAX_VISIBLE_THREADS;
-            const constrainExpandedThreads = isShowingAll && hasMore;
-
-            return (
-              <div key={project.workspace.id} style={{ marginBottom: 2 }}>
-                {/* Workspace header */}
-                <button
-                  type="button"
-                  className={`sb-project ${isActiveProject ? "sb-project-active" : ""}`}
-                  onClick={() => {
-                    if (isActiveProject) {
-                      toggleCollapse(project.workspace.id);
-                    } else {
-                      void onSelectProject(project.workspace.id);
-                    }
-                  }}
-                >
-                  {isCollapsed ? (
-                    <ChevronRight size={12} style={{ flexShrink: 0, opacity: 0.4 }} />
-                  ) : (
-                    <ChevronDown size={12} style={{ flexShrink: 0, opacity: 0.4 }} />
-                  )}
-                  <FolderGit2
-                    size={14}
-                    style={{
-                      flexShrink: 0,
-                      color: isActiveProject ? "var(--accent)" : "var(--text-3)",
-                    }}
-                  />
-                  <span className="sb-project-name">{projectName}</span>
-
-                  <span className="sb-project-trailing">
-                    {project.threads.length > 0 && (
-                      <span className="sb-project-count">
-                        {project.threads.length}
-                      </span>
-                    )}
-                    <WorkspaceMoreMenu
-                      workspace={project.workspace}
-                      onOpenSettings={() => openWorkspaceSettings(project.workspace.id)}
-                      onArchive={() => onDeleteWorkspace(project.workspace)}
-                    />
-                  </span>
-                </button>
-
-                {/* Threads — tree-line indented */}
-                {!isCollapsed && (
-                  <div
-                    className={`sb-thread-tree${constrainExpandedThreads ? " sb-thread-tree-scrollable" : ""}`}
-                  >
-                    {project.threads.length === 0 ? (
-                      <div className="sb-no-threads">{t("app:sidebar.noThreads")}</div>
-                    ) : (
-                      <>
-                        {visibleThreads.map((thread, i) => {
-                          const isActive = thread.id === activeThreadId;
-                          const isRunning = thread.status === "streaming";
-                          const isAwaitingApproval = thread.status === "awaiting_approval";
-                          const statusLabel = isRunning
-                            ? t("app:sidebar.running")
-                            : isAwaitingApproval
-                              ? t("app:sidebar.needsApproval")
-                              : null;
-                          return (
-                            <div
-                              key={thread.id}
-                              role="button"
-                              tabIndex={0}
-                              className={`sb-thread sb-thread-animate ${isActive ? "sb-thread-active" : ""}`}
-                              style={{ animationDelay: `${i * 20}ms` }}
-                              onClick={() => void onSelectThread(thread)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter" || e.key === " ") {
-                                  e.preventDefault();
-                                  void onSelectThread(thread);
-                                }
-                              }}
-                            >
-                              <span className="sb-thread-title">
-                                {getThreadLabel(thread)}
-                              </span>
-                              <span className="sb-thread-trailing">
-                                {statusLabel ? (
-                                  <span
-                                    className={`sb-thread-status-ring sb-thread-status-ring--${isRunning ? "running" : "approval"}`}
-                                    role="img"
-                                    aria-label={statusLabel}
-                                    title={statusLabel}
-                                  />
-                                ) : (
-                                  <span className="sb-thread-time">
-                                    {thread.lastActivityAt
-                                      ? formatRelativeTime(thread.lastActivityAt, i18n.language)
-                                      : ""}
-                                  </span>
-                                )}
-                                <button
-                                  type="button"
-                                  title={t("app:sidebar.archiveThread")}
-                                  aria-label={t("app:sidebar.archiveThread")}
-                                  className="sb-thread-archive"
-                                  onMouseDown={(e) => e.stopPropagation()}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    void onDeleteThread(thread);
-                                  }}
-                                >
-                                  <Archive size={11} />
-                                </button>
-                              </span>
-                            </div>
-                          );
-                        })}
-
-                        {hasMore && !isShowingAll && (
-                          <button
-                            type="button"
-                            className="sb-show-more"
-                            onClick={() =>
-                              setShowAll((prev) => ({
-                                ...prev,
-                                [project.workspace.id]: true,
-                              }))
-                            }
-                          >
-                            {t("app:sidebar.showMore", {
-                              count: project.threads.length - MAX_VISIBLE_THREADS,
-                            })}
-                          </button>
-                        )}
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })
+          unpinnedProjects.map((project) => renderProject(project, false))
         )}
 
         {/* Archived section */}

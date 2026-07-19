@@ -4260,6 +4260,11 @@ button, input, textarea, select {
   color: var(--text-1);
 }
 
+.sb-project:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
 .sb-project-active {
   color: var(--text-1);
   background: var(--wash-05);
@@ -4280,15 +4285,37 @@ button, input, textarea, select {
   text-align: left;
 }
 
-/* Trailing slot — count and more button share the same cell */
+/* Trailing slot — keep the count compact until a project is hovered or focused. */
 .sb-project-trailing {
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
+  min-width: 18px;
 }
 
-.sb-project-trailing > * {
-  grid-area: 1 / 1;
+.sb-project-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 0;
+  min-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition: width var(--duration-fast) var(--ease-out),
+              opacity var(--duration-fast) var(--ease-out);
+}
+
+.sb-project:hover .sb-project-count,
+.sb-project:focus-within .sb-project-count {
+  display: none;
+}
+
+.sb-project:hover .sb-project-actions,
+.sb-project:focus-within .sb-project-actions {
+  width: 46px;
+  opacity: 0.6;
+  pointer-events: auto;
 }
 
 .sb-project-count {
@@ -4305,29 +4332,27 @@ button, input, textarea, select {
   font-variant-numeric: tabular-nums;
 }
 
-.sb-project-archive {
+.sb-project-action {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 22px;
   height: 22px;
   border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  padding: 0;
   color: var(--text-3);
   cursor: pointer;
-  opacity: 0;
   transition: all var(--duration-fast) var(--ease-out);
   flex-shrink: 0;
 }
 
-.sb-project:hover .sb-project-count {
-  visibility: hidden;
+.sb-project-pin[aria-pressed="true"] {
+  color: var(--accent);
 }
 
-.sb-project:hover .sb-project-archive {
-  opacity: 0.6;
-}
-
-.sb-project-archive:hover {
+.sb-project-action:hover {
   background: var(--wash-08);
   color: var(--text-1);
   opacity: 1 !important;

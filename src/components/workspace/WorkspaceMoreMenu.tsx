@@ -22,7 +22,7 @@ export function WorkspaceMoreMenu({
   const { t } = useTranslation("workspace");
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
-  const triggerRef = useRef<HTMLSpanElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   const closeMenu = useCallback(() => setMenuOpen(false), []);
@@ -72,16 +72,17 @@ export function WorkspaceMoreMenu({
 
   return (
     <>
-      <span
+      <button
+        type="button"
         ref={triggerRef}
-        role="button"
         title={t("more.options")}
-        className="sb-project-archive"
+        aria-label={t("more.options")}
+        className="sb-project-action sb-project-more"
         onMouseDown={(e) => e.stopPropagation()}
         onClick={handleTriggerClick}
       >
         <MoreHorizontal size={12} />
-      </span>
+      </button>
 
       {menuOpen &&
         createPortal(
