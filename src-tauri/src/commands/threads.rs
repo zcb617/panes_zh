@@ -1122,6 +1122,15 @@ pub async fn archive_thread(state: State<'_, AppState>, thread_id: String) -> Re
                         thread.engine_thread_id.as_deref().unwrap_or_default()
                     );
                 }
+                Err(error)
+                    if thread.engine_id == "codex"
+                        && is_already_archived_codex_thread_error(&error) =>
+                {
+                    log::info!(
+                        "codex thread {} is already archived remotely; archiving its local record",
+                        thread.engine_thread_id.as_deref().unwrap_or_default()
+                    );
+                }
                 Err(error) => Err(err_to_string(error))?,
             }
         }
@@ -2619,6 +2628,15 @@ fn is_missing_codex_thread_error(error: &anyhow::Error) -> bool {
         || message.contains("unknown thread")
         || message.contains("no such thread");
     mentions_thread && missing
+}
+
+fn is_already_archived_codex_thread_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    if message.contains("method not found") || message.contains("unsupported") {
+        return false;
+    }
+
+    message.contains("thread") && message.contains("already") && message.contains("archived")
 }
 
 fn approval_policy_metadata_key(engine_id: &str) -> &'static str {
