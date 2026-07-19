@@ -1,0 +1,23 @@
+# Prompt before running commands with the prefix `npm install` outside the sandbox.
+prefix_rule(
+    pattern = ["npm", "install"],
+    decision = "prompt",
+    justification = "npm install is not allowed",
+)
+
+# Prompt before running commands with the prefix `pnpm install` outside the sandbox.
+prefix_rule(
+    pattern = ["pnpm", "install"],
+    decision = "prompt",
+    justification = "npm install is not allowed",
+)
+
+# git push
+prefix_rule(
+    pattern = ["git", "push"],
+    decision = "forbidden",
+    justification = "git push is not allowed",
+    match = [
+        "git push",
+    ],
+)

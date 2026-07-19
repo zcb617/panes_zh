@@ -4,6 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
+import { ensureClaudeSdkPnpmLayout } from "./ensure-claude-sdk-pnpm-layout.mjs";
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 const requiredArtifacts = [
@@ -18,6 +20,8 @@ const requiredArtifacts = [
 
 const isWindows = process.platform === "win32";
 const pnpmExecutable = "pnpm";
+
+await ensureClaudeSdkPnpmLayout(repoRoot);
 
 async function ensureArtifactsExist() {
   for (const artifactPath of requiredArtifacts) {

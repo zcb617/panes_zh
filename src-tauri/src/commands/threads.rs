@@ -1114,22 +1114,30 @@ pub async fn archive_thread(state: State<'_, AppState>, thread_id: String) -> Re
         } else {
             match state.engines.archive_thread(&thread).await {
                 Ok(()) => {}
-                Err(error)
-                    if thread.engine_id == "codex" && is_missing_codex_thread_error(&error) =>
-                {
-                    log::info!(
-                        "codex thread {} is already absent remotely; archiving its local record",
-                        thread.engine_thread_id.as_deref().unwrap_or_default()
-                    );
-                }
-                Err(error)
-                    if thread.engine_id == "codex"
-                        && is_already_archived_codex_thread_error(&error) =>
-                {
-                    log::info!(
-                        "codex thread {} is already archived remotely; archiving its local record",
-                        thread.engine_thread_id.as_deref().unwrap_or_default()
-                    );
+                Err(error) if thread.engine_id == "codex" => {
+                    let engine_thread_id = thread.engine_thread_id.as_deref().unwrap_or_default();
+                    match codex_remote_thread_archive_state(state.inner(), engine_thread_id).await {
+                        Ok(CodexRemoteThreadArchiveState::Archived) => {
+                            log::info!(
+                                "codex thread {} is already archived remotely; archiving its local record",
+                                engine_thread_id
+                            );
+                        }
+                        Ok(CodexRemoteThreadArchiveState::Missing) => {
+                            log::info!(
+                                "codex thread {} is already absent remotely; archiving its local record",
+                                engine_thread_id
+                            );
+                        }
+                        Ok(CodexRemoteThreadArchiveState::Active) => Err(err_to_string(error))?,
+                        Err(state_error) => {
+                            log::warn!(
+                                "failed to resolve codex thread {} state after its archive request failed: {state_error}",
+                                engine_thread_id
+                            );
+                            Err(err_to_string(error))?;
+                        }
+                    }
                 }
                 Err(error) => Err(err_to_string(error))?,
             }
@@ -2616,27 +2624,45 @@ fn err_to_string(error: impl std::fmt::Display) -> String {
     format!("{error:#}")
 }
 
-fn is_missing_codex_thread_error(error: &anyhow::Error) -> bool {
-    let message = format!("{error:#}").to_ascii_lowercase();
-    if message.contains("method not found") || message.contains("unsupported") {
-        return false;
-    }
-
-    let mentions_thread = message.contains("thread");
-    let missing = message.contains("not found")
-        || message.contains("does not exist")
-        || message.contains("unknown thread")
-        || message.contains("no such thread");
-    mentions_thread && missing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexRemoteThreadArchiveState {
+    Active,
+    Archived,
+    Missing,
 }
 
-fn is_already_archived_codex_thread_error(error: &anyhow::Error) -> bool {
-    let message = format!("{error:#}").to_ascii_lowercase();
-    if message.contains("method not found") || message.contains("unsupported") {
-        return false;
+async fn codex_remote_thread_archive_state(
+    state: &AppState,
+    engine_thread_id: &str,
+) -> anyhow::Result<CodexRemoteThreadArchiveState> {
+    let engine_thread_id = engine_thread_id.trim();
+    if engine_thread_id.is_empty() {
+        return Ok(CodexRemoteThreadArchiveState::Active);
     }
 
-    message.contains("thread") && message.contains("already") && message.contains("archived")
+    let archived_threads = state
+        .engines
+        .list_codex_remote_threads(None, Some(true))
+        .await?;
+    if archived_threads
+        .iter()
+        .any(|thread| thread.engine_thread_id.as_str() == engine_thread_id)
+    {
+        return Ok(CodexRemoteThreadArchiveState::Archived);
+    }
+
+    let active_threads = state
+        .engines
+        .list_codex_remote_threads(None, Some(false))
+        .await?;
+    if active_threads
+        .iter()
+        .any(|thread| thread.engine_thread_id.as_str() == engine_thread_id)
+    {
+        Ok(CodexRemoteThreadArchiveState::Active)
+    } else {
+        Ok(CodexRemoteThreadArchiveState::Missing)
+    }
 }
 
 fn approval_policy_metadata_key(engine_id: &str) -> &'static str {
@@ -3490,22 +3516,6 @@ mod tests {
         )
         .expect("expected archived thread list");
         assert!(archived.iter().any(|candidate| candidate.id == thread.id));
-    }
-
-    #[test]
-    fn missing_codex_thread_error_is_distinguished_from_unsupported_method() {
-        assert!(is_missing_codex_thread_error(&anyhow::anyhow!(
-            "failed to archive codex thread: rpc error: thread 123 was not found"
-        )));
-        assert!(is_missing_codex_thread_error(&anyhow::anyhow!(
-            "failed to archive codex thread: thread does not exist"
-        )));
-        assert!(!is_missing_codex_thread_error(&anyhow::anyhow!(
-            "thread/archive: rpc error -32601: method not found"
-        )));
-        assert!(!is_missing_codex_thread_error(&anyhow::anyhow!(
-            "failed to connect to codex app-server"
-        )));
     }
 
     #[test]
