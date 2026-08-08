@@ -7163,6 +7163,8 @@ button, input, textarea, select {
   height: 100%;
   min-height: 0;
   background: var(--bg-1);
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .editor-markdown-preview-scroll {
@@ -7178,6 +7180,8 @@ button, input, textarea, select {
   color: var(--text-1);
   font-size: 14px;
   line-height: 1.7;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .editor-markdown-preview-prose > :first-child {
