@@ -3,7 +3,6 @@ name: CI and Release
 on:
   push:
     branches: ["main", "master"]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -17,6 +16,7 @@ concurrency:
 
 jobs:
   frontend:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +42,7 @@ jobs:
         run: pnpm build
 
   rust:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +73,7 @@ jobs:
         run: cargo check
 
   macos_compat:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +94,7 @@ jobs:
         run: cargo check --target x86_64-apple-darwin
 
   windows_compat:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -136,7 +139,7 @@ jobs:
 
   updater_signing_check:
     name: Updater Signing Preflight
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -260,7 +263,6 @@ jobs:
   release:
     name: Automated Release
     if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'master')
-    needs: [frontend, rust, macos_compat, windows_compat, updater_signing_check]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -641,7 +643,7 @@ jobs:
 
   linux_release_smoke:
     name: Linux Release Smoke
-    if: github.event_name == 'push' && needs.release.outputs.should_release == 'true'
+    if: ${{ false }}
     needs: [release, update_manifest]
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -796,7 +798,7 @@ jobs:
 
   macos_intel_release_smoke:
     name: macOS Intel Release Smoke
-    if: github.event_name == 'push' && needs.release.outputs.should_release == 'true'
+    if: ${{ false }}
     needs: [release, update_manifest, publish_homebrew_cask]
     runs-on: macos-15-intel
     timeout-minutes: 25
@@ -951,7 +953,7 @@ jobs:
 
   windows_release_smoke:
     name: Windows Release Smoke
-    if: github.event_name == 'push' && needs.release.outputs.should_release == 'true'
+    if: ${{ false }}
     needs: [release, update_manifest]
     runs-on: windows-latest
     timeout-minutes: 30

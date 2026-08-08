@@ -232,6 +232,10 @@ GitHub Actions signs updater artifacts automatically with the repository Actions
 
 To configure or restore both GitHub Actions secrets from that local recovery copy, run `./scripts/configure-tauri-updater-signing.ps1`. Use `-CheckOnly` to verify the local key, password, and embedded public key without changing GitHub. To rotate the key intentionally, run `./scripts/configure-tauri-updater-signing.ps1 -Rotate`; it archives the previous local recovery material, generates a new key/password pair, updates the embedded public key, and configures both GitHub secrets.
 
+### Release workflow
+
+Business and functional acceptance happens locally before committing. A push to `master` uses GitHub Actions as the cross-platform build and publishing service: it creates the signed desktop release artifacts and the updater manifest once. GitHub Actions does not replace local business testing or launch the application as a release-acceptance test. The optional compatibility and unsigned Windows installer checks run only when manually started with **Run workflow** in GitHub Actions.
+
 Git is recommended for the repo-management features, but the app can still launch without it.
 
 ## Development
