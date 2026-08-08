@@ -46,12 +46,12 @@
   },
   "plugins": {
     "updater": {
-      "endpoints": ["https://wygoralves.github.io/panes/latest.json"],
+      "endpoints": ["https://zcb617.github.io/panes_zh/latest.json"],
       "dialog": false,
       "windows": {
         "installMode": "passive"
       },
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFBQUU2N0M2QTgyNjZBNjgKUldSb2FpYW94bWV1cXVZeko4bjl6a1c0YlROWlcwVnFZTnI5UnM1OE00cmhOQm1tY0JLRStBelAK"
+      "pubkey": "ZFc1MGNuVnpkR1ZrSUdOdmJXMWxiblE2SUcxcGJtbHphV2R1SUhCMVlteHBZeUJyWlhrNklEUkZORVV4TWpoR1FrSTFPRGN3TTBFS1VsZFJObU5HYVRkcWVFcFBWR2QyYkVWT01pdEtTazVTVVhwcGMzWm9LMEUwVEdaTlVtaG1VekkzTTNnM2R5ODVaak5WSzAwclUwd0s="
     }
   }
 }

@@ -81,7 +81,7 @@ Panes is not a full IDE, but it does ship with a built-in multi-tab editor for q
 | Requirement | Version |
 |---|---|
 | Rust toolchain | stable |
-| Node.js | 20+ |
+| Node.js | 24+ |
 | pnpm | 9+ |
 | Codex CLI | Required for the Codex chat engine; setup can install it via npm |
 | Tauri v2 prerequisites | [See Tauri docs](https://v2.tauri.app/start/prerequisites/) |
@@ -225,6 +225,12 @@ pnpm tauri:build
 ```
 
 Common bundle artifacts include macOS DMGs/app archives, Linux DEB/AppImage outputs, and Windows NSIS installers, depending on platform and target.
+
+### Release signing
+
+GitHub Actions signs updater artifacts automatically with the repository Actions secret `TAURI_SIGNING_PRIVATE_KEY`; it is not tracked in Git or exported in a developer shell. The local recovery copy is `.tauri-signing/panes-updater.key` and is ignored by Git; do not commit or share it. The client public key and update URL are maintained in `src-tauri/tauri.conf.json`. Keep the private key secret unchanged after release: replacing it requires a manual reinstall for users on an older public key.
+
+To configure or restore the GitHub Actions secret from that local recovery copy, run `./scripts/configure-tauri-updater-signing.ps1`. Use `-CheckOnly` to verify the local key and the embedded public key without changing GitHub.
 
 Git is recommended for the repo-management features, but the app can still launch without it.
 

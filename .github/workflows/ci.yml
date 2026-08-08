@@ -25,7 +25,7 @@ jobs:
           version: 9
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: "pnpm"
           cache-dependency-path: pnpm-lock.yaml
       - name: Install dependencies
@@ -145,7 +145,7 @@ jobs:
           version: 9
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: "pnpm"
           cache-dependency-path: pnpm-lock.yaml
       - name: Install Rust
@@ -253,7 +253,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: "pnpm"
           cache-dependency-path: pnpm-lock.yaml
 
@@ -278,21 +278,10 @@ jobs:
         if: steps.release_check.outputs.should_release != 'true'
         run: 'echo "Skipping release: ${{ steps.release_check.outputs.reason }}"'
 
-      - name: Require release token for protected branch push
-        if: steps.release_check.outputs.should_release == 'true'
-        env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: |
-          if [ -z "$RELEASE_TOKEN" ]; then
-            echo "RELEASE_TOKEN is required for automated releases on a protected branch."
-            echo "Create a fine-grained PAT for a bypass-authorized account and save it as the RELEASE_TOKEN Actions secret."
-            exit 1
-          fi
-
       - name: Configure authenticated remote for release push
         if: steps.release_check.outputs.should_release == 'true'
         env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN != '' && secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           git config --local --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/${{ github.repository }}.git"
@@ -307,7 +296,7 @@ jobs:
         if: steps.release_check.outputs.should_release == 'true'
         run: pnpm release -- --ci
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN != '' && secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Capture released tag
         id: release_meta
@@ -338,7 +327,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: "pnpm"
           cache-dependency-path: pnpm-lock.yaml
 
@@ -414,7 +403,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: "pnpm"
           cache-dependency-path: pnpm-lock.yaml
 
@@ -442,7 +431,6 @@ jobs:
         env:
           PANES_SKIP_DESKTOP_PREBUILD: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Verify universal macOS app binary
         if: matrix.platform == 'macos-15'
@@ -465,7 +453,6 @@ jobs:
           NO_STRIP: "true"
           PANES_SKIP_DESKTOP_PREBUILD: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build Windows Tauri bundles
         if: matrix.platform == 'windows-latest'
@@ -473,7 +460,6 @@ jobs:
         env:
           PANES_SKIP_DESKTOP_PREBUILD: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload Linux assets to GitHub Release
         if: matrix.platform == 'ubuntu-22.04'
@@ -528,7 +514,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Generate latest.json
         run: node scripts/generate-update-manifest.mjs "${{ needs.release.outputs.released_tag }}"
@@ -579,7 +565,7 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.tap_token.outputs.present == 'true'
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Checkout tap repository
         if: steps.tap_token.outputs.present == 'true'
@@ -629,7 +615,7 @@ jobs:
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Download Linux release assets
         env:
@@ -785,7 +771,7 @@ jobs:
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Download macOS release assets
         env:
@@ -939,7 +925,7 @@ jobs:
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Download Windows release assets
         shell: pwsh

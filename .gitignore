@@ -23,6 +23,9 @@ AGENTS.md
 CLAUDE.md
 PERFORMANCE_PLANO.md
 
+# Local recovery copy for the Tauri updater signing key. Never commit it.
+.tauri-signing/
+
 # Local plans and docs
 plans-and-docs/
 

@@ -11,6 +11,7 @@ type SidecarEvent = Record<string, unknown>;
 const testFilePath = fileURLToPath(import.meta.url);
 const testDir = path.dirname(testFilePath);
 const repoRoot = path.resolve(testDir, "..");
+const itWithUnixSignals = process.platform === "win32" ? it.skip : it;
 const sidecarScriptPath = path.join(
   repoRoot,
   "src-tauri",
@@ -1145,7 +1146,7 @@ describe("claude-agent-sdk-server sidecar", () => {
     });
   });
 
-  it("emits interrupted turn completion before exiting on SIGTERM", async () => {
+  itWithUnixSignals("emits interrupted turn completion before exiting on SIGTERM", async () => {
     const harness = await spawnHarness({
       steps: [
         {
