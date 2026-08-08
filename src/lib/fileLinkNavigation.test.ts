@@ -224,6 +224,32 @@ describe("fileLinkNavigation", () => {
     });
   });
 
+  it("decodes UTF-8 file URL paths on Windows and POSIX", () => {
+    const encodedFileName =
+      "%E7%BB%99%E5%BC%80%E6%BA%90%E9%A1%B9%E7%9B%AE%EF%BC%8C%E4%B8%AD%E6%96%87%20%E6%96%87%E4%BB%B6.md";
+    const fileName = "给开源项目，中文 文件.md";
+
+    expect(
+      resolveLocalFileLinkTarget(`file:///E:/content_factory/drafts/${encodedFileName}`, {
+        workspaceRoot: "E:/content_factory",
+        repos: [],
+      }),
+    ).toMatchObject({
+      rootPath: "E:/content_factory",
+      filePath: `drafts/${fileName}`,
+    });
+
+    expect(
+      resolveLocalFileLinkTarget(`file:///home/dev/content_factory/drafts/${encodedFileName}`, {
+        workspaceRoot: "/home/dev/content_factory",
+        repos: [],
+      }),
+    ).toMatchObject({
+      rootPath: "/home/dev/content_factory",
+      filePath: `drafts/${fileName}`,
+    });
+  });
+
   it("prefers the deepest matching repo root before falling back to the workspace root", () => {
     expect(
       resolveLocalFileLinkTarget("/workspace/apps/app/packages/web/src/page.tsx#L5", {
@@ -388,6 +414,34 @@ describe("fileLinkNavigation", () => {
 
     expect(mockOpenFileAtLocation).toHaveBeenCalledWith(
       "/workspace/apps/app", "src/main.ts", { line: 12, column: 4 },
+    );
+  });
+
+  it("opens UTF-8 encoded Windows file URLs with their decoded file name", async () => {
+    mockWorkspaceState.activeRepoId = "no-active-repo";
+    mockWorkspaceState.workspaces = [
+      {
+        id: "ws-1",
+        name: "Content factory",
+        rootPath: "E:/content_factory",
+        scanDepth: 4,
+        createdAt: "",
+        lastOpenedAt: "",
+      },
+    ];
+    mockWorkspaceState.repos = [];
+
+    await expect(
+      navigateLinkTarget(
+        "file:///E:/content_factory/drafts/2026-08-08/%E7%BB%99%E5%BC%80%E6%BA%90%E9%A1%B9%E7%9B%AE%EF%BC%8C%E4%B8%AD%E6%96%87%20%E6%96%87%E4%BB%B6.md",
+        { shiftKey: true },
+      ),
+    ).resolves.toBe("internal");
+
+    expect(mockOpenFileAtLocation).toHaveBeenCalledWith(
+      "E:/content_factory",
+      "drafts/2026-08-08/给开源项目，中文 文件.md",
+      null,
     );
   });
 

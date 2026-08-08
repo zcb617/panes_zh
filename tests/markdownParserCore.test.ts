@@ -71,11 +71,12 @@ describe("renderMarkdownToHtml", () => {
     expect(html).not.toContain('href="src/ignored.ts"');
   });
 
-  it("preserves explicit markdown links to local files", () => {
+  it("preserves raw local-file references while rendering their decoded paths", () => {
     const html = renderMarkdownToHtml("[readme](README.md) [file](file:///repo/README.md#L4)");
 
     expect(html).toContain('href="README.md"');
-    expect(html).toContain('href="file:///repo/README.md#L4"');
+    expect(html).toContain('href="/repo/README.md"');
+    expect(html).toContain('data-local-file-reference="file:///repo/README.md#L4"');
   });
 
   it("does not allow local file URLs in image sources", () => {
