@@ -1,5 +1,24 @@
 # Changelog
 
+## [](https://github.com/zcb617/panes_zh/compare/v0.63.3...vnull) (2026-08-08)
+
+### Features
+
+* add cached extension management ([10af45a](https://github.com/zcb617/panes_zh/commit/10af45af5e5720977b9eb29080886ffeb3dad242))
+* add classic chat slash picker ([d9688a3](https://github.com/zcb617/panes_zh/commit/d9688a35422db422cb42e6e8571ee54e3fc73cb1))
+* add project pinning ([4211684](https://github.com/zcb617/panes_zh/commit/4211684a911534e2ffa4c7f8bd16b53dcc7df3fe))
+* add Simplified Chinese support and fix Codex autonomy policy ([4d1c6aa](https://github.com/zcb617/panes_zh/commit/4d1c6aa993350a556ac7dd5662dce9697875ba1d))
+* preserve chat composer drafts and configure input behavior ([764e46e](https://github.com/zcb617/panes_zh/commit/764e46eccf2c22dced0d36ee5830654602f8b307))
+
+### Bug Fixes
+
+* **chat:** keep local file line references ([16c20f7](https://github.com/zcb617/panes_zh/commit/16c20f7b902f0fe741117c321e97db49c7a26c52))
+* **codex:** align sandbox policy with app-server ([bd425f5](https://github.com/zcb617/panes_zh/commit/bd425f5fe7bc1dad1ce327ff6800742b10cb5a34))
+* **codex:** confirm remote thread removal locally ([8c5a824](https://github.com/zcb617/panes_zh/commit/8c5a8245e8040391077786ce2121f59ffabcd227))
+* **codex:** discover and refresh remote threads ([a1e99db](https://github.com/zcb617/panes_zh/commit/a1e99db62af0b8ab896180e96c670ef569e7191a))
+* improve sidebar session status ([f27db6d](https://github.com/zcb617/panes_zh/commit/f27db6d402423999358816ab630cc6cf5f754c3a))
+* refine classic slash menu layout ([b57f303](https://github.com/zcb617/panes_zh/commit/b57f303a59f779a0e756103d433e700f2c6aed6f))
+
 ## [](https://github.com/zcb617/panes_zh/compare/v0.63.0...vnull) (2026-08-08)
 
 ### Bug Fixes
