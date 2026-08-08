@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { PanelRightOpen } from "lucide-react";
 import { Sidebar } from "../sidebar/Sidebar";
 import { ActiveWorkspacePaneShell } from "../workspace/WorkspacePaneShell";
 import { HarnessPanel } from "../onboarding/HarnessPanel";
@@ -60,6 +61,7 @@ export function ThreeColumnLayout() {
   const toggleSidebarPin = useUiStore((state) => state.toggleSidebarPin);
   const showGitPanel = useUiStore((state) => state.showGitPanel);
   const gitPanelPinned = useUiStore((state) => state.gitPanelPinned);
+  const setGitPanelVisible = useUiStore((state) => state.setGitPanelVisible);
   const setGitPanelPinned = useUiStore((state) => state.setGitPanelPinned);
   const focusMode = useUiStore((state) => state.focusMode);
   const activeView = useUiStore((state) => state.activeView);
@@ -314,7 +316,7 @@ export function ThreeColumnLayout() {
               onResize={setGitPanelSize}
             >
               <div className="content-panel" style={{ height: "100%" }}>
-                <GitPanel />
+                <GitPanel onClose={() => setGitPanelVisible(false)} />
               </div>
             </Panel>
           </PanelGroup>
@@ -323,6 +325,18 @@ export function ThreeColumnLayout() {
             {mainContent}
           </div>
         )}
+
+        {!showGitPanel && !settingsActive ? (
+          <button
+            type="button"
+            className="git-panel-reveal-button"
+            title={t("panel.show")}
+            aria-label={t("panel.show")}
+            onClick={() => setGitPanelVisible(true)}
+          >
+            <PanelRightOpen size={15} />
+          </button>
+        ) : null}
 
         {showGitPanel && !gitPanelPinned && !settingsActive ? (
           <GitFlyoutContext.Provider value={gitFlyoutContextValue}>
@@ -373,6 +387,7 @@ export function ThreeColumnLayout() {
                     setGitPanelPinned(true);
                     setGitFlyoutVisible(false);
                   }}
+                  onClose={() => setGitPanelVisible(false)}
                 />
               </div>
             </div>

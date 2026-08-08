@@ -6,6 +6,7 @@ import {
 
 const SIDEBAR_PINNED_KEY = "panes:sidebarPinned";
 const GIT_PANEL_PINNED_KEY = "panes:gitPanelPinned";
+const GIT_PANEL_VISIBLE_KEY = "panes:gitPanelVisible";
 const EXPLORER_OPEN_KEY = "panes:explorerOpen";
 
 interface MessageFocusTarget {
@@ -54,6 +55,7 @@ interface UiState {
   toggleSidebarPin: () => void;
   setSidebarPinned: (pinned: boolean) => void;
   toggleGitPanel: () => void;
+  setGitPanelVisible: (visible: boolean) => void;
   toggleGitPanelPin: () => void;
   setGitPanelPinned: (pinned: boolean) => void;
   toggleExplorer: () => void;
@@ -87,6 +89,14 @@ const savedGitPanelPinned = (() => {
   }
 })();
 
+const savedGitPanelVisible = (() => {
+  try {
+    return localStorage.getItem(GIT_PANEL_VISIBLE_KEY);
+  } catch {
+    return null;
+  }
+})();
+
 const savedExplorerOpen = (() => {
   try {
     return localStorage.getItem(EXPLORER_OPEN_KEY);
@@ -98,7 +108,7 @@ const savedExplorerOpen = (() => {
 export const useUiStore = create<UiState>((set) => ({
   showSidebar: true,
   sidebarPinned: savedPinned !== null ? savedPinned === "true" : true,
-  showGitPanel: true,
+  showGitPanel: savedGitPanelVisible !== null ? savedGitPanelVisible === "true" : true,
   gitPanelPinned: savedGitPanelPinned !== null ? savedGitPanelPinned === "true" : true,
   showExplorer: savedExplorerOpen !== null ? savedExplorerOpen === "true" : true,
   focusMode: false,
@@ -142,12 +152,30 @@ export const useUiStore = create<UiState>((set) => ({
     }
     set({ sidebarPinned: pinned, showSidebar: true });
   },
-  toggleGitPanel: () => set((state) => ({ showGitPanel: !state.showGitPanel })),
+  toggleGitPanel: () =>
+    set((state) => {
+      const next = !state.showGitPanel;
+      try {
+        localStorage.setItem(GIT_PANEL_VISIBLE_KEY, String(next));
+      } catch {
+        // Ignore storage failures in non-browser/test environments.
+      }
+      return { showGitPanel: next };
+    }),
+  setGitPanelVisible: (visible) => {
+    try {
+      localStorage.setItem(GIT_PANEL_VISIBLE_KEY, String(visible));
+    } catch {
+      // Ignore storage failures in non-browser/test environments.
+    }
+    set({ showGitPanel: visible });
+  },
   toggleGitPanelPin: () =>
     set((state) => {
       const next = !state.gitPanelPinned;
       try {
         localStorage.setItem(GIT_PANEL_PINNED_KEY, String(next));
+        localStorage.setItem(GIT_PANEL_VISIBLE_KEY, "true");
       } catch {
         // Ignore storage failures in non-browser/test environments.
       }
@@ -156,6 +184,7 @@ export const useUiStore = create<UiState>((set) => ({
   setGitPanelPinned: (pinned) => {
     try {
       localStorage.setItem(GIT_PANEL_PINNED_KEY, String(pinned));
+      localStorage.setItem(GIT_PANEL_VISIBLE_KEY, "true");
     } catch {
       // Ignore storage failures in non-browser/test environments.
     }

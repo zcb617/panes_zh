@@ -14,6 +14,8 @@
     "moreActions": "Mais ações",
     "pin": "Fixar painel Git",
     "unpin": "Desafixar painel Git",
+    "hide": "Ocultar painel Git",
+    "show": "Mostrar painel Git",
     "reveal": "Abrir painel Git flutuante",
     "backToMainRepo": "Voltar ao repo principal",
     "scanningRepositories": "Escaneando repositórios...",

@@ -136,6 +136,25 @@ describe("uiStore focus mode", () => {
     });
   });
 
+  it("persists explicit Git panel visibility changes", () => {
+    const storage = globalThis.localStorage as unknown as ReturnType<typeof createStorageStub>;
+
+    useUiStore.getState().setGitPanelVisible(false);
+
+    expect(storage.setItem).toHaveBeenCalledWith("panes:gitPanelVisible", "false");
+    expect(useUiStore.getState().showGitPanel).toBe(false);
+  });
+
+  it("restores saved Git panel visibility when the app starts", async () => {
+    const storage = globalThis.localStorage as unknown as ReturnType<typeof createStorageStub>;
+    storage.setItem("panes:gitPanelVisible", "false");
+
+    vi.resetModules();
+    const reloadedModule = await import("./uiStore");
+
+    expect(reloadedModule.useUiStore.getState().showGitPanel).toBe(false);
+  });
+
   it("persists git pin state changes and forces the panel visible", () => {
     const storage = globalThis.localStorage as unknown as ReturnType<typeof createStorageStub>;
     const state = useUiStore.getState();
@@ -144,6 +163,7 @@ describe("uiStore focus mode", () => {
     state.toggleGitPanelPin();
 
     expect(storage.setItem).toHaveBeenCalledWith("panes:gitPanelPinned", "false");
+    expect(storage.setItem).toHaveBeenCalledWith("panes:gitPanelVisible", "true");
     expect(useUiStore.getState()).toMatchObject({
       showGitPanel: true,
       gitPanelPinned: false,

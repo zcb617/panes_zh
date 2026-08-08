@@ -14,6 +14,8 @@
     "moreActions": "更多操作",
     "pin": "固定 Git 面板",
     "unpin": "取消固定 Git 面板",
+    "hide": "隐藏 Git 面板",
+    "show": "显示 Git 面板",
     "reveal": "打开浮动 Git 面板",
     "backToMainRepo": "返回主仓库",
     "scanningRepositories": "正在扫描仓库…",
