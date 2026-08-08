@@ -10,6 +10,8 @@ import { ExtensionManagerPage } from "../extensions/ExtensionManagerPage";
 import { GitPanel } from "../git/GitPanel";
 import { usesCustomWindowFrame } from "../../lib/windowActions";
 import { useUiStore } from "../../stores/uiStore";
+import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { getGitPanelLayoutState } from "../../lib/gitPanelLayout";
 import { handleDragDoubleClick, handleDragMouseDown } from "../../lib/windowDrag";
 import {
   GitFlyoutContext,
@@ -65,11 +67,22 @@ export function ThreeColumnLayout() {
   const setGitPanelPinned = useUiStore((state) => state.setGitPanelPinned);
   const focusMode = useUiStore((state) => state.focusMode);
   const activeView = useUiStore((state) => state.activeView);
+  const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const customWindowFrame = usesCustomWindowFrame();
 
   const settingsActive = activeView === "settings";
   const sidebarDocked = showSidebar && sidebarPinned && !settingsActive;
-  const gitPanelDocked = showGitPanel && gitPanelPinned && !settingsActive;
+  const {
+    gitPanelDocked,
+    gitPanelDockedInWorkspace,
+    showWorkspaceHeaderReveal,
+    showEdgeReveal,
+  } = getGitPanelLayoutState({
+    activeView,
+    activeWorkspaceId,
+    showGitPanel,
+    gitPanelPinned,
+  });
   const fullBleedContent = focusMode || !showSidebar || settingsActive;
   const showFocusDragStrip = focusMode && !showSidebar && !gitPanelDocked && !customWindowFrame;
 
@@ -242,7 +255,17 @@ export function ThreeColumnLayout() {
     ) : activeView === "settings" ? (
       <SettingsPage />
     ) : (
-      <ActiveWorkspacePaneShell />
+      <ActiveWorkspacePaneShell
+        dockedGitPanel={
+          gitPanelDockedInWorkspace ? (
+            <GitPanel onClose={() => setGitPanelVisible(false)} />
+          ) : undefined
+        }
+        gitPanelSize={gitPanelSize}
+        onGitPanelResize={setGitPanelSize}
+        onGitPanelUnpin={() => setGitPanelPinned(false)}
+        onShowGitPanel={showWorkspaceHeaderReveal ? () => setGitPanelVisible(true) : undefined}
+      />
     )
   );
 
@@ -280,7 +303,7 @@ export function ThreeColumnLayout() {
           />
         )}
 
-        {gitPanelDocked ? (
+        {gitPanelDocked && !gitPanelDockedInWorkspace ? (
           <PanelGroup
             key="main-layout-docked"
             id="main-layout-panels"
@@ -326,7 +349,7 @@ export function ThreeColumnLayout() {
           </div>
         )}
 
-        {!showGitPanel && !settingsActive ? (
+        {showEdgeReveal ? (
           <button
             type="button"
             className="git-panel-reveal-button"

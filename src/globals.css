@@ -2623,6 +2623,34 @@ button, input, textarea, select {
   gap: 4px;
 }
 
+.workspace-pane-header-git-reveal {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.workspace-pane-header-git-reveal:hover {
+  border-color: var(--border-active);
+  background: var(--wash-04);
+  color: var(--text-1);
+}
+
+.workspace-pane-header-git-reveal:focus-visible {
+  outline: 2px solid var(--border-active);
+  outline-offset: 2px;
+}
+
 .workspace-pane-drag-chip {
   position: fixed;
   left: 0;

@@ -9,15 +9,18 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
   type RefObject,
 } from "react";
 import {
   FilePen,
   MessageSquare,
+  PanelRightOpen,
   SquareSplitVertical,
   SquareTerminal,
   X,
 } from "lucide-react";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
@@ -140,10 +143,23 @@ interface SurfaceDragState {
 
 interface WorkspacePaneShellProps {
   workspaceId: string;
+  dockedGitPanel?: ReactNode;
+  gitPanelSize?: number;
+  onGitPanelResize?: (size: number) => void;
+  onGitPanelUnpin?: () => void;
+  onShowGitPanel?: () => void;
 }
 
-export function WorkspacePaneShell({ workspaceId }: WorkspacePaneShellProps) {
+export function WorkspacePaneShell({
+  workspaceId,
+  dockedGitPanel,
+  gitPanelSize = 26,
+  onGitPanelResize,
+  onGitPanelUnpin,
+  onShowGitPanel,
+}: WorkspacePaneShellProps) {
   const { t } = useTranslation("app");
+  const { t: tGit } = useTranslation("git");
   const terminalLayoutMode = useTerminalStore((state) =>
     state.workspaces[workspaceId]?.layoutMode ?? "chat",
   );
@@ -476,17 +492,74 @@ export function WorkspacePaneShell({ workspaceId }: WorkspacePaneShellProps) {
               );
             })}
           </div>
+          {onShowGitPanel ? (
+            <button
+              type="button"
+              className="workspace-pane-header-git-reveal"
+              title={tGit("panel.show")}
+              aria-label={tGit("panel.show")}
+              onClick={onShowGitPanel}
+            >
+              <PanelRightOpen size={15} />
+            </button>
+          ) : null}
         </div>
       </div>
 
       <div className="workspace-pane-canvas">
-        <PaneNodeView
-          node={layout.root}
-          workspaceId={workspaceId}
-          focusedLeafId={layout.focusedLeafId}
-          leafCount={countPaneLeaves(layout.root)}
-          surfaceDrag={surfaceDrag}
-        />
+        {dockedGitPanel ? (
+          <PanelGroup
+            key="workspace-layout-docked"
+            id="main-layout-panels"
+            autoSaveId="panes:main-layout-panels"
+            direction="horizontal"
+            style={{ height: "100%", flex: 1 }}
+          >
+            <Panel
+              id="main-layout-content"
+              order={1}
+              defaultSize={100 - gitPanelSize}
+              minSize={35}
+            >
+              <PaneNodeView
+                node={layout.root}
+                workspaceId={workspaceId}
+                focusedLeafId={layout.focusedLeafId}
+                leafCount={countPaneLeaves(layout.root)}
+                surfaceDrag={surfaceDrag}
+              />
+            </Panel>
+
+            <PanelResizeHandle
+              id="main-layout-git-resize-handle"
+              className="resize-handle"
+              aria-label={tGit("panel.unpin")}
+              title={tGit("panel.unpin")}
+              onClick={onGitPanelUnpin}
+            />
+
+            <Panel
+              id="main-layout-git-panel"
+              order={2}
+              defaultSize={gitPanelSize}
+              minSize={18}
+              maxSize={40}
+              onResize={onGitPanelResize}
+            >
+              <div className="content-panel" style={{ height: "100%" }}>
+                {dockedGitPanel}
+              </div>
+            </Panel>
+          </PanelGroup>
+        ) : (
+          <PaneNodeView
+            node={layout.root}
+            workspaceId={workspaceId}
+            focusedLeafId={layout.focusedLeafId}
+            leafCount={countPaneLeaves(layout.root)}
+            surfaceDrag={surfaceDrag}
+          />
+        )}
       </div>
 
       {surfaceDrag && (
@@ -624,7 +697,9 @@ function WorkspacePaneBreadcrumb({
   );
 }
 
-export function ActiveWorkspacePaneShell() {
+export function ActiveWorkspacePaneShell(
+  props: Omit<WorkspacePaneShellProps, "workspaceId">,
+) {
   const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const { t } = useTranslation("app");
 
@@ -636,7 +711,7 @@ export function ActiveWorkspacePaneShell() {
     );
   }
 
-  return <WorkspacePaneShell workspaceId={activeWorkspaceId} />;
+  return <WorkspacePaneShell workspaceId={activeWorkspaceId} {...props} />;
 }
 
 interface PaneNodeViewProps {
