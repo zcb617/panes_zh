@@ -184,7 +184,10 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
       preferredWorkflow: state.preferredWorkflow,
       selectedChatEngines: state.selectedChatEngines,
     })),
-  closeOnboarding: () => set({ open: false, installLog: [], error: null, installing: null }),
+  closeOnboarding: () => {
+    writeBooleanKey(ONBOARDING_COMPLETED_KEY, true);
+    set({ completed: true, open: false, installLog: [], error: null, installing: null });
+  },
   isCompleted: () => get().completed,
   hasLegacyCompletion: () => get().legacyCompleted,
   setStep: (step) => set({ step, error: null }),

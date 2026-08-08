@@ -109,6 +109,28 @@ describe("onboardingStore", () => {
     });
   });
 
+  it("persists completion when onboarding is dismissed", () => {
+    useOnboardingStore.setState({
+      open: true,
+      completed: false,
+      installLog: [{ dep: "codex", line: "installing", stream: "stdout" }],
+      installing: { kind: "harness", id: "codex", label: "Codex CLI" },
+      error: "temporary failure",
+    });
+
+    useOnboardingStore.getState().closeOnboarding();
+
+    expect(localStorage.getItem(ONBOARDING_COMPLETED_KEY)).toBe("1");
+    expect(useOnboardingStore.getState()).toMatchObject({
+      completed: true,
+      open: false,
+      installLog: [],
+      installing: null,
+      error: null,
+    });
+    expect(readStoredOnboardingState().completed).toBe(true);
+  });
+
   it("uses the direct harness install path and records completion state", async () => {
     mockIpc.installHarness.mockResolvedValue({
       success: true,
