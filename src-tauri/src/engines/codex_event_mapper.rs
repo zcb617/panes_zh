@@ -36,6 +36,7 @@ impl TurnEventMapper {
         match method_key.as_str() {
             "turnstarted" => vec![EngineEvent::TurnStarted {
                 client_turn_id: None,
+                remote_turn_id: None,
             }],
             "turncompleted" => {
                 let mut events = Vec::new();
@@ -273,6 +274,7 @@ impl TurnEventMapper {
                     if normalized_status == "inprogress" {
                         out.push(EngineEvent::TurnStarted {
                             client_turn_id: None,
+                            remote_turn_id: None,
                         });
                     } else {
                         let completion_status = parse_turn_completion_status(status);

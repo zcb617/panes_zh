@@ -1677,7 +1677,10 @@ async fn run_turn(
     let approval_event_topic = format!("approval-request-{}", thread.id);
     let mut pending_event: Option<EngineEvent> = None;
 
-    let initial_turn_started_event = EngineEvent::TurnStarted { client_turn_id };
+    let initial_turn_started_event = EngineEvent::TurnStarted {
+        client_turn_id,
+        remote_turn_id: None,
+    };
     let initial_progress = process_stream_event(
         &app,
         &state,
@@ -2224,6 +2227,7 @@ async fn run_codex_review_turn(
 
     let initial_turn_started_event = EngineEvent::TurnStarted {
         client_turn_id: None,
+        remote_turn_id: None,
     };
     let initial_progress = process_stream_event(
         &app,
@@ -2822,6 +2826,26 @@ async fn process_stream_event(
     }
 
     match &normalized_event {
+        EngineEvent::TurnStarted {
+            remote_turn_id: Some(remote_turn_id),
+            ..
+        } => {
+            if let Err(error) = run_db(state.db.clone(), {
+                let assistant_message_id = assistant_message_id.to_string();
+                let remote_turn_id = remote_turn_id.clone();
+                move |db| {
+                    db::messages::bind_local_turn_to_remote_turn(
+                        db,
+                        &assistant_message_id,
+                        &remote_turn_id,
+                    )
+                }
+            })
+            .await
+            {
+                log::warn!("failed to bind local turn to remote turn id: {error}");
+            }
+        }
         EngineEvent::ActionStarted {
             action_id,
             engine_action_id,

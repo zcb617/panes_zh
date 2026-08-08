@@ -1195,7 +1195,7 @@ describe("chatStore send", () => {
     { status: "streaming" as const, expectedStreaming: true },
     { status: "awaiting_approval" as const, expectedStreaming: true },
   ])(
-    "preserves the bound thread runtime status when loading a $status thread",
+    "syncs and preserves the bound thread runtime status when loading a $status thread",
     async ({ status, expectedStreaming }) => {
       const thread = {
         id: "thread-1",
@@ -1226,8 +1226,9 @@ describe("chatStore send", () => {
         error: undefined,
       });
 
+      mockIpc.syncThreadFromEngine.mockResolvedValueOnce(thread);
       await useChatStore.getState().setActiveThread("thread-1");
-      expect(mockIpc.syncThreadFromEngine).not.toHaveBeenCalled();
+      expect(mockIpc.syncThreadFromEngine).toHaveBeenCalledWith("thread-1");
 
       expect(useChatStore.getState()).toMatchObject({
         status,
@@ -1347,6 +1348,45 @@ describe("chatStore send", () => {
 
     await useChatStore.getState().setActiveThread("thread-1");
 
+    expect(mockIpc.syncThreadFromEngine).toHaveBeenCalledWith("thread-1");
+    expect(mockIpc.getThreadMessagesWindow).toHaveBeenCalledWith("thread-1", null, 80);
+  });
+
+  it("re-syncs an already selected attached Codex thread", async () => {
+    const thread = {
+      id: "thread-1",
+      workspaceId: "workspace-1",
+      repoId: null,
+      engineId: "codex" as const,
+      modelId: "gpt-5.3-codex",
+      engineThreadId: "engine-thread-1",
+      engineMetadata: {},
+      title: "Thread 1",
+      status: "idle" as const,
+      messageCount: 1,
+      totalTokens: 0,
+      createdAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+    };
+    const previousUnlisten = vi.fn();
+    useThreadStore.setState({
+      threads: [thread],
+      threadsByWorkspace: { "workspace-1": [thread] },
+      archivedThreadsByWorkspace: {},
+      activeThreadId: "thread-1",
+      loading: false,
+      error: undefined,
+    });
+    useChatStore.setState({
+      threadId: "thread-1",
+      unlisten: previousUnlisten,
+      status: "idle",
+      streaming: false,
+    });
+
+    await useChatStore.getState().setActiveThread("thread-1");
+
+    expect(previousUnlisten).toHaveBeenCalledOnce();
     expect(mockIpc.syncThreadFromEngine).toHaveBeenCalledWith("thread-1");
     expect(mockIpc.getThreadMessagesWindow).toHaveBeenCalledWith("thread-1", null, 80);
   });

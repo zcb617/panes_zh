@@ -115,6 +115,7 @@ fn read_json_hex_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) ->
 pub enum EngineEvent {
     TurnStarted {
         client_turn_id: Option<String>,
+        remote_turn_id: Option<String>,
     },
     TurnCompleted {
         token_usage: Option<TokenUsage>,

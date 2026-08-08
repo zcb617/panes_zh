@@ -20,6 +20,7 @@ pub struct ImportedMessageRecord {
     pub blocks: Value,
     pub status: MessageStatusDto,
     pub turn_engine_id: Option<String>,
+    pub remote_turn_id: Option<String>,
     pub turn_model_id: Option<String>,
     pub turn_reasoning_effort: Option<String>,
     pub token_input: u64,
@@ -130,7 +131,7 @@ pub fn clone_thread_messages(
     Ok(messages.len())
 }
 
-pub fn replace_thread_messages(
+pub fn append_thread_messages(
     db: &Database,
     thread_id: &str,
     messages: &[ImportedMessageRecord],
@@ -140,36 +141,39 @@ pub fn replace_thread_messages(
         .transaction()
         .context("failed to start thread message import transaction")?;
 
-    tx.execute(
-        "DELETE FROM actions WHERE thread_id = ?1",
-        params![thread_id],
-    )
-    .context("failed to clear imported thread actions")?;
-    tx.execute(
-        "DELETE FROM approvals WHERE thread_id = ?1",
-        params![thread_id],
-    )
-    .context("failed to clear imported thread approvals")?;
-    tx.execute(
-        "DELETE FROM messages WHERE thread_id = ?1",
-        params![thread_id],
-    )
-    .context("failed to clear imported thread messages")?;
-
     let fallback_created_at_base = Utc::now();
+    let mut inserted = 0;
     for (index, message) in messages.iter().enumerate() {
+        let Some(remote_turn_id) = message
+            .remote_turn_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if message.role == "user" {
+            bind_legacy_local_turn_to_remote_turn(&tx, thread_id, message, remote_turn_id)?;
+        }
         let created_at = message.created_at.clone().unwrap_or_else(|| {
             (fallback_created_at_base + ChronoDuration::milliseconds(index as i64))
                 .format("%Y-%m-%d %H:%M:%S%.3f")
                 .to_string()
         });
-
-        tx.execute(
+        inserted += tx.execute(
             "INSERT INTO messages (
-                id, thread_id, role, content, blocks_json, turn_engine_id, turn_model_id,
+                id, thread_id, role, content, blocks_json, turn_engine_id, remote_turn_id, turn_model_id,
                 turn_reasoning_effort, schema_version, stream_seq, status, token_input,
                 token_output, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, 0, ?9, ?10, ?11, ?12)",
+            )
+            SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 0, ?10, ?11, ?12, ?13
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM messages
+                WHERE thread_id = ?2
+                  AND remote_turn_id = ?7
+                  AND role = ?3
+            )",
             params![
                 Uuid::new_v4().to_string(),
                 thread_id,
@@ -177,6 +181,7 @@ pub fn replace_thread_messages(
                 message.content,
                 message.blocks.to_string(),
                 message.turn_engine_id,
+                remote_turn_id,
                 message.turn_model_id,
                 message.turn_reasoning_effort,
                 message.status.as_str(),
@@ -190,7 +195,124 @@ pub fn replace_thread_messages(
 
     tx.commit()
         .context("failed to commit thread message import transaction")?;
-    Ok(messages.len())
+    Ok(inserted)
+}
+
+fn bind_legacy_local_turn_to_remote_turn(
+    tx: &rusqlite::Transaction<'_>,
+    thread_id: &str,
+    remote_message: &ImportedMessageRecord,
+    remote_turn_id: &str,
+) -> anyhow::Result<()> {
+    let Some(content) = remote_message
+        .content
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let local_user_id = tx
+        .query_row(
+            "SELECT id
+             FROM messages
+             WHERE thread_id = ?1
+               AND role = 'user'
+               AND remote_turn_id IS NULL
+               AND content = ?2
+             ORDER BY created_at ASC, rowid ASC
+             LIMIT 1",
+            params![thread_id, content],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("failed to find legacy local user message for remote turn binding")?;
+    let Some(local_user_id) = local_user_id else {
+        return Ok(());
+    };
+
+    let bound_user_count = tx
+        .execute(
+            "UPDATE messages
+             SET remote_turn_id = ?1
+             WHERE id = ?2
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM messages
+                   WHERE thread_id = ?3
+                     AND remote_turn_id = ?1
+                     AND role = 'user'
+               )",
+            params![remote_turn_id, local_user_id, thread_id],
+        )
+        .context("failed to bind legacy local user message to remote turn id")?;
+    if bound_user_count == 0 {
+        return Ok(());
+    }
+
+    tx.execute(
+        "UPDATE messages
+         SET remote_turn_id = ?1
+         WHERE id = (
+             SELECT candidate.id
+             FROM messages AS candidate
+             JOIN messages AS user ON user.id = ?2
+             WHERE candidate.thread_id = ?3
+               AND candidate.role = 'assistant'
+               AND candidate.remote_turn_id IS NULL
+               AND (
+                   candidate.created_at > user.created_at
+                   OR (candidate.created_at = user.created_at AND candidate.rowid > user.rowid)
+               )
+             ORDER BY candidate.created_at ASC, candidate.rowid ASC
+             LIMIT 1
+         )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM messages
+               WHERE thread_id = ?3
+                 AND remote_turn_id = ?1
+                 AND role = 'assistant'
+           )",
+        params![remote_turn_id, local_user_id, thread_id],
+    )
+    .context("failed to bind legacy local assistant message to remote turn id")?;
+    Ok(())
+}
+
+pub fn bind_local_turn_to_remote_turn(
+    db: &Database,
+    assistant_message_id: &str,
+    remote_turn_id: &str,
+) -> anyhow::Result<()> {
+    let remote_turn_id = remote_turn_id.trim();
+    if remote_turn_id.is_empty() {
+        return Ok(());
+    }
+
+    let conn = db.connect()?;
+    conn.execute(
+        "UPDATE messages
+         SET remote_turn_id = ?1
+         WHERE id = ?2
+            OR id = (
+                SELECT candidate.id
+                FROM messages AS candidate
+                JOIN messages AS assistant ON assistant.id = ?2
+                WHERE candidate.thread_id = assistant.thread_id
+                  AND candidate.role = 'user'
+                  AND (
+                    candidate.created_at < assistant.created_at
+                    OR (candidate.created_at = assistant.created_at AND candidate.rowid < assistant.rowid)
+                  )
+                ORDER BY candidate.created_at DESC, candidate.rowid DESC
+                LIMIT 1
+            )",
+        params![remote_turn_id, assistant_message_id],
+    )
+    .context("failed to bind local messages to remote turn id")?;
+    Ok(())
 }
 
 pub fn drop_last_turns(db: &Database, thread_id: &str, num_turns: u32) -> anyhow::Result<usize> {
@@ -1190,6 +1312,213 @@ mod tests {
             approval.get("status")?.as_str()?,
             approval.get("decision").and_then(Value::as_str),
         ))
+    }
+
+    #[test]
+    fn append_thread_messages_deduplicates_by_remote_turn_id_and_preserves_local_blocks() {
+        let db = test_db();
+        let thread_id = test_thread(&db);
+        insert_message(
+            &db,
+            &thread_id,
+            "user",
+            Some("local prompt".to_string()),
+            Some(json!([{ "type": "text", "content": "local prompt" }])),
+            MessageStatusDto::Completed,
+            Some("codex"),
+            Some("gpt-5.3-codex"),
+            None,
+        )
+        .unwrap();
+        let local_message = insert_message(
+            &db,
+            &thread_id,
+            "assistant",
+            Some("local answer".to_string()),
+            Some(json!([{
+                "type": "action",
+                "actionId": "local-action",
+                "summary": "Keep this local tool output"
+            }])),
+            MessageStatusDto::Completed,
+            Some("codex"),
+            Some("gpt-5.3-codex"),
+            None,
+        )
+        .unwrap();
+        let imported = vec![
+            ImportedMessageRecord {
+                role: "user".to_string(),
+                content: Some("local prompt".to_string()),
+                blocks: json!([{ "type": "text", "content": "local prompt" }]),
+                status: MessageStatusDto::Completed,
+                turn_engine_id: Some("remote-existing".to_string()),
+                remote_turn_id: Some("remote-existing".to_string()),
+                turn_model_id: None,
+                turn_reasoning_effort: None,
+                token_input: 0,
+                token_output: 0,
+                created_at: Some("2026-08-08 10:00:00.000".to_string()),
+            },
+            ImportedMessageRecord {
+                role: "assistant".to_string(),
+                content: Some("local answer".to_string()),
+                blocks: json!([{ "type": "text", "content": "local answer" }]),
+                status: MessageStatusDto::Completed,
+                turn_engine_id: Some("remote-existing".to_string()),
+                remote_turn_id: Some("remote-existing".to_string()),
+                turn_model_id: None,
+                turn_reasoning_effort: None,
+                token_input: 0,
+                token_output: 0,
+                created_at: Some("2026-08-08 10:01:00.000".to_string()),
+            },
+            ImportedMessageRecord {
+                role: "user".to_string(),
+                content: Some("new remote prompt".to_string()),
+                blocks: json!([{ "type": "text", "content": "new remote prompt" }]),
+                status: MessageStatusDto::Completed,
+                turn_engine_id: Some("remote-new".to_string()),
+                remote_turn_id: Some("remote-new".to_string()),
+                turn_model_id: None,
+                turn_reasoning_effort: None,
+                token_input: 0,
+                token_output: 0,
+                created_at: Some("2026-08-08 12:00:00.000".to_string()),
+            },
+            ImportedMessageRecord {
+                role: "assistant".to_string(),
+                content: Some("new remote answer".to_string()),
+                blocks: json!([{ "type": "text", "content": "new remote answer" }]),
+                status: MessageStatusDto::Completed,
+                turn_engine_id: Some("remote-new".to_string()),
+                remote_turn_id: Some("remote-new".to_string()),
+                turn_model_id: None,
+                turn_reasoning_effort: None,
+                token_input: 0,
+                token_output: 0,
+                created_at: Some("2026-08-08 12:00:00.000".to_string()),
+            },
+        ];
+
+        let appended = append_thread_messages(&db, &thread_id, &imported).unwrap();
+
+        assert_eq!(appended, 2);
+        let messages = get_thread_messages(&db, &thread_id).unwrap();
+        assert_eq!(messages.len(), 4);
+        let preserved_local = messages
+            .iter()
+            .find(|message| message.id == local_message.id)
+            .expect("local message should remain");
+        assert_eq!(
+            preserved_local
+                .blocks
+                .as_ref()
+                .and_then(Value::as_array)
+                .and_then(|blocks| blocks.first())
+                .and_then(|block| block.get("actionId"))
+                .and_then(Value::as_str),
+            Some("local-action")
+        );
+        assert!(messages
+            .iter()
+            .any(|message| message.content.as_deref() == Some("new remote answer")));
+
+        assert_eq!(
+            append_thread_messages(&db, &thread_id, &imported).unwrap(),
+            0
+        );
+        assert_eq!(get_thread_messages(&db, &thread_id).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn append_thread_messages_imports_all_remote_messages_without_local_history() {
+        let db = test_db();
+        let thread_id = test_thread(&db);
+        let imported = vec![ImportedMessageRecord {
+            role: "user".to_string(),
+            content: Some("remote prompt".to_string()),
+            blocks: json!([{ "type": "text", "content": "remote prompt" }]),
+            status: MessageStatusDto::Completed,
+            turn_engine_id: Some("remote-turn".to_string()),
+            remote_turn_id: Some("remote-turn".to_string()),
+            turn_model_id: None,
+            turn_reasoning_effort: None,
+            token_input: 0,
+            token_output: 0,
+            created_at: Some("2026-08-08 12:00:00.000".to_string()),
+        }];
+
+        let appended = append_thread_messages(&db, &thread_id, &imported).unwrap();
+
+        assert_eq!(appended, 1);
+        assert_eq!(get_thread_messages(&db, &thread_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bind_local_turn_to_remote_turn_prevents_future_remote_duplicates() {
+        let db = test_db();
+        let thread_id = test_thread(&db);
+        insert_message(
+            &db,
+            &thread_id,
+            "user",
+            Some("local prompt".to_string()),
+            Some(json!([{ "type": "text", "content": "local prompt" }])),
+            MessageStatusDto::Completed,
+            Some("codex"),
+            Some("gpt-5.3-codex"),
+            None,
+        )
+        .unwrap();
+        let assistant = insert_message(
+            &db,
+            &thread_id,
+            "assistant",
+            Some("local answer".to_string()),
+            Some(json!([{ "type": "text", "content": "local answer" }])),
+            MessageStatusDto::Completed,
+            Some("codex"),
+            Some("gpt-5.3-codex"),
+            None,
+        )
+        .unwrap();
+        bind_local_turn_to_remote_turn(&db, &assistant.id, "remote-turn").unwrap();
+
+        let imported = vec![
+            ImportedMessageRecord {
+                role: "user".to_string(),
+                content: Some("local prompt".to_string()),
+                blocks: json!([{ "type": "text", "content": "local prompt" }]),
+                status: MessageStatusDto::Completed,
+                turn_engine_id: Some("remote-turn".to_string()),
+                remote_turn_id: Some("remote-turn".to_string()),
+                turn_model_id: None,
+                turn_reasoning_effort: None,
+                token_input: 0,
+                token_output: 0,
+                created_at: Some("2026-08-08 12:00:00.000".to_string()),
+            },
+            ImportedMessageRecord {
+                role: "assistant".to_string(),
+                content: Some("local answer".to_string()),
+                blocks: json!([{ "type": "text", "content": "local answer" }]),
+                status: MessageStatusDto::Completed,
+                turn_engine_id: Some("remote-turn".to_string()),
+                remote_turn_id: Some("remote-turn".to_string()),
+                turn_model_id: None,
+                turn_reasoning_effort: None,
+                token_input: 0,
+                token_output: 0,
+                created_at: Some("2026-08-08 12:01:00.000".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            append_thread_messages(&db, &thread_id, &imported).unwrap(),
+            0
+        );
+        assert_eq!(get_thread_messages(&db, &thread_id).unwrap().len(), 2);
     }
 
     #[test]

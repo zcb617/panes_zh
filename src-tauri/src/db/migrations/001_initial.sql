@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT,
   blocks_json TEXT,
   turn_engine_id TEXT,
+  remote_turn_id TEXT,
   turn_model_id TEXT,
   turn_reasoning_effort TEXT,
   schema_version INTEGER NOT NULL DEFAULT 1,

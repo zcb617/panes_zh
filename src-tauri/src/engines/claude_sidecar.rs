@@ -1853,6 +1853,7 @@ impl Engine for ClaudeSidecarEngine {
                                     event_tx
                                         .send(EngineEvent::TurnStarted {
                                             client_turn_id: None,
+                                            remote_turn_id: None,
                                         })
                                         .await
                                         .ok();

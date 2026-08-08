@@ -633,6 +633,10 @@ impl Engine for CodexEngine {
                     "turn/start result",
                   );
                   self.set_active_turn(&thread_id, &turn_id).await;
+                  event_tx.send(EngineEvent::TurnStarted {
+                    client_turn_id: None,
+                    remote_turn_id: Some(turn_id),
+                  }).await.ok();
                 }
 
                 for event in mapper.map_turn_result(&result) {
@@ -696,6 +700,10 @@ impl Engine for CodexEngine {
                           "turn/started notification",
                         );
                         self.set_active_turn(&thread_id, &turn_id).await;
+                        event_tx.send(EngineEvent::TurnStarted {
+                          client_turn_id: None,
+                          remote_turn_id: Some(turn_id),
+                        }).await.ok();
                       }
                     } else if !belongs_to_turn(&params, expected_turn_id.as_deref()) {
                       continue;
@@ -1379,6 +1387,10 @@ impl CodexEngine {
                     "review/start result",
                   );
                   self.set_active_turn(&active_thread_id, &turn_id).await;
+                  event_tx.send(EngineEvent::TurnStarted {
+                    client_turn_id: None,
+                    remote_turn_id: Some(turn_id),
+                  }).await.ok();
                 }
 
                 for event in mapper.map_turn_result(&result) {
@@ -1443,6 +1455,10 @@ impl CodexEngine {
                           "turn/started review notification",
                         );
                         self.set_active_turn(&active_thread_id, &turn_id).await;
+                        event_tx.send(EngineEvent::TurnStarted {
+                          client_turn_id: None,
+                          remote_turn_id: Some(turn_id),
+                        }).await.ok();
                       }
                     } else if !belongs_to_turn(&params, expected_turn_id.as_deref()) {
                       continue;

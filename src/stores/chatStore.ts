@@ -1683,9 +1683,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setActiveThread: async (threadId) => {
     const currentThreadId = get().threadId;
     const currentUnlisten = get().unlisten;
-    if (threadId && threadId === currentThreadId && currentUnlisten) {
-      return;
-    }
 
     activeThreadBindSeq += 1;
     const bindSeq = activeThreadBindSeq;
@@ -1748,7 +1745,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // A Codex thread can advance while Panes is closed or while it is being
       // used directly in Codex. Refresh every attached thread on activation;
       // codexSyncRequired only describes a transient in-progress remote turn.
-      if (activeThread && isCodexThreadAttached(activeThread) && !isThreadTurnActive(activeThread.status)) {
+      if (activeThread && isCodexThreadAttached(activeThread)) {
         try {
           const syncedThread = await ipc.syncThreadFromEngine(threadId);
           threadState.applyThreadUpdateLocal(syncedThread);

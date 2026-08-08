@@ -1273,35 +1273,33 @@ pub async fn sync_thread_from_engine(
     let has_local_turn = state.turns.get(&thread_id).await.is_some();
     let has_active_remote_turn =
         !snapshot.active_flags.is_empty() || imported_messages_have_streaming_turn(&snapshot);
-    let should_import_messages =
-        !has_local_turn && !has_active_remote_turn && !snapshot.imported_messages.is_empty();
-    if should_import_messages {
-        let imported_messages = snapshot
-            .imported_messages
-            .iter()
-            .map(|message| db::messages::ImportedMessageRecord {
-                role: message.role.clone(),
-                content: message.content.clone(),
-                blocks: message.blocks.clone(),
-                status: MessageStatusDto::from_str(message.status.as_str()),
-                turn_engine_id: message.turn_engine_id.clone(),
-                turn_model_id: message.turn_model_id.clone(),
-                turn_reasoning_effort: message.turn_reasoning_effort.clone(),
-                token_input: message.token_input,
-                token_output: message.token_output,
-                created_at: message.created_at.clone(),
-            })
-            .collect::<Vec<_>>();
-        run_db(db.clone(), {
-            let thread_id = thread_id.clone();
-            move |db| {
-                db::messages::replace_thread_messages(db, &thread_id, &imported_messages)?;
-                db::threads::refresh_thread_message_stats(db, &thread_id)?;
-                Ok::<_, anyhow::Error>(())
-            }
+    let imported_messages = snapshot
+        .imported_messages
+        .iter()
+        .map(|message| db::messages::ImportedMessageRecord {
+            role: message.role.clone(),
+            content: message.content.clone(),
+            blocks: message.blocks.clone(),
+            status: MessageStatusDto::from_str(message.status.as_str()),
+            turn_engine_id: message.turn_engine_id.clone(),
+            remote_turn_id: message.turn_engine_id.clone(),
+            turn_model_id: message.turn_model_id.clone(),
+            turn_reasoning_effort: message.turn_reasoning_effort.clone(),
+            token_input: message.token_input,
+            token_output: message.token_output,
+            created_at: message.created_at.clone(),
         })
-        .await?;
-    }
+        .collect::<Vec<_>>();
+    let imported_any_messages = !imported_messages.is_empty();
+    run_db(db.clone(), {
+        let thread_id = thread_id.clone();
+        move |db| {
+            db::messages::append_thread_messages(db, &thread_id, &imported_messages)?;
+            db::threads::refresh_thread_message_stats(db, &thread_id)?;
+            Ok::<_, anyhow::Error>(())
+        }
+    })
+    .await?;
 
     let sync_required = !has_local_turn && has_active_remote_turn;
     let metadata = merge_codex_runtime_metadata(
@@ -1312,7 +1310,7 @@ pub async fn sync_thread_from_engine(
         sync_required,
         sync_required.then_some("remote thread has an active turn"),
     );
-    let metadata = mark_codex_transcript_imported(metadata, should_import_messages);
+    let metadata = mark_codex_transcript_imported(metadata, imported_any_messages);
     let next_status = map_codex_thread_status_to_local(
         snapshot.raw_status.as_deref(),
         &snapshot.active_flags,

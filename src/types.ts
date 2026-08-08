@@ -1236,6 +1236,7 @@ export interface StreamTokenUsage {
 export interface TurnStartedEvent {
   type: "TurnStarted";
   client_turn_id?: string | null;
+  remote_turn_id?: string | null;
 }
 
 export interface TurnCompletedEvent {

@@ -134,6 +134,7 @@ impl Database {
         ensure_workspace_startup_columns(&conn)?;
         ensure_runtime_columns(&conn)?;
         ensure_messages_audit_columns(&conn)?;
+        ensure_messages_remote_turn_id_column(&conn)?;
         backfill_assistant_message_content(&conn)?;
         repair_normalized_workspace_and_repo_paths(&mut conn)?;
         Ok(())
@@ -257,6 +258,17 @@ fn ensure_messages_audit_columns(conn: &Connection) -> anyhow::Result<()> {
         .context("failed to add messages.turn_reasoning_effort column")?;
     }
 
+    Ok(())
+}
+
+fn ensure_messages_remote_turn_id_column(conn: &Connection) -> anyhow::Result<()> {
+    ensure_column(conn, "messages", "remote_turn_id", "TEXT")?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_thread_remote_turn_role
+           ON messages(thread_id, remote_turn_id, role)
+           WHERE remote_turn_id IS NOT NULL;",
+    )
+    .context("failed to create remote turn message uniqueness index")?;
     Ok(())
 }
 
