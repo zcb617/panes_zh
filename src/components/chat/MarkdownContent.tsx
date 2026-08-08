@@ -198,12 +198,12 @@ function handleMarkdownLinkClick(event: ReactMouseEvent<HTMLDivElement>): void {
     return;
   }
 
-  const rawHref = anchor.getAttribute("href");
-  if (!rawHref) {
+  const rawTarget = anchor.dataset.localFileReference ?? anchor.getAttribute("href");
+  if (!rawTarget) {
     return;
   }
 
-  const targetKind = classifyLinkTarget(rawHref);
+  const targetKind = classifyLinkTarget(rawTarget);
   if (targetKind === "other") {
     return;
   }
@@ -212,7 +212,7 @@ function handleMarkdownLinkClick(event: ReactMouseEvent<HTMLDivElement>): void {
   if (targetKind === "local") {
     event.stopPropagation();
   }
-  void navigateLinkTarget(rawHref, {
+  void navigateLinkTarget(rawTarget, {
     shiftKey: event.shiftKey,
     sourceLeafId: getWorkspacePaneLeafIdFromEventTarget(event.currentTarget),
   });

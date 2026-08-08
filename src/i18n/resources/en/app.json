@@ -32,7 +32,11 @@
     "newThread": "New thread",
     "newThreadTitle": "New Thread",
     "agents": "Agents",
+    "extensions": "Extensions",
     "search": "Search",
+    "pinnedWorkspaces": "Pinned",
+    "pinWorkspace": "Pin workspace",
+    "unpinWorkspace": "Unpin workspace",
     "workspaces": "Workspaces",
     "openWorkspace": "Open workspace",
     "noWorkspaces": "No workspaces yet.",
@@ -40,6 +44,7 @@
     "workspaceFallback": "Workspace",
     "noThreads": "No threads",
     "untitledThread": "Untitled thread",
+    "running": "Running",
     "needsApproval": "Needs approval",
     "archiveThread": "Archive thread",
     "showMore": "Show {{count}} more",
@@ -83,6 +88,11 @@
     "archiveWorkspaceMessage": "Archive workspace \"{{name}}\" and hide its repos/threads/messages from the sidebar? You can reopen this folder later to restore it.",
     "archiveThreadTitle": "Archive thread",
     "archiveThreadMessage": "Archive thread \"{{name}}\"? It will be hidden from this project list.",
+    "codexRemoteThreadRemovedTitle": "Codex conversation changed",
+    "codexRemoteThreadDeletedMessage": "Codex deleted thread \"{{name}}\". Archive its local copy from this project?",
+    "codexRemoteThreadArchivedMessage": "Codex archived thread \"{{name}}\". Archive its local copy from this project?",
+    "keepLocalThread": "Keep in project",
+    "codexRemoteThreadArchiveFailed": "Failed to archive the local copy of this conversation.",
     "archive": "Archive"
   },
   "commandPalette": {
@@ -535,6 +545,7 @@
     "nav": {
       "overview": "Overview",
       "appearance": "Appearance",
+      "chat": "Chat",
       "terminal": "Terminal",
       "notifications": "Notifications",
       "usage": "Usage limits",
@@ -549,6 +560,10 @@
       "appearance": {
         "title": "Appearance",
         "description": "Choose how Panes looks and which language it uses."
+      },
+      "chat": {
+        "title": "Chat",
+        "description": "Configure message composition and send shortcuts."
       },
       "terminal": {
         "title": "Terminal",
@@ -605,6 +620,30 @@
       "interfaceDescription": "Theme changes apply to chat, terminal, Git, and editor surfaces.",
       "themeDescription": "Use a fixed theme or follow the operating system.",
       "languageDescription": "Used across navigation, dialogs, and status messages."
+    },
+    "chat": {
+      "composer": "Message composition",
+      "composerDescription": "Choose how Enter behaves while you write a chat message.",
+      "sendShortcut": "Send shortcut",
+      "sendShortcutDescription": "Choose whether Enter sends the message or adds a new line. Ctrl/Cmd+Enter always sends the message.",
+      "inputMode": "Input mode",
+      "inputModeDescription": "Default keeps the current behavior; Classic uses the familiar / search pattern from Codex, Claude, and OpenCode.",
+      "inputModes": {
+        "default": "Default",
+        "classic": "Classic"
+      },
+      "shortcuts": {
+        "shiftEnter": "New line with Enter · Send with Shift+Enter",
+        "enter": "Send with Enter · New line with Shift+Enter"
+      },
+      "linkOpening": "Link opening",
+      "linkOpeningDescription": "Control how links in chat and the terminal are opened.",
+      "linkOpenGesture": "Open shortcut",
+      "linkOpenGestureDescription": "Choose between clicking directly and Shift-clicking.",
+      "linkOpenGestures": {
+        "shiftClick": "Open with Shift-click",
+        "click": "Open with a click"
+      }
     },
     "usage": {
       "providerLimits": "Connected provider limits",

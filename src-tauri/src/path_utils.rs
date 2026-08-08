@@ -40,6 +40,10 @@ pub fn is_path_within_root(path: &str, root: &str) -> bool {
     normalized_path.starts_with(&format!("{normalized_root}/"))
 }
 
+pub fn paths_equal(left: &str, right: &str) -> bool {
+    normalize_for_comparison(left) == normalize_for_comparison(right)
+}
+
 pub fn legacy_windows_verbatim_path(path: &Path) -> Option<String> {
     add_windows_verbatim_prefix(path.to_string_lossy().as_ref())
 }
@@ -99,7 +103,7 @@ fn normalize_for_comparison(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_windows_verbatim_prefix, canonicalize_path, is_path_within_root,
+        add_windows_verbatim_prefix, canonicalize_path, is_path_within_root, paths_equal,
         strip_windows_verbatim_prefix,
     };
     use std::path::Path;
@@ -154,6 +158,11 @@ mod tests {
             "/workspace/apps/api/src/main.ts",
             "/workspace/apps/app"
         ));
+    }
+
+    #[test]
+    fn treats_windows_paths_as_equal_across_case_and_separator_variants() {
+        assert!(paths_equal(r"D:\zhangcb\my_wiki", r"d:/zhangcb/my_wiki"));
     }
 
     #[test]

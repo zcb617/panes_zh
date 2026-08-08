@@ -15,8 +15,10 @@ import {
   tryParseUrl,
 } from "./localFileLinkPatterns";
 import { useFileStore } from "../stores/fileStore";
+import { useChatComposerStore } from "../stores/chatComposerStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
 import { showWorkspaceEditorForFileLink } from "./workspacePaneNavigation";
+import { shouldOpenLink } from "./linkOpenSettings";
 import type { Repo } from "../types";
 
 const EXTERNAL_PROTOCOLS = new Set(["http:", "https:", "mailto:", "tel:"]);
@@ -194,7 +196,8 @@ export async function navigateLinkTarget(
   rawTarget: string,
   options: LinkNavigationOptions,
 ): Promise<LinkNavigationResult> {
-  if (!options.shiftKey) {
+  const linkOpenGesture = useChatComposerStore.getState().linkOpenGesture;
+  if (!shouldOpenLink(options.shiftKey, linkOpenGesture)) {
     return "ignored";
   }
 

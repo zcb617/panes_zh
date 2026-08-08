@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod db;
 mod engines;
+mod extensions;
 mod fs_ops;
 mod git;
 #[cfg(any(target_os = "linux", test))]
@@ -26,6 +27,7 @@ use rusqlite::OptionalExtension;
 use config::app_config::AppConfig;
 use db::Database;
 use engines::{CodexRuntimeEvent, EngineManager};
+use extensions::refresh::{spawn_catalog_refresh_scheduler, ExtensionCatalogRefreshManager};
 use git::repo::FileTreeCache;
 use git::watcher::GitWatcherManager;
 #[cfg(target_os = "macos")]
@@ -91,6 +93,7 @@ pub fn run() {
         keep_awake,
         turns: Arc::new(TurnManager::default()),
         file_tree_cache: Arc::new(FileTreeCache::new()),
+        extension_catalog_refreshes: Arc::new(ExtensionCatalogRefreshManager::default()),
     };
 
     let app = tauri::Builder::default()
@@ -162,6 +165,7 @@ pub fn run() {
             }
             state.engines.set_resource_dir(resource_dir);
             tauri::async_runtime::spawn(run_codex_runtime_bridge(handle.clone(), state.clone()));
+            spawn_catalog_refresh_scheduler(handle.clone(), state.clone());
             app.on_menu_event(move |_app, event| {
                 let id = event.id().as_ref();
                 match id {
@@ -287,6 +291,11 @@ pub fn run() {
             commands::engines::list_codex_apps,
             commands::engines::get_opencode_runtime_catalog,
             commands::engines::run_engine_check,
+            commands::extensions::get_extension_catalog,
+            commands::extensions::schedule_extension_catalog_workspace_refresh,
+            commands::extensions::request_extension_catalog_refresh,
+            commands::extensions::get_extension_details,
+            commands::extensions::perform_extension_action,
             commands::threads::list_threads,
             commands::threads::list_archived_threads,
             commands::threads::list_codex_remote_threads,
@@ -301,6 +310,7 @@ pub fn run() {
             commands::threads::set_thread_codex_config,
             commands::threads::set_thread_opencode_config,
             commands::threads::archive_thread,
+            commands::threads::archive_thread_locally,
             commands::threads::restore_thread,
             commands::threads::sync_thread_from_engine,
             commands::threads::fork_codex_thread,
@@ -353,6 +363,13 @@ struct ThreadUpdatedEvent {
     workspace_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread: Option<ThreadDto>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexRemoteThreadRemovedEvent {
+    thread: ThreadDto,
+    remote_action: &'static str,
 }
 
 async fn run_codex_runtime_bridge(app: tauri::AppHandle, state: AppState) {
@@ -488,18 +505,10 @@ async fn handle_codex_runtime_event(
             }
         }
         CodexRuntimeEvent::ThreadArchived { engine_thread_id } => {
-            if let Some((thread_id, workspace_id)) =
-                archive_codex_runtime_thread(state, &engine_thread_id).await
-            {
-                let _ = app.emit(
-                    "thread-updated",
-                    ThreadUpdatedEvent {
-                        thread_id,
-                        workspace_id,
-                        thread: None,
-                    },
-                );
-            }
+            emit_codex_remote_thread_removed(app, state, &engine_thread_id, "archived").await;
+        }
+        CodexRuntimeEvent::ThreadDeleted { engine_thread_id } => {
+            emit_codex_remote_thread_removed(app, state, &engine_thread_id, "deleted").await;
         }
         CodexRuntimeEvent::ThreadUnarchived { engine_thread_id } => {
             if let Some(updated_thread) =
@@ -719,29 +728,46 @@ async fn apply_codex_runtime_thread_update(
     .ok()
 }
 
-async fn archive_codex_runtime_thread(
+async fn emit_codex_remote_thread_removed(
+    app: &tauri::AppHandle,
     state: &AppState,
     engine_thread_id: &str,
-) -> Option<(String, String)> {
-    let thread = run_db(state.db.clone(), {
-        let engine_thread_id = engine_thread_id.to_string();
-        move |db| db::threads::find_thread_by_engine_thread_id(db, "codex", &engine_thread_id)
-    })
-    .await
-    .ok()??;
+    remote_action: &'static str,
+) {
+    let Some(thread) = find_active_codex_runtime_thread(state, engine_thread_id).await else {
+        return;
+    };
 
+    let _ = app.emit(
+        "codex-remote-thread-removed",
+        CodexRemoteThreadRemovedEvent {
+            thread,
+            remote_action,
+        },
+    );
+}
+
+async fn find_active_codex_runtime_thread(
+    state: &AppState,
+    engine_thread_id: &str,
+) -> Option<ThreadDto> {
     run_db(state.db.clone(), {
-        let thread_id = thread.id.clone();
-        move |db| match db::threads::archive_thread(db, &thread_id) {
-            Ok(()) => Ok(()),
-            Err(error) if error.to_string().contains("already archived") => Ok(()),
-            Err(error) => Err(error),
+        let engine_thread_id = engine_thread_id.to_string();
+        move |db| {
+            let Some(thread) =
+                db::threads::find_thread_by_engine_thread_id(db, "codex", &engine_thread_id)?
+            else {
+                return Ok::<Option<ThreadDto>, anyhow::Error>(None);
+            };
+            let active = db::threads::list_threads_for_workspace(db, &thread.workspace_id)?
+                .into_iter()
+                .any(|candidate| candidate.id == thread.id);
+            Ok(active.then_some(thread))
         }
     })
     .await
-    .ok()?;
-
-    Some((thread.id, thread.workspace_id))
+    .ok()
+    .flatten()
 }
 
 async fn restore_codex_runtime_thread(

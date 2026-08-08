@@ -19,10 +19,11 @@ interface FocusModeSnapshot {
   showGitPanel: boolean;
 }
 
-export type ActiveView = "chat" | "harnesses" | "settings";
+export type ActiveView = "chat" | "harnesses" | "extensions" | "settings";
 export type SettingsSection =
   | "overview"
   | "appearance"
+  | "chat"
   | "terminal"
   | "notifications"
   | "usage"

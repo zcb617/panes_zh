@@ -70,6 +70,7 @@ const MODEL_LIST_METHODS: &[&str] = &["model/list", "models/list"];
 const ACCOUNT_RATE_LIMITS_READ_METHODS: &[&str] = &["account/rateLimits/read"];
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const LOCAL_ARCHIVE_NOTIFICATION_SUPPRESSION: Duration = Duration::from_secs(2);
 const TURN_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const HEALTH_APP_SERVER_TIMEOUT: Duration = Duration::from_secs(12);
 const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -133,6 +134,7 @@ struct CodexState {
     force_external_sandbox: bool,
     protocol_diagnostics: Option<CodexProtocolDiagnosticsDto>,
     runtime_monitor_transport_tag: Option<usize>,
+    local_archive_notification_deadlines: HashMap<String, Instant>,
 }
 
 impl Default for CodexEngine {
@@ -191,6 +193,9 @@ pub enum CodexRuntimeEvent {
         preview: Option<String>,
     },
     ThreadArchived {
+        engine_thread_id: String,
+    },
+    ThreadDeleted {
         engine_thread_id: String,
     },
     ThreadUnarchived {
@@ -425,22 +430,9 @@ impl Engine for CodexEngine {
             requested_runtime.sandbox_policy = sandbox_policy.clone();
         }
 
-        if let Some(existing_thread_id) = resume_engine_thread_id {
-            if self.can_reuse_live_thread(existing_thread_id).await {
-                // Codex applies model and effort per `turn/start`, so a live thread can stay put
-                // while we swap the requested runtime for the next turn.
-                requested_runtime = preserve_live_thread_runtime_flags(
-                    requested_runtime,
-                    self.thread_runtime(existing_thread_id).await.as_ref(),
-                );
-                self.store_thread_runtime(existing_thread_id, requested_runtime.clone())
-                    .await;
-                return Ok(EngineThread {
-                    engine_thread_id: existing_thread_id.to_string(),
-                });
-            }
-        }
-
+        // A running app-server process does not guarantee that it still has this
+        // thread loaded. Always resume before a new turn instead of trusting the
+        // local runtime cache; `thread/resume` is the server-side liveness check.
         if let Some(existing_thread_id) = resume_engine_thread_id {
             let resume_params = build_thread_resume_params(
                 existing_thread_id,
@@ -465,7 +457,10 @@ impl Engine for CodexEngine {
                 Ok(result) => {
                     let engine_thread_id = extract_thread_id(&result)
                         .unwrap_or_else(|| existing_thread_id.to_string());
-                    let runtime = thread_runtime_from_resume_response(&result, &requested_runtime);
+                    let runtime = preserve_live_thread_runtime_flags(
+                        thread_runtime_from_resume_response(&result, &requested_runtime),
+                        self.thread_runtime(&engine_thread_id).await.as_ref(),
+                    );
                     self.store_thread_runtime(&engine_thread_id, runtime).await;
 
                     return Ok(EngineThread { engine_thread_id });
@@ -1041,20 +1036,25 @@ impl Engine for CodexEngine {
 
     async fn archive_thread(&self, engine_thread_id: &str) -> Result<(), anyhow::Error> {
         let transport = self.ensure_ready_transport().await?;
+        mark_local_archive_notification_suppression(&self.state, engine_thread_id).await;
         let params = serde_json::json!({
             "threadId": engine_thread_id,
         });
 
-        request_with_fallback(
+        match request_with_fallback(
             transport.as_ref(),
             THREAD_ARCHIVE_METHODS,
             params,
             DEFAULT_TIMEOUT,
         )
         .await
-        .context("failed to archive codex thread")?;
-
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                clear_local_archive_notification_suppression(&self.state, engine_thread_id).await;
+                Err(error.context("failed to archive codex thread"))
+            }
+        }
     }
 
     async fn unarchive_thread(&self, engine_thread_id: &str) -> Result<(), anyhow::Error> {
@@ -1855,7 +1855,6 @@ impl CodexEngine {
                   "searchTerm": search_term,
                   "archived": archived,
                   "sortKey": "updated_at",
-                  "sourceKinds": ["appServer"],
                 })
             })
             .await
@@ -2487,10 +2486,30 @@ impl CodexEngine {
                                 if let Some(engine_thread_id) =
                                     extract_any_string(&params, &["threadId", "thread_id"])
                                 {
+                                    if consume_local_archive_notification_suppression(
+                                        &state,
+                                        &engine_thread_id,
+                                    )
+                                    .await
+                                    {
+                                        log::debug!(
+                                            "ignoring Codex archive notification for local archive request {engine_thread_id}"
+                                        );
+                                        continue;
+                                    }
                                     let _ =
                                         runtime_events.send(CodexRuntimeEvent::ThreadArchived {
                                             engine_thread_id,
                                         });
+                                }
+                            }
+                            "thread/deleted" => {
+                                if let Some(engine_thread_id) =
+                                    extract_any_string(&params, &["threadId", "thread_id"])
+                                {
+                                    let _ = runtime_events.send(CodexRuntimeEvent::ThreadDeleted {
+                                        engine_thread_id,
+                                    });
                                 }
                             }
                             "thread/unarchived" => {
@@ -2927,27 +2946,6 @@ impl CodexEngine {
     async fn thread_runtime(&self, engine_thread_id: &str) -> Option<ThreadRuntime> {
         let state = self.state.lock().await;
         state.thread_runtimes.get(engine_thread_id).cloned()
-    }
-
-    async fn can_reuse_live_thread(&self, engine_thread_id: &str) -> bool {
-        let (transport, initialized, known_thread) = {
-            let state = self.state.lock().await;
-            (
-                state.transport.clone(),
-                state.initialized,
-                state.thread_runtimes.contains_key(engine_thread_id),
-            )
-        };
-
-        if !initialized || !known_thread {
-            return false;
-        }
-
-        let Some(transport) = transport else {
-            return false;
-        };
-
-        transport.is_alive().await
     }
 }
 
@@ -3929,6 +3927,47 @@ async fn request_with_fallback(
     anyhow::bail!("all rpc methods failed: {}", errors.join(" | "))
 }
 
+async fn mark_local_archive_notification_suppression(
+    state: &Arc<Mutex<CodexState>>,
+    engine_thread_id: &str,
+) {
+    let now = Instant::now();
+    let mut state = state.lock().await;
+    state
+        .local_archive_notification_deadlines
+        .retain(|_, deadline| *deadline > now);
+    state.local_archive_notification_deadlines.insert(
+        engine_thread_id.to_string(),
+        now + LOCAL_ARCHIVE_NOTIFICATION_SUPPRESSION,
+    );
+}
+
+async fn clear_local_archive_notification_suppression(
+    state: &Arc<Mutex<CodexState>>,
+    engine_thread_id: &str,
+) {
+    state
+        .lock()
+        .await
+        .local_archive_notification_deadlines
+        .remove(engine_thread_id);
+}
+
+async fn consume_local_archive_notification_suppression(
+    state: &Arc<Mutex<CodexState>>,
+    engine_thread_id: &str,
+) -> bool {
+    let now = Instant::now();
+    let mut state = state.lock().await;
+    state
+        .local_archive_notification_deadlines
+        .retain(|_, deadline| *deadline > now);
+    state
+        .local_archive_notification_deadlines
+        .remove(engine_thread_id)
+        .is_some()
+}
+
 fn scope_cwd(scope: &ThreadScope) -> String {
     match scope {
         ThreadScope::Repo { repo_path } => repo_path.to_string(),
@@ -4104,11 +4143,6 @@ fn sandbox_policy_to_json(
         match sandbox.sandbox_mode.as_deref().unwrap_or("workspace-write") {
             "read-only" => serde_json::json!({
               "type": "readOnly",
-              "access": {
-                "type": "restricted",
-                "includePlatformDefaults": true,
-                "readableRoots": sandbox.writable_roots.clone(),
-              },
               "networkAccess": sandbox.allow_network,
             }),
             "danger-full-access" => serde_json::json!({
@@ -4117,11 +4151,6 @@ fn sandbox_policy_to_json(
             _ => serde_json::json!({
               "type": "workspaceWrite",
               "writableRoots": sandbox.writable_roots.clone(),
-              "readOnlyAccess": {
-                "type": "restricted",
-                "includePlatformDefaults": true,
-                "readableRoots": sandbox.writable_roots.clone(),
-              },
               "networkAccess": sandbox.allow_network,
               "excludeTmpdirEnvVar": false,
               "excludeSlashTmp": false,
@@ -6676,6 +6705,7 @@ fn is_known_codex_notification_method(normalized_method: &str) -> bool {
             | "thread/status/changed"
             | "thread/name/updated"
             | "thread/archived"
+            | "thread/deleted"
             | "thread/unarchived"
             | "thread/closed"
             | "thread/tokenusage/updated"
@@ -6721,6 +6751,48 @@ mod tests {
     use super::*;
     use crate::engines::ActionResult;
     use serde_json::{json, Value};
+
+    fn test_sandbox_policy(sandbox_mode: Option<&str>, allow_network: bool) -> SandboxPolicy {
+        SandboxPolicy {
+            writable_roots: vec!["/tmp/workspace".to_string()],
+            allow_network,
+            approval_policy: None,
+            permission_profile: None,
+            approvals_reviewer: None,
+            reasoning_effort: None,
+            sandbox_mode: sandbox_mode.map(ToOwned::to_owned),
+            service_tier: None,
+            personality: None,
+            output_schema: None,
+            opencode_agent: None,
+        }
+    }
+
+    #[test]
+    fn sandbox_policy_omits_removed_restricted_read_fields() {
+        let workspace_write =
+            sandbox_policy_to_json(&test_sandbox_policy(Some("workspace-write"), false), false);
+        assert_eq!(
+            workspace_write,
+            json!({
+                "type": "workspaceWrite",
+                "writableRoots": ["/tmp/workspace"],
+                "networkAccess": false,
+                "excludeTmpdirEnvVar": false,
+                "excludeSlashTmp": false,
+            })
+        );
+
+        let read_only =
+            sandbox_policy_to_json(&test_sandbox_policy(Some("read-only"), true), false);
+        assert_eq!(
+            read_only,
+            json!({
+                "type": "readOnly",
+                "networkAccess": true,
+            })
+        );
+    }
 
     #[test]
     fn normalize_modern_accept_with_execpolicy_from_top_level() {
@@ -7887,6 +7959,9 @@ mod tests {
         )));
         assert!(is_known_codex_notification_method(&normalize_method(
             "thread/archived"
+        )));
+        assert!(is_known_codex_notification_method(&normalize_method(
+            "thread/deleted"
         )));
         assert!(is_known_codex_notification_method(&normalize_method(
             "thread/unarchived"

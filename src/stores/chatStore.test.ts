@@ -1227,6 +1227,7 @@ describe("chatStore send", () => {
       });
 
       await useChatStore.getState().setActiveThread("thread-1");
+      expect(mockIpc.syncThreadFromEngine).not.toHaveBeenCalled();
 
       expect(useChatStore.getState()).toMatchObject({
         status,
@@ -1314,7 +1315,7 @@ describe("chatStore send", () => {
     vi.useRealTimers();
   });
 
-  it("syncs dirty Codex thread metadata before binding the message window", async () => {
+  it("syncs an attached Codex thread before binding the message window after a prior sync", async () => {
     const thread = {
       id: "thread-1",
       workspaceId: "workspace-1",
@@ -1323,7 +1324,7 @@ describe("chatStore send", () => {
       modelId: "gpt-5.3-codex",
       engineThreadId: "engine-thread-1",
       engineMetadata: {
-        codexSyncRequired: true,
+        codexSyncRequired: false,
       },
       title: "Thread 1",
       status: "idle" as const,

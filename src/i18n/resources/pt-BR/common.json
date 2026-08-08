@@ -14,7 +14,8 @@
   },
   "fileReferences": {
     "resolveFailed": "Não foi possível encontrar {{reference}} neste workspace.",
-    "shiftClickHint": "Shift-clique para abrir no editor"
+    "shiftClickHint": "Shift-clique para abrir no editor",
+    "clickHint": "Clique para abrir no editor"
   },
   "language": {
     "label": "Idioma",

@@ -5,6 +5,7 @@ import { Sidebar } from "../sidebar/Sidebar";
 import { ActiveWorkspacePaneShell } from "../workspace/WorkspacePaneShell";
 import { HarnessPanel } from "../onboarding/HarnessPanel";
 import { SettingsPage } from "../settings/SettingsPage";
+import { ExtensionManagerPage } from "../extensions/ExtensionManagerPage";
 import { GitPanel } from "../git/GitPanel";
 import { usesCustomWindowFrame } from "../../lib/windowActions";
 import { useUiStore } from "../../stores/uiStore";
@@ -234,6 +235,8 @@ export function ThreeColumnLayout() {
   const mainContent = (
     activeView === "harnesses" ? (
       <HarnessPanel />
+    ) : activeView === "extensions" ? (
+      <ExtensionManagerPage />
     ) : activeView === "settings" ? (
       <SettingsPage />
     ) : (

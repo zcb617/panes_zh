@@ -11,7 +11,7 @@ src-tauri/helper/build/
 
 # Claude Code
 .claude/
-.codex/
+.codex/config.toml
 .gemini/
 
 # Generated icon PNGs (regenerate from app-icon.svg)
@@ -45,3 +45,6 @@ remotion/
 # Local flatpak-builder build output
 .flatpak-builder/
 build-flatpak/
+
+.tmp
+.pnpm-store

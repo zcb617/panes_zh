@@ -12,6 +12,14 @@ import type { AutonomyPresetId } from "./autonomyPresets";
 import type { ChatEngineId } from "../types";
 
 describe("autonomyPresetPatch", () => {
+  it("uses the supported workspace-write auto policy for Codex", () => {
+    expect(autonomyPresetPatch("auto", "codex")).toEqual({
+      approvalPolicy: "on-request",
+      sandboxMode: "workspace-write",
+      networkPolicy: "enabled",
+    });
+  });
+
   it("maps full autonomy per engine", () => {
     expect(autonomyPresetPatch("full", "codex")).toEqual({
       approvalPolicy: "never",

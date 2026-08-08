@@ -140,7 +140,7 @@ export function autonomyPresetPatch(
       };
     case "auto":
       return {
-        approvalPolicy: "on-failure",
+        approvalPolicy: "on-request",
         sandboxMode: externalSandbox ? "inherit" : "workspace-write",
         networkPolicy: "enabled",
       };

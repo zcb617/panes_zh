@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    commands::threads::migrate_legacy_codex_on_failure_thread_metadata,
     db,
     engines::{
         approval_response_route_for_engine, normalize_approval_response_for_engine,
@@ -418,6 +419,7 @@ pub async fn send_message(
     })
     .await?
     .ok_or_else(|| format!("thread not found: {thread_id}"))?;
+    migrate_legacy_codex_on_failure_thread_metadata(state.inner(), &mut thread).await;
     let requested_model_id = model_id
         .as_deref()
         .map(str::trim)
@@ -700,7 +702,7 @@ pub async fn send_message(
         );
     }
 
-    let assistant_message = match run_db(db.clone(), {
+    let (assistant_message, streaming_thread) = match run_db(db.clone(), {
         let thread_id = thread.id.clone();
         let message = message.clone();
         let attachments = attachments.clone();
@@ -734,17 +736,29 @@ pub async fn send_message(
                 reasoning_effort.as_deref(),
             )?;
             db::threads::update_thread_status(db, &thread_id, ThreadStatusDto::Streaming)?;
-            Ok(assistant_message)
+            let streaming_thread = db::threads::get_thread(db, &thread_id)?.ok_or_else(|| {
+                anyhow::anyhow!("thread not found after marking it streaming: {thread_id}")
+            })?;
+            Ok((assistant_message, streaming_thread))
         }
     })
     .await
     {
-        Ok(assistant_message) => assistant_message,
+        Ok(result) => result,
         Err(error) => {
             state.turns.finish(&thread.id).await;
             return Err(error);
         }
     };
+
+    let _ = app.emit(
+        "thread-updated",
+        ThreadUpdatedEvent {
+            thread_id: streaming_thread.id.clone(),
+            workspace_id: streaming_thread.workspace_id.clone(),
+            thread: Some(streaming_thread),
+        },
+    );
 
     let state_cloned = state.inner().clone();
     let app_handle = app.clone();
@@ -1977,7 +1991,7 @@ async fn run_turn(
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             blocks.push(ContentBlock::Error {
-                message: format!("Engine error: {error}"),
+                message: format!("Engine error: {error:#}"),
             });
             blocks_dirty = true;
             if message_status != MessageStatusDto::Error {
@@ -1991,7 +2005,7 @@ async fn run_turn(
             let _ = app.emit(
                 &stream_event_topic,
                 EngineEvent::Error {
-                    message: format!("{error}"),
+                    message: format!("{error:#}"),
                     recoverable: false,
                 },
             );
@@ -4180,14 +4194,13 @@ fn normalize_codex_approval_policy_value(value: &Value) -> Result<Value, String>
         Value::String(raw) => {
             let normalized = raw.trim().to_lowercase();
             let normalized = normalized.as_str();
-            if matches!(
-                normalized,
-                "untrusted" | "on-failure" | "on-request" | "never"
-            ) {
+            if matches!(normalized, "untrusted" | "on-request" | "never") {
                 Ok(Value::String(normalized.to_string()))
+            } else if normalized == "on-failure" {
+                Ok(Value::String("on-request".to_string()))
             } else {
                 Err(format!(
-                    "invalid approval policy `{normalized}`. expected one of: untrusted, on-failure, on-request, never"
+                    "invalid approval policy `{normalized}`. expected one of: untrusted, on-request, never"
                 ))
             }
         }
@@ -4263,6 +4276,9 @@ mod tests {
             keep_awake: Arc::new(KeepAwakeManager::new()),
             turns: Arc::new(TurnManager::default()),
             file_tree_cache: Arc::new(FileTreeCache::new()),
+            extension_catalog_refreshes: Arc::new(
+                crate::extensions::refresh::ExtensionCatalogRefreshManager::default(),
+            ),
         }
     }
 
@@ -4785,6 +4801,18 @@ mod tests {
         assert_eq!(
             thread_approval_policy_override_value("codex", Some(&metadata)).unwrap(),
             Some(Value::String("never".to_string()))
+        );
+    }
+
+    #[test]
+    fn legacy_codex_on_failure_override_is_migrated_before_thread_start() {
+        let metadata = serde_json::json!({
+            "sandboxApprovalPolicy": "on-failure",
+        });
+
+        assert_eq!(
+            thread_approval_policy_override_value("codex", Some(&metadata)).unwrap(),
+            Some(Value::String("on-request".to_string()))
         );
     }
 

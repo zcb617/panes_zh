@@ -1,6 +1,7 @@
 pub mod app;
 pub mod chat;
 pub mod engines;
+pub mod extensions;
 pub mod files;
 pub mod git;
 pub mod harness;

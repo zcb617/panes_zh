@@ -5,6 +5,8 @@ import {
   DISALLOWED_LOCAL_PREFIX_CHAR_RE,
   TEXT_LINK_PATTERN,
   isLocalFileLinkSyntax,
+  parseLocalAbsolutePathTarget,
+  parseLocalUrlTarget,
   trimLinkText,
 } from "../lib/localFileLinkPatterns";
 
@@ -27,6 +29,20 @@ interface IndentInfo {
 const SAFE_HTML_TAG_RE = /<(br|hr)\s*\/?>/gi;
 const RAW_HTML_FRAGMENT_RE =
   /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<![a-z][^>]*>|<\?[\s\S]*?\?>|<\/[a-z][a-z0-9-]*\s*>|<[a-z][a-z0-9-]*(?:\s+(?:"[^"]*"|'[^']*'|[^"'<>])*)?\s*\/?>/gi;
+
+function formatLocalFileLinkPath(rawTarget: string): string {
+  const parsed = parseLocalAbsolutePathTarget(rawTarget) ?? parseLocalUrlTarget(rawTarget);
+  if (!parsed) {
+    return rawTarget;
+  }
+
+  const path = parsed.path;
+  if (/^\/?[A-Za-z]:[\\/]/.test(path)) {
+    return path.replace(/^\/(?=[A-Za-z]:[\\/])/, "").replace(/\//g, "\\");
+  }
+
+  return path;
+}
 
 function escapeHtmlFragment(input: string): string {
   return input
@@ -65,7 +81,7 @@ function sanitizeUrl(url: string, attrName: string): string {
   }
 
   if (attrName.toLowerCase() === "href" && isLocalFileLinkSyntax(trimmed)) {
-    return trimmed;
+    return formatLocalFileLinkPath(trimmed);
   }
 
   if (
@@ -107,8 +123,13 @@ function sanitizeRenderedHtml(html: string): string {
     /\s(href|src)\s*=\s*("([^"]*)"|'([^']*)')/gi,
     (_full, attrName: string, _quoted: string, doubleValue: string, singleValue: string) => {
       const rawValue = typeof doubleValue === "string" ? doubleValue : singleValue;
+      const trimmedValue = rawValue.trim();
+      const localFileReference = attrName.toLowerCase() === "href" && isLocalFileLinkSyntax(trimmedValue);
       const safe = sanitizeUrl(rawValue, attrName);
-      return ` ${attrName}="${safe}"`;
+      const referenceAttribute = localFileReference
+        ? ` data-local-file-reference="${escapeHtmlAttribute(trimmedValue)}"`
+        : "";
+      return ` ${attrName}="${safe}"${referenceAttribute}`;
     },
   );
 
@@ -139,8 +160,9 @@ function linkifyLocalFileReferencesInText(text: string): string {
     }
 
     const trailing = raw.slice(trimmed.length);
-    const safeHref = escapeHtmlAttribute(trimmed);
-    return `<a href="${safeHref}" rel="noreferrer noopener">${trimmed}</a>${trailing}`;
+    const safeHref = escapeHtmlAttribute(formatLocalFileLinkPath(trimmed));
+    const rawReference = escapeHtmlAttribute(trimmed);
+    return `<a href="${safeHref}" data-local-file-reference="${rawReference}" rel="noreferrer noopener">${trimmed}</a>${trailing}`;
   });
 }
 

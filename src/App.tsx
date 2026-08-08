@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ThreeColumnLayout } from "./components/layout/ThreeColumnLayout";
 import { CommandPalette } from "./components/shared/CommandPalette";
+import { ConfirmDialog } from "./components/shared/ConfirmDialog";
 import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 import { ToastContainer } from "./components/shared/ToastContainer";
 import { PowerSettingsModal } from "./components/shared/PowerSettingsModal";
@@ -12,9 +13,11 @@ import {
   ipc,
   listenChatApprovalRequested,
   listenChatTurnFinished,
+  listenCodexRemoteThreadRemoved,
   listenEngineRuntimeUpdated,
   listenMenuAction,
   listenThreadUpdated,
+  type CodexRemoteThreadRemovedEvent,
 } from "./lib/ipc";
 import { useWorkspaceStore } from "./stores/workspaceStore";
 import { useEngineStore } from "./stores/engineStore";
@@ -64,8 +67,13 @@ async function createNewWorkspaceThread() {
   await createAndActivateWorkspaceThread(activeWorkspaceId);
 }
 
-function isCodexSyncRequired(thread: Thread | null | undefined): boolean {
-  return thread?.engineId === "codex" && thread.engineMetadata?.codexSyncRequired === true;
+function shouldSyncCodexThread(thread: Thread | null | undefined): boolean {
+  return (
+    thread?.engineId === "codex" &&
+    Boolean(thread.engineThreadId?.trim()) &&
+    thread.status !== "streaming" &&
+    thread.status !== "awaiting_approval"
+  );
 }
 
 function showRuntimeToast(runtimeToast?: RuntimeToast) {
@@ -120,6 +128,7 @@ export function App() {
   const loadWorkspaces = useWorkspaceStore((s) => s.loadWorkspaces);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const loadEngines = useEngineStore((s) => s.load);
+  const engines = useEngineStore((s) => s.engines);
   const applyEngineRuntimeUpdate = useEngineStore((s) => s.applyRuntimeUpdate);
   const loadKeepAwake = useKeepAwakeStore((s) => s.load);
   const loadTerminalNotificationSettings = useTerminalNotificationSettingsStore((s) => s.load);
@@ -134,6 +143,10 @@ export function App() {
   const closeCommandPalette = useUiStore((s) => s.closeCommandPalette);
   const checkForUpdate = useUpdateStore((s) => s.checkForUpdate);
   const customWindowFrame = usesCustomWindowFrame();
+  const [codexRemoteThreadPrompts, setCodexRemoteThreadPrompts] = useState<
+    CodexRemoteThreadRemovedEvent[]
+  >([]);
+  const codexRemoteThreadPrompt = codexRemoteThreadPrompts[0] ?? null;
   const customWindowFrameState = useCustomWindowFrameState();
 
   useEffect(() => {
@@ -145,7 +158,7 @@ export function App() {
 
   useEffect(() => {
     void refreshAllThreads(workspaces.map((workspace) => workspace.id));
-  }, [workspaces, refreshAllThreads]);
+  }, [engines, workspaces, refreshAllThreads]);
 
   useEffect(() => {
     const hasSessionTimer = keepAwakeSessionTimer != null;
@@ -168,7 +181,7 @@ export function App() {
       if (thread) {
         const applied = applyThreadUpdateLocal(thread);
         const activeThreadId = useThreadStore.getState().activeThreadId;
-        if (thread.id === activeThreadId && isCodexSyncRequired(thread)) {
+        if (thread.id === activeThreadId && shouldSyncCodexThread(thread)) {
           try {
             const syncedThread = await ipc.syncThreadFromEngine(thread.id);
             if (useThreadStore.getState().applyThreadUpdateLocal(syncedThread)) {
@@ -202,6 +215,32 @@ export function App() {
       }
     };
   }, [applyThreadUpdateLocal, refreshArchivedThreads, refreshThreads]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenCodexRemoteThreadRemoved((event) => {
+      setCodexRemoteThreadPrompts((current) => {
+        if (current.some((item) => item.thread.id === event.thread.id)) {
+          return current;
+        }
+        return [...current, event];
+      });
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -627,6 +666,30 @@ export function App() {
     };
   }, []);
 
+  function dismissCodexRemoteThreadPrompt() {
+    setCodexRemoteThreadPrompts((current) => current.slice(1));
+  }
+
+  async function archiveCodexRemoteThreadLocally() {
+    const prompt = codexRemoteThreadPrompt;
+    if (!prompt) return;
+
+    const wasActive = useThreadStore.getState().activeThreadId === prompt.thread.id;
+    try {
+      await ipc.archiveThreadLocally(prompt.thread.id);
+      if (wasActive) {
+        useThreadStore.getState().setActiveThread(null);
+        await useChatStore.getState().setActiveThread(null);
+      }
+      await refreshThreads(prompt.thread.workspaceId);
+      await refreshArchivedThreads(prompt.thread.workspaceId);
+      dismissCodexRemoteThreadPrompt();
+    } catch (error) {
+      console.warn(`Failed to archive local Codex thread ${prompt.thread.id}:`, error);
+      toast.error(t("app:sidebar.codexRemoteThreadArchiveFailed"));
+    }
+  }
+
   return (
     <div
       className={`app-shell${customWindowFrame ? " app-shell-custom-frame" : ""}${
@@ -642,6 +705,24 @@ export function App() {
       <TerminalNotificationSettingsModal />
       <UsageLimitsModal />
       <OnboardingWizard />
+      <ConfirmDialog
+        open={codexRemoteThreadPrompt !== null}
+        title={t("app:sidebar.codexRemoteThreadRemovedTitle")}
+        message={
+          codexRemoteThreadPrompt
+            ? t(
+                codexRemoteThreadPrompt.remoteAction === "deleted"
+                  ? "app:sidebar.codexRemoteThreadDeletedMessage"
+                  : "app:sidebar.codexRemoteThreadArchivedMessage",
+                { name: codexRemoteThreadPrompt.thread.title || t("app:sidebar.untitledThread") },
+              )
+            : ""
+        }
+        confirmLabel={t("app:sidebar.archive")}
+        cancelLabel={t("app:sidebar.keepLocalThread")}
+        onConfirm={() => void archiveCodexRemoteThreadLocally()}
+        onCancel={dismissCodexRemoteThreadPrompt}
+      />
       <ToastContainer />
     </div>
   );

@@ -32,6 +32,12 @@ import type {
   GitWorktree,
   EngineHealth,
   EngineInfo,
+  ExtensionAction,
+  ExtensionActionResult,
+  ExtensionCatalog,
+  ExtensionItem,
+  ExtensionKind,
+  ExtensionProviderId,
   FileTreeEntry,
   FileTreePage,
   GitDiffPreview,
@@ -330,6 +336,8 @@ export const ipc = {
       agent: patch.agent ?? null,
     }),
   archiveThread: (threadId: string) => invoke<void>("archive_thread", { threadId }),
+  archiveThreadLocally: (threadId: string) =>
+    invoke<void>("archive_thread_locally", { threadId }),
   restoreThread: (threadId: string) => invoke<Thread>("restore_thread", { threadId }),
   syncThreadFromEngine: (threadId: string) =>
     invoke<Thread>("sync_thread_from_engine", { threadId }),
@@ -352,6 +360,54 @@ export const ipc = {
   listCodexApps: () => invoke<CodexApp[]>("list_codex_apps"),
   getOpenCodeRuntimeCatalog: (cwd: string) =>
     invoke<OpenCodeRuntimeCatalog>("get_opencode_runtime_catalog", { cwd }),
+  getExtensionCatalog: (
+    providerId: ExtensionProviderId,
+    cwd?: string | null,
+  ) =>
+    invoke<ExtensionCatalog>("get_extension_catalog", {
+      providerId,
+      cwd: cwd ?? null,
+    }),
+  scheduleExtensionCatalogWorkspaceRefresh: (workspaceId: string) =>
+    invoke<void>("schedule_extension_catalog_workspace_refresh", { workspaceId }),
+  requestExtensionCatalogRefresh: (
+    providerId: ExtensionProviderId,
+    cwd?: string | null,
+    kinds?: ExtensionKind[],
+  ) =>
+    invoke<ExtensionCatalog>("request_extension_catalog_refresh", {
+      providerId,
+      cwd: cwd ?? null,
+      kinds: kinds ?? null,
+    }),
+  getExtensionDetails: (
+    providerId: ExtensionProviderId,
+    kind: ExtensionKind,
+    extensionId: string,
+    cwd?: string | null,
+  ) =>
+    invoke<ExtensionItem>("get_extension_details", {
+      providerId,
+      kind,
+      extensionId,
+      cwd: cwd ?? null,
+    }),
+  performExtensionAction: (
+    providerId: ExtensionProviderId,
+    kind: ExtensionKind,
+    extensionId: string,
+    action: ExtensionAction,
+    scope?: string | null,
+    cwd?: string | null,
+  ) =>
+    invoke<ExtensionActionResult>("perform_extension_action", {
+      providerId,
+      kind,
+      extensionId,
+      action,
+      scope: scope ?? null,
+      cwd: cwd ?? null,
+    }),
   savePastedImageAttachment: (fileName: string, mimeType: string, dataBase64: string) =>
     invoke<ChatAttachment>("save_pasted_image_attachment", {
       fileName,
@@ -668,6 +724,11 @@ export interface ThreadUpdatedEvent {
   thread?: Thread | null;
 }
 
+export interface CodexRemoteThreadRemovedEvent {
+  thread: Thread;
+  remoteAction: "archived" | "deleted";
+}
+
 export interface ChatTurnFinishedEvent {
   threadId: string;
   workspaceId: string;
@@ -677,10 +738,30 @@ export interface ChatTurnFinishedEvent {
   preview?: string | null;
 }
 
+export interface ExtensionCatalogUpdatedEvent {
+  providerId: ExtensionProviderId;
+  cwd?: string | null;
+}
+
+export async function listenExtensionCatalogUpdated(
+  onEvent: (event: ExtensionCatalogUpdatedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<ExtensionCatalogUpdatedEvent>(
+    "extension-catalog-updated",
+    ({ payload }) => onEvent(payload),
+  );
+}
+
 export async function listenThreadUpdated(
   onEvent: (event: ThreadUpdatedEvent) => void
 ): Promise<UnlistenFn> {
   return listen<ThreadUpdatedEvent>("thread-updated", ({ payload }) => onEvent(payload));
+}
+
+export async function listenCodexRemoteThreadRemoved(
+  onEvent: (event: CodexRemoteThreadRemovedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<CodexRemoteThreadRemovedEvent>("codex-remote-thread-removed", ({ payload }) => onEvent(payload));
 }
 
 export async function listenChatTurnFinished(

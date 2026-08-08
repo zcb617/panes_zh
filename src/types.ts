@@ -611,6 +611,98 @@ export interface CodexMcpServer {
   resourceTemplateCount: number;
 }
 
+export type ExtensionProviderId = "codex" | "claude" | "opencode";
+export type ExtensionKind = "skill" | "plugin" | "mcp";
+export type ExtensionScope = "builtin" | "user" | "project" | "plugin" | "managed" | "local";
+export type ExtensionAction =
+  | "install"
+  | "uninstall"
+  | "enable"
+  | "disable"
+  | "remove"
+  | "configure"
+  | "authenticate"
+  | "logout"
+  | "open_location"
+  | "refresh";
+export type ExtensionHealth =
+  | "unknown"
+  | "healthy"
+  | "disconnected"
+  | "auth_required"
+  | "error";
+export type ExtensionAuthState = "unknown" | "authenticated" | "required" | "failed";
+
+export interface ExtensionProviderCapabilities {
+  hasOfficialSkillCatalog: boolean;
+  canToggleSkills: boolean;
+  hasOfficialPluginCatalog: boolean;
+  canInstallPlugins: boolean;
+  canTogglePlugins: boolean;
+  hasOfficialMcpCatalog: boolean;
+  canManageMcp: boolean;
+  canAuthenticateMcp: boolean;
+}
+
+export interface ExtensionSource {
+  id: string;
+  label: string;
+  official: boolean;
+}
+
+export interface ExtensionItem {
+  id: string;
+  providerId: ExtensionProviderId;
+  kind: ExtensionKind;
+  name: string;
+  description?: string | null;
+  version?: string | null;
+  scope: ExtensionScope;
+  source?: string | null;
+  marketplace?: string | null;
+  path?: string | null;
+  parentPluginId?: string | null;
+  category?: string | null;
+  officiallyAvailable: boolean;
+  catalogAuthority?: "provider_official" | null;
+  installed: boolean | null;
+  configured: boolean | null;
+  enabled: boolean | null;
+  health: ExtensionHealth;
+  authState?: ExtensionAuthState | null;
+  availableActions: ExtensionAction[];
+  requiresNewSession: boolean;
+  readOnlyReason?: string | null;
+  warning?: string | null;
+}
+
+export interface ExtensionCatalog {
+  providerId: ExtensionProviderId;
+  cwd?: string | null;
+  items: ExtensionItem[];
+  sources: ExtensionSource[];
+  capabilities: ExtensionProviderCapabilities;
+  fetchedAt?: string | null;
+  kindFetchedAt?: Partial<Record<ExtensionKind, string | null>>;
+  lastAttemptAt?: string | null;
+  nextRefreshAt?: string | null;
+  refreshing?: boolean;
+  refreshCompletedAt?: string | null;
+  hasSnapshot?: boolean;
+  refreshErrors?: Array<{
+    kind: ExtensionKind;
+    code: string;
+  }>;
+}
+
+export interface ExtensionActionResult {
+  providerId: ExtensionProviderId;
+  kind: ExtensionKind;
+  extensionId: string;
+  action: ExtensionAction;
+  requiresNewSession: boolean;
+}
+
 export interface CodexAccountState {
   provider: string;
   authMode?: string;
@@ -1302,6 +1394,8 @@ export type ChatInputItem =
       name: string;
       path: string;
     };
+
+export type ChatInputReference = Exclude<ChatInputItem, { type: "text" }>;
 
 // ── Context Usage ───────────────────────────────────────────────────
 

@@ -7,6 +7,7 @@ const mockIpc = vi.hoisted(() => ({
   listArchivedWorkspaces: vi.fn(),
   listWorkspaces: vi.fn(),
   openWorkspace: vi.fn(),
+  scheduleExtensionCatalogWorkspaceRefresh: vi.fn(),
 }));
 
 const mockTerminalStoreState = vi.hoisted(() => ({
@@ -88,6 +89,7 @@ describe("workspaceStore.removeWorkspace", () => {
       ...makeWorkspace(path, path),
       scanDepth: scanDepth ?? 3,
     }));
+    mockIpc.scheduleExtensionCatalogWorkspaceRefresh.mockResolvedValue(undefined);
     mockTerminalStoreState.prepareWorkspaceActivation.mockResolvedValue(undefined);
   });
 
@@ -142,6 +144,7 @@ describe("workspaceStore.openWorkspace", () => {
     mockIpc.getRepos.mockResolvedValue([]);
     mockIpc.listArchivedWorkspaces.mockResolvedValue([]);
     mockIpc.listWorkspaces.mockResolvedValue([]);
+    mockIpc.scheduleExtensionCatalogWorkspaceRefresh.mockResolvedValue(undefined);
     mockTerminalStoreState.prepareWorkspaceActivation.mockResolvedValue(undefined);
   });
 
@@ -286,6 +289,7 @@ describe("workspaceStore.loadWorkspaces", () => {
 
     mockIpc.getRepos.mockResolvedValue([]);
     mockIpc.listArchivedWorkspaces.mockResolvedValue([]);
+    mockIpc.scheduleExtensionCatalogWorkspaceRefresh.mockResolvedValue(undefined);
     mockTerminalStoreState.prepareWorkspaceActivation.mockResolvedValue(undefined);
   });
 
@@ -303,6 +307,9 @@ describe("workspaceStore.loadWorkspaces", () => {
       validWorkspace.id,
     );
     expect(mockIpc.getRepos).toHaveBeenCalledWith(validWorkspace.id);
+    expect(mockIpc.scheduleExtensionCatalogWorkspaceRefresh).toHaveBeenCalledWith(
+      validWorkspace.id,
+    );
     expect(useWorkspaceStore.getState().activeWorkspaceId).toBe(validWorkspace.id);
     expect(useWorkspaceStore.getState().repos).toEqual([repo]);
   });

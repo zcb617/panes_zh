@@ -113,8 +113,11 @@ interface AssistantMessageTarget {
 const pendingTurnMetaByThread = new Map<string, PendingTurnMeta>();
 const inflightActionOutputHydration = new Map<string, Promise<void>>();
 
-function isCodexThreadSyncRequired(metadata: Record<string, unknown> | undefined): boolean {
-  return metadata?.codexSyncRequired === true;
+function isCodexThreadAttached(thread: {
+  engineId: string;
+  engineThreadId: string | null;
+} | undefined): boolean {
+  return thread?.engineId === "codex" && Boolean(thread.engineThreadId?.trim());
 }
 
 function isThreadTurnActive(status: ThreadStatus): boolean {
@@ -1742,7 +1745,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       const threadState = useThreadStore.getState();
       let activeThread = threadState.threads.find((thread) => thread.id === threadId);
-      if (activeThread?.engineId === "codex" && isCodexThreadSyncRequired(activeThread.engineMetadata)) {
+      // A Codex thread can advance while Panes is closed or while it is being
+      // used directly in Codex. Refresh every attached thread on activation;
+      // codexSyncRequired only describes a transient in-progress remote turn.
+      if (activeThread && isCodexThreadAttached(activeThread) && !isThreadTurnActive(activeThread.status)) {
         try {
           const syncedThread = await ipc.syncThreadFromEngine(threadId);
           threadState.applyThreadUpdateLocal(syncedThread);

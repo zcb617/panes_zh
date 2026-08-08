@@ -15,6 +15,7 @@ use crate::{
         CodexRemoteThreadDto, CodexRemoteThreadPageDto, MessageStatusDto, OpenCodeRemoteSessionDto,
         OpenCodeRemoteSessionPageDto, RepoDto, ThreadDto, ThreadStatusDto, TrustLevelDto,
     },
+    path_utils::paths_equal,
     state::AppState,
 };
 
@@ -74,7 +75,6 @@ pub async fn list_codex_remote_threads(
     })
     .await?;
 
-    let allowed_roots = collect_remote_thread_roots(&workspace_root, &repos);
     let normalized_search_term = normalize_remote_thread_search_term(search_term);
     let remote_threads = state
         .engines
@@ -83,7 +83,9 @@ pub async fn list_codex_remote_threads(
         .map_err(err_to_string)?;
     let matching_threads = remote_threads
         .into_iter()
-        .filter(|thread| allowed_roots.contains(thread.cwd.as_str()))
+        .filter(|thread| {
+            codex_remote_thread_belongs_to_workspace(&workspace_root, &repos, &thread.cwd)
+        })
         .collect::<Vec<_>>();
 
     let offset = parse_codex_remote_thread_cursor(cursor.as_deref())?;
@@ -444,6 +446,14 @@ fn collect_remote_thread_roots(
     roots
 }
 
+fn codex_remote_thread_belongs_to_workspace(
+    workspace_root: &str,
+    repos: &[RepoDto],
+    cwd: &str,
+) -> bool {
+    paths_equal(cwd, workspace_root) || repos.iter().any(|repo| paths_equal(cwd, &repo.path))
+}
+
 fn normalize_remote_thread_search_term(search_term: Option<String>) -> Option<String> {
     search_term
         .as_deref()
@@ -503,11 +513,11 @@ fn resolve_codex_remote_thread_repo_id(
     repos: &[RepoDto],
     cwd: &str,
 ) -> Result<Option<String>, String> {
-    if cwd == workspace_root {
+    if paths_equal(cwd, workspace_root) {
         return Ok(None);
     }
 
-    if let Some(repo) = repos.iter().find(|repo| repo.path == cwd) {
+    if let Some(repo) = repos.iter().find(|repo| paths_equal(&repo.path, cwd)) {
         return Ok(Some(repo.id.clone()));
     }
 
@@ -716,7 +726,7 @@ fn autonomy_policy_for_preset(
                 allow_network: Some(false),
             },
             "auto" => AutonomyPresetPolicy {
-                approval_policy: json!("on-failure"),
+                approval_policy: json!("on-request"),
                 sandbox_mode: (!codex_external_sandbox).then_some("workspace-write"),
                 allow_network: Some(true),
             },
@@ -1102,11 +1112,35 @@ pub async fn archive_thread(state: State<'_, AppState>, thread_id: String) -> Re
                     .map_err(err_to_string)?;
             }
         } else {
-            state
-                .engines
-                .archive_thread(&thread)
-                .await
-                .map_err(err_to_string)?;
+            match state.engines.archive_thread(&thread).await {
+                Ok(()) => {}
+                Err(error) if thread.engine_id == "codex" => {
+                    let engine_thread_id = thread.engine_thread_id.as_deref().unwrap_or_default();
+                    match codex_remote_thread_archive_state(state.inner(), engine_thread_id).await {
+                        Ok(CodexRemoteThreadArchiveState::Archived) => {
+                            log::info!(
+                                "codex thread {} is already archived remotely; archiving its local record",
+                                engine_thread_id
+                            );
+                        }
+                        Ok(CodexRemoteThreadArchiveState::Missing) => {
+                            log::info!(
+                                "codex thread {} is already absent remotely; archiving its local record",
+                                engine_thread_id
+                            );
+                        }
+                        Ok(CodexRemoteThreadArchiveState::Active) => Err(err_to_string(error))?,
+                        Err(state_error) => {
+                            log::warn!(
+                                "failed to resolve codex thread {} state after its archive request failed: {state_error}",
+                                engine_thread_id
+                            );
+                            Err(err_to_string(error))?;
+                        }
+                    }
+                }
+                Err(error) => Err(err_to_string(error))?,
+            }
         }
 
         run_db(db, {
@@ -1119,6 +1153,24 @@ pub async fn archive_thread(state: State<'_, AppState>, thread_id: String) -> Re
     }
     .await;
 
+    state.turns.finish(&thread_id).await;
+    result
+}
+
+#[tauri::command]
+pub async fn archive_thread_locally(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> Result<(), String> {
+    archive_thread_locally_inner(state.inner(), &thread_id).await
+}
+
+async fn archive_thread_locally_inner(state: &AppState, thread_id: &str) -> Result<(), String> {
+    state.turns.cancel(thread_id).await;
+    let db = state.db.clone();
+    let thread_id = thread_id.to_string();
+    let db_thread_id = thread_id.clone();
+    let result = run_db(db, move |db| db::threads::archive_thread(db, &db_thread_id)).await;
     state.turns.finish(&thread_id).await;
     result
 }
@@ -1312,7 +1364,7 @@ pub async fn fork_codex_thread(
     }
 
     let db = state.db.clone();
-    let thread = run_db(db.clone(), {
+    let mut thread = run_db(db.clone(), {
         let thread_id = thread_id.clone();
         move |db| db::threads::get_thread(db, &thread_id)
     })
@@ -1322,6 +1374,7 @@ pub async fn fork_codex_thread(
     if thread.engine_id != "codex" {
         return Err("native fork is only available for Codex threads".to_string());
     }
+    migrate_legacy_codex_on_failure_thread_metadata(state.inner(), &mut thread).await;
     let engine_thread_id = thread
         .engine_thread_id
         .clone()
@@ -1362,7 +1415,7 @@ pub async fn rollback_codex_thread(
     }
 
     let db = state.db.clone();
-    let thread = run_db(db.clone(), {
+    let mut thread = run_db(db.clone(), {
         let thread_id = thread_id.clone();
         move |db| db::threads::get_thread(db, &thread_id)
     })
@@ -1372,6 +1425,7 @@ pub async fn rollback_codex_thread(
     if thread.engine_id != "codex" {
         return Err("native rollback is only available for Codex threads".to_string());
     }
+    migrate_legacy_codex_on_failure_thread_metadata(state.inner(), &mut thread).await;
     let engine_thread_id = thread
         .engine_thread_id
         .clone()
@@ -2240,6 +2294,68 @@ fn allow_network_for_trust_level(trust_level: &TrustLevelDto) -> bool {
     matches!(trust_level, TrustLevelDto::Trusted)
 }
 
+pub(crate) async fn migrate_legacy_codex_on_failure_thread_metadata(
+    state: &AppState,
+    thread: &mut ThreadDto,
+) {
+    if thread.engine_id != "codex"
+        || !is_legacy_codex_on_failure_metadata(thread.engine_metadata.as_ref())
+    {
+        return;
+    }
+
+    let codex_external_sandbox_active = state.engines.codex_uses_external_sandbox().await;
+    let Some(metadata) = migrate_legacy_codex_on_failure_metadata(
+        thread.engine_metadata.as_ref(),
+        codex_external_sandbox_active,
+    ) else {
+        return;
+    };
+
+    let db = state.db.clone();
+    let thread_id = thread.id.clone();
+    let metadata_for_db = metadata.clone();
+    if let Err(error) = run_db(db, move |db| {
+        db::threads::update_engine_metadata(db, &thread_id, &metadata_for_db)
+    })
+    .await
+    {
+        log::warn!(
+            "failed to persist legacy Codex on-failure policy migration for thread {}: {error}",
+            thread.id
+        );
+    }
+
+    thread.engine_metadata = Some(metadata);
+}
+
+fn is_legacy_codex_on_failure_metadata(metadata: Option<&Value>) -> bool {
+    metadata
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("sandboxApprovalPolicy"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("on-failure"))
+}
+
+fn migrate_legacy_codex_on_failure_metadata(
+    metadata: Option<&Value>,
+    codex_external_sandbox_active: bool,
+) -> Option<Value> {
+    if !is_legacy_codex_on_failure_metadata(metadata) {
+        return None;
+    }
+
+    let mut metadata = metadata?.clone();
+    let object = metadata.as_object_mut()?;
+    object.insert("sandboxApprovalPolicy".to_string(), json!("on-request"));
+    if codex_external_sandbox_active {
+        object.remove("sandboxMode");
+    } else {
+        object.insert("sandboxMode".to_string(), json!("workspace-write"));
+    }
+
+    Some(metadata)
+}
 fn thread_approval_policy_override_value(
     engine_id: &str,
     metadata: Option<&Value>,
@@ -2508,6 +2624,47 @@ fn err_to_string(error: impl std::fmt::Display) -> String {
     format!("{error:#}")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexRemoteThreadArchiveState {
+    Active,
+    Archived,
+    Missing,
+}
+
+async fn codex_remote_thread_archive_state(
+    state: &AppState,
+    engine_thread_id: &str,
+) -> anyhow::Result<CodexRemoteThreadArchiveState> {
+    let engine_thread_id = engine_thread_id.trim();
+    if engine_thread_id.is_empty() {
+        return Ok(CodexRemoteThreadArchiveState::Active);
+    }
+
+    let archived_threads = state
+        .engines
+        .list_codex_remote_threads(None, Some(true))
+        .await?;
+    if archived_threads
+        .iter()
+        .any(|thread| thread.engine_thread_id.as_str() == engine_thread_id)
+    {
+        return Ok(CodexRemoteThreadArchiveState::Archived);
+    }
+
+    let active_threads = state
+        .engines
+        .list_codex_remote_threads(None, Some(false))
+        .await?;
+    if active_threads
+        .iter()
+        .any(|thread| thread.engine_thread_id.as_str() == engine_thread_id)
+    {
+        Ok(CodexRemoteThreadArchiveState::Active)
+    } else {
+        Ok(CodexRemoteThreadArchiveState::Missing)
+    }
+}
+
 fn approval_policy_metadata_key(engine_id: &str) -> &'static str {
     match engine_id {
         "claude" => "claudePermissionMode",
@@ -2570,11 +2727,12 @@ fn normalize_codex_approval_policy(value: Value) -> Result<Value, String> {
         Value::String(raw) => {
             let normalized = raw.trim().to_lowercase();
             match normalized.as_str() {
-                "untrusted" | "on-failure" | "on-request" | "never" => {
+                "on-failure" => Ok(Value::String("on-request".to_string())),
+                "untrusted" | "on-request" | "never" => {
                     Ok(Value::String(normalized))
                 }
                 _ => Err(format!(
-                    "invalid approval policy `{normalized}`. expected one of: untrusted, on-failure, on-request, never"
+                    "invalid approval policy `{normalized}`. expected one of: untrusted, on-request, never"
                 )),
             }
         }
@@ -2930,6 +3088,9 @@ mod tests {
             keep_awake: Arc::new(KeepAwakeManager::new()),
             turns: Arc::new(TurnManager::default()),
             file_tree_cache: Arc::new(FileTreeCache::new()),
+            extension_catalog_refreshes: Arc::new(
+                crate::extensions::refresh::ExtensionCatalogRefreshManager::default(),
+            ),
         }
     }
 
@@ -2990,6 +3151,49 @@ mod tests {
             normalize_thread_approval_policy_for_engine("claude", Some(json!("STANDARD"))).unwrap(),
             Some(json!("standard"))
         );
+    }
+    #[test]
+    fn normalize_thread_approval_policy_migrates_legacy_codex_on_failure() {
+        assert_eq!(
+            normalize_thread_approval_policy_for_engine("codex", Some(json!("on-failure")))
+                .unwrap(),
+            Some(json!("on-request"))
+        );
+    }
+
+    #[test]
+    fn legacy_codex_on_failure_metadata_restores_workspace_auto() {
+        let metadata = json!({
+            "sandboxApprovalPolicy": "on-failure",
+            "sandboxMode": "read-only",
+            "sandboxAllowNetwork": false,
+        });
+
+        assert_eq!(
+            migrate_legacy_codex_on_failure_metadata(Some(&metadata), false),
+            Some(json!({
+                "sandboxApprovalPolicy": "on-request",
+                "sandboxMode": "workspace-write",
+                "sandboxAllowNetwork": false,
+            }))
+        );
+    }
+
+    #[test]
+    fn legacy_codex_on_failure_metadata_keeps_external_sandbox_handling() {
+        let metadata = json!({
+            "sandboxApprovalPolicy": "on-failure",
+            "sandboxMode": "workspace-write",
+        });
+
+        let migrated = migrate_legacy_codex_on_failure_metadata(Some(&metadata), true)
+            .expect("legacy metadata should migrate");
+
+        assert_eq!(
+            migrated.get("sandboxApprovalPolicy"),
+            Some(&json!("on-request"))
+        );
+        assert!(migrated.get("sandboxMode").is_none());
     }
 
     #[test]
@@ -3188,6 +3392,39 @@ mod tests {
     }
 
     #[test]
+    fn codex_remote_thread_matching_normalizes_windows_workspace_paths() {
+        let repos = vec![RepoDto {
+            id: "repo-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            name: "repo".to_string(),
+            path: r"D:\zhangcb\my_wiki\repo".to_string(),
+            default_branch: "main".to_string(),
+            is_active: true,
+            trust_level: TrustLevelDto::Standard,
+        }];
+
+        assert!(codex_remote_thread_belongs_to_workspace(
+            r"D:\zhangcb\my_wiki",
+            &repos,
+            r"d:/zhangcb/my_wiki",
+        ));
+        assert!(codex_remote_thread_belongs_to_workspace(
+            r"D:\zhangcb\my_wiki",
+            &repos,
+            r"d:\zhangcb\my_wiki\repo",
+        ));
+        assert_eq!(
+            resolve_codex_remote_thread_repo_id(
+                r"D:\zhangcb\my_wiki",
+                &repos,
+                r"d:\zhangcb\my_wiki",
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn build_codex_remote_thread_title_prefers_thread_title_then_preview() {
         let titled = CodexRemoteThreadSummary {
             engine_thread_id: "thread-12345678".to_string(),
@@ -3255,6 +3492,30 @@ mod tests {
             codex_remote_thread_timestamp_to_rfc3339(1_777_155_663_506),
             "2026-04-25T22:21:03.506+00:00"
         );
+    }
+
+    #[tokio::test]
+    async fn archive_thread_locally_hides_thread_without_calling_the_engine() {
+        let state = test_app_state();
+        let thread = test_thread(&state, "codex", "gpt-5.4");
+        crate::db::threads::set_engine_thread_id(&state.db, &thread.id, "engine-thread-1")
+            .expect("expected engine thread id to be set");
+
+        archive_thread_locally_inner(&state, &thread.id)
+            .await
+            .expect("expected local archive to succeed");
+
+        let visible =
+            crate::db::threads::list_threads_for_workspace(&state.db, &thread.workspace_id)
+                .expect("expected visible thread list");
+        assert!(!visible.iter().any(|candidate| candidate.id == thread.id));
+
+        let archived = crate::db::threads::list_archived_threads_for_workspace(
+            &state.db,
+            &thread.workspace_id,
+        )
+        .expect("expected archived thread list");
+        assert!(archived.iter().any(|candidate| candidate.id == thread.id));
     }
 
     #[test]
@@ -3518,6 +3779,14 @@ mod tests {
 
     #[test]
     fn autonomy_policy_for_preset_matches_engine_contracts() {
+        assert_eq!(
+            autonomy_policy_for_preset("codex", "auto", false).unwrap(),
+            AutonomyPresetPolicy {
+                approval_policy: json!("on-request"),
+                sandbox_mode: Some("workspace-write"),
+                allow_network: Some(true),
+            }
+        );
         assert_eq!(
             autonomy_policy_for_preset("codex", "read-only", false).unwrap(),
             AutonomyPresetPolicy {

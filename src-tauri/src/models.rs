@@ -523,6 +523,120 @@ pub struct CodexMcpServerDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExtensionProviderCapabilitiesDto {
+    pub has_official_skill_catalog: bool,
+    pub can_toggle_skills: bool,
+    pub has_official_plugin_catalog: bool,
+    pub can_install_plugins: bool,
+    pub can_toggle_plugins: bool,
+    pub has_official_mcp_catalog: bool,
+    pub can_manage_mcp: bool,
+    pub can_authenticate_mcp: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionSourceDto {
+    pub id: String,
+    pub label: String,
+    pub official: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionItemDto {
+    pub id: String,
+    pub provider_id: String,
+    pub kind: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub version: Option<String>,
+    pub scope: String,
+    pub source: Option<String>,
+    pub marketplace: Option<String>,
+    pub path: Option<String>,
+    pub parent_plugin_id: Option<String>,
+    pub category: Option<String>,
+    pub officially_available: bool,
+    pub catalog_authority: Option<String>,
+    pub installed: Option<bool>,
+    pub configured: Option<bool>,
+    pub enabled: Option<bool>,
+    pub health: String,
+    pub auth_state: Option<String>,
+    #[serde(default)]
+    pub available_actions: Vec<String>,
+    pub requires_new_session: bool,
+    pub read_only_reason: Option<String>,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtensionCatalogKindRefreshDto {
+    pub kind: String,
+    pub items: Vec<ExtensionItemDto>,
+    pub success: bool,
+}
+
+impl ExtensionCatalogKindRefreshDto {
+    pub fn success(kind: &str, items: Vec<ExtensionItemDto>) -> Self {
+        Self {
+            kind: kind.to_string(),
+            items,
+            success: true,
+        }
+    }
+
+    pub fn failure(kind: &str) -> Self {
+        Self {
+            kind: kind.to_string(),
+            items: Vec::new(),
+            success: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionCatalogRefreshErrorDto {
+    pub kind: String,
+    pub code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedExtensionCatalogDto {
+    pub provider_id: String,
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub items: Vec<ExtensionItemDto>,
+    #[serde(default)]
+    pub sources: Vec<ExtensionSourceDto>,
+    pub capabilities: ExtensionProviderCapabilitiesDto,
+    pub fetched_at: Option<String>,
+    #[serde(default)]
+    pub kind_fetched_at: std::collections::BTreeMap<String, Option<String>>,
+    pub last_attempt_at: Option<String>,
+    pub next_refresh_at: Option<String>,
+    pub refreshing: bool,
+    pub refresh_completed_at: Option<String>,
+    pub has_snapshot: bool,
+    #[serde(default)]
+    pub refresh_errors: Vec<ExtensionCatalogRefreshErrorDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionActionResultDto {
+    pub provider_id: String,
+    pub kind: String,
+    pub extension_id: String,
+    pub action: String,
+    pub requires_new_session: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexAccountStateDto {
     pub provider: String,
     #[serde(skip_serializing_if = "Option::is_none")]

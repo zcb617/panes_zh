@@ -359,7 +359,7 @@
       "codexExternal": {
         "read-only": "Usa aprovações não confiáveis e bloqueia a rede. O sandbox externo controla o acesso aos arquivos.",
         "ask": "Usa aprovações sob demanda e bloqueia a rede. O sandbox externo controla o acesso aos arquivos.",
-        "auto": "Usa aprovações ao falhar com rede habilitada. O sandbox externo controla o acesso aos arquivos."
+        "auto": "Usa aprovações sob demanda com rede habilitada. O sandbox externo controla o acesso aos arquivos."
       }
     },
     "defaultForNewThreads": "Padrão para novas conversas",
@@ -606,11 +606,23 @@
     "contextRingTitle": "Contexto restante: {{percent}}. Abrir limites de uso."
   },
   "slashCommands": {
+    "groups": {
+      "commands": "Comandos",
+      "skills": "Skills",
+      "apps": "Apps",
+      "plugins": "Plugins",
+      "mcp": "MCP"
+    },
     "panels": {
       "skills": {
         "title": "Skills",
         "empty": "Nenhuma skill carregada neste runtime.",
         "description": "Ver skills carregadas do Codex"
+      },
+      "plugins": {
+        "title": "Plugins",
+        "empty": "Nenhum plugin foi carregado neste runtime.",
+        "description": "Ver plugins Codex habilitados"
       },
       "mcp": {
         "title": "Servidores MCP",

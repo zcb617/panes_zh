@@ -117,7 +117,7 @@ pub struct EngineCapabilities {
 }
 
 const CODEX_CAPABILITIES: EngineCapabilities = EngineCapabilities {
-    permission_modes: &["untrusted", "on-failure", "on-request", "never"],
+    permission_modes: &["untrusted", "on-request", "never"],
     sandbox_modes: &["read-only", "workspace-write", "danger-full-access"],
     approval_decisions: &["accept", "decline", "cancel", "accept_for_session"],
 };
@@ -1058,6 +1058,15 @@ fn map_model_info(model: ModelInfo) -> EngineModelDto {
 mod tests {
     use super::*;
 
+    #[test]
+    fn codex_capabilities_exclude_unsupported_on_failure_policy() {
+        let capabilities = capabilities_for_engine("codex");
+
+        assert_eq!(
+            capabilities.permission_modes,
+            &["untrusted", "on-request", "never"]
+        );
+    }
     #[test]
     fn claude_capabilities_expose_supported_contract() {
         let capabilities = capabilities_for_engine("claude");
