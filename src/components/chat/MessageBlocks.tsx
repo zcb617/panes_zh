@@ -71,7 +71,7 @@ import {
 import {
   extractDiffFilename,
 } from "../../lib/parseDiff";
-import { getMessageBlockKey } from "./messageBlockKeys";
+import { getActionGroupId, getMessageBlockKey } from "./messageBlockKeys";
 import {
   VirtualizedDiffBody,
   useParsedDiff,
@@ -86,6 +86,7 @@ import {
 import { shouldOpenLink } from "../../lib/linkOpenSettings";
 import { useChatComposerStore } from "../../stores/chatComposerStore";
 interface Props {
+  messageId: string;
   blocks?: ContentBlock[];
   status?: MessageStatus;
   engineId?: string;
@@ -344,6 +345,16 @@ function groupCompletedActionsInCard(cardSegments: InnerSegment[]): InnerSegment
     groupedSegments.push(segment);
   }
   return groupedSegments;
+}
+
+function getActionCardAnchorId(
+  segment: InnerSegment,
+  safeBlocks: ContentBlock[],
+): string {
+  if (segment.kind === "action-group") {
+    return segment.blocks[0].actionId;
+  }
+  return getMessageBlockKey(segment.block, segment.index, safeBlocks);
 }
 
 function buildBlockSegments(blocks: ContentBlock[], isStreaming?: boolean): BlockSegment[] {
@@ -925,13 +936,16 @@ const actionTypeLabels: Record<string, string> = {
 
 function ActionGroupView({
   blocks,
+  expanded,
+  onToggle,
   onLoadActionOutput,
 }: {
   blocks: ActionBlock[];
+  expanded: boolean;
+  onToggle: () => void;
   onLoadActionOutput?: (actionId: string) => Promise<void>;
 }) {
   const { t } = useTranslation("chat");
-  const [expanded, setExpanded] = useState(false);
 
   const typeCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -961,14 +975,13 @@ function ActionGroupView({
     ? `${baseSummary}, ${t("messageBlocks.actionGroup.errorCount", { count: errorCount })}`
     : baseSummary;
 
-  const toggleExpanded = useCallback(() => setExpanded((v) => !v), []);
   return (
     <div className="animate-slide-up">
       <MessageBlockHeader
         icon={<Layers size={11} />}
         label={summaryText}
         expanded={expanded}
-        onToggle={toggleExpanded}
+        onToggle={onToggle}
         meta={
           <>
           <span>{typeBreakdown}</span>
@@ -1648,7 +1661,24 @@ function renderSingleBlock(
   return null;
 }
 
-function MessageBlocksView({ blocks = [], status, engineId, onApproval, onLoadActionOutput, onOpenDiffFile }: Props) {
+function MessageBlocksView({
+  messageId,
+  blocks = [],
+  status,
+  engineId,
+  onApproval,
+  onLoadActionOutput,
+  onOpenDiffFile,
+}: Props) {
+  const [expandedActionGroups, setExpandedActionGroups] = useState<Record<string, boolean>>({});
+
+  const toggleActionGroup = useCallback((groupId: string) => {
+    setExpandedActionGroups((current) => ({
+      ...current,
+      [groupId]: !(current[groupId] ?? false),
+    }));
+  }, []);
+
   const safeBlocks = useMemo(
     () => dedupeDiffBlocksByScope(
       (Array.isArray(blocks) ? blocks : []).filter(isBlockLike) as ContentBlock[],
@@ -1663,16 +1693,18 @@ function MessageBlocksView({ blocks = [], status, engineId, onApproval, onLoadAc
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       {blockSegments.map((segment, segIdx) => {
         if (segment.kind === "action-card") {
+          const groupAnchorId = getActionCardAnchorId(segment.segments[0], safeBlocks);
           return (
             <div key={`action-card-${segIdx}`} className="msg-action-card">
               {segment.segments.map((inner, innerIdx) => {
                 if (inner.kind === "action-group") {
-                  const first = inner.blocks[0];
-                  const last = inner.blocks[inner.blocks.length - 1];
+                  const groupId = getActionGroupId(messageId, groupAnchorId);
                   return (
                     <ActionGroupView
-                      key={`action-group:${first.actionId}:${last.actionId}`}
+                      key={groupId}
                       blocks={inner.blocks}
+                      expanded={expandedActionGroups[groupId] ?? false}
+                      onToggle={() => toggleActionGroup(groupId)}
                       onLoadActionOutput={onLoadActionOutput}
                     />
                   );
@@ -1724,11 +1756,13 @@ function MessageBlocksView({ blocks = [], status, engineId, onApproval, onLoadAc
 
         if (segment.kind === "action-group") {
           const first = segment.blocks[0];
-          const last = segment.blocks[segment.blocks.length - 1];
+          const groupId = getActionGroupId(messageId, first.actionId);
           return (
             <ActionGroupView
-              key={`action-group:${first.actionId}:${last.actionId}`}
+              key={groupId}
               blocks={segment.blocks}
+              expanded={expandedActionGroups[groupId] ?? false}
+              onToggle={() => toggleActionGroup(groupId)}
               onLoadActionOutput={onLoadActionOutput}
             />
           );
@@ -1752,6 +1786,7 @@ function MessageBlocksView({ blocks = [], status, engineId, onApproval, onLoadAc
 export const MessageBlocks = memo(
   MessageBlocksView,
   (prev, next) =>
+    prev.messageId === next.messageId &&
     prev.blocks === next.blocks &&
     prev.status === next.status &&
     prev.engineId === next.engineId &&

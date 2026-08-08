@@ -34,3 +34,7 @@ export function getMessageBlockKey(
       return `${block.type}:${index}`;
   }
 }
+
+export function getActionGroupId(messageId: string, anchorId: string): string {
+  return `action-group:${messageId}:${anchorId}`;
+}

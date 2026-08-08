@@ -1483,6 +1483,7 @@ function MessageRowView({
           )}
           {hasAssistantContent ? (
             <MessageBlocks
+              messageId={message.id}
               blocks={message.blocks}
               status={message.status}
               engineId={assistantEngineId}
