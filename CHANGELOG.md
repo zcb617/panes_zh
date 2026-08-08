@@ -6,6 +6,14 @@
 
 * **updater:** enable self-hosted signed releases ([b1c5f6a](https://github.com/zcb617/panes_zh/commit/b1c5f6a561399b69c2fbeb1a33ce079bd2cf21fa))
 * **updater:** restore signing password handling ([431ecc6](https://github.com/zcb617/panes_zh/commit/431ecc65d84aa644e7381a481d839ad993c37d2e))
+* **updater:** use public key without double encoding ([f6059aa](https://github.com/zcb617/panes_zh/commit/f6059aa31cfa2704fd6697edd50d256a0a153e0c))
+
+## [](https://github.com/zcb617/panes_zh/compare/v0.63.0...vnull) (2026-08-08)
+
+### Bug Fixes
+
+* **updater:** enable self-hosted signed releases ([b1c5f6a](https://github.com/zcb617/panes_zh/commit/b1c5f6a561399b69c2fbeb1a33ce079bd2cf21fa))
+* **updater:** restore signing password handling ([431ecc6](https://github.com/zcb617/panes_zh/commit/431ecc65d84aa644e7381a481d839ad993c37d2e))
 
 ## [](https://github.com/zcb617/panes_zh/compare/v0.63.0...vnull) (2026-08-08)
 
