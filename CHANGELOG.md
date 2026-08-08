@@ -1,5 +1,11 @@
 # Changelog
 
+## [](https://github.com/zcb617/panes_zh/compare/v0.63.0...vnull) (2026-08-08)
+
+### Bug Fixes
+
+* **updater:** enable self-hosted signed releases ([b1c5f6a](https://github.com/zcb617/panes_zh/commit/b1c5f6a561399b69c2fbeb1a33ce079bd2cf21fa))
+
 ## [](https://github.com/wygoralves/panes/compare/v0.62.2...vnull) (2026-07-13)
 
 ### Features
