@@ -193,6 +193,12 @@ pnpm tauri:build
 
 Os artefatos de bundle normalmente incluem DMGs/arquivos de app no macOS, saídas DEB/AppImage no Linux e instaladores NSIS no Windows, dependendo da plataforma e do target.
 
+### Assinatura de release
+
+O GitHub Actions assina automaticamente os artefatos de atualização com os secrets de Actions `TAURI_SIGNING_PRIVATE_KEY` e `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. O material local de recuperação fica em `.tauri-signing/panes-updater.key`, seu arquivo `.pub` e `.tauri-signing/panes-updater.key.password`; todos são ignorados pelo Git e nunca devem ser commitados, compartilhados ou sincronizados com um serviço não confiável. O arquivo de senha é necessário porque as chaves privadas do atualizador Tauri exigem senha; ele permite restaurar a assinatura sem precisar memorizar a senha.
+
+Para configurar ou restaurar os dois secrets a partir dessa cópia local, execute `./scripts/configure-tauri-updater-signing.ps1`. Use `-CheckOnly` para verificar a chave, a senha e a chave pública embutida sem alterar o GitHub. Para rotacionar a chave intencionalmente, execute `./scripts/configure-tauri-updater-signing.ps1 -Rotate`; ele arquiva o material anterior, gera um novo par chave/senha, atualiza a chave pública embutida e configura os dois secrets.
+
 Git é recomendado para os recursos de gerenciamento de repo, mas o app ainda consegue abrir sem ele.
 
 ## Desenvolvimento

@@ -431,6 +431,7 @@ jobs:
         env:
           PANES_SKIP_DESKTOP_PREBUILD: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Verify universal macOS app binary
         if: matrix.platform == 'macos-15'
@@ -453,6 +454,7 @@ jobs:
           NO_STRIP: "true"
           PANES_SKIP_DESKTOP_PREBUILD: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Build Windows Tauri bundles
         if: matrix.platform == 'windows-latest'
@@ -460,6 +462,7 @@ jobs:
         env:
           PANES_SKIP_DESKTOP_PREBUILD: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Upload Linux assets to GitHub Release
         if: matrix.platform == 'ubuntu-22.04'
