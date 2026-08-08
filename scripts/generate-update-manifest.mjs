@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Generates latest.json for the Tauri updater from GitHub Release assets.
  *
@@ -16,7 +15,7 @@ import {
   resolveUpdaterAssetPairs,
 } from "./lib/update-manifest.mjs";
 
-const DEFAULT_REPO = "wygoralves/panes";
+const DEFAULT_REPO = "zcb617/panes_zh";
 
 export function resolveReleaseTag(argv = process.argv, env = process.env) {
   return argv[2] || env.RELEASE_TAG || null;

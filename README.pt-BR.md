@@ -81,7 +81,7 @@ O Panes não é uma IDE completa, mas inclui um editor multiaba embutido para re
 | Requisito | Versão |
 |---|---|
 | Rust toolchain | stable |
-| Node.js | 20+ |
+| Node.js | 24+ |
 | pnpm | 9+ |
 | Codex CLI | Obrigatório para a chat engine do Codex; o setup pode instalá-lo via npm |
 | Pré-requisitos do Tauri v2 | [Ver docs do Tauri](https://v2.tauri.app/start/prerequisites/) |
