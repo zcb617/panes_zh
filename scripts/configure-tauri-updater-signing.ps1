@@ -46,6 +46,49 @@ function Test-TauriUpdaterSigningMaterial {
   }
 }
 
+function Set-GitHubActionsSecretFromFile {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$SecretName,
+    [Parameter(Mandatory = $true)]
+    [string]$SecretFilePath,
+    [Parameter(Mandatory = $true)]
+    [string]$TargetRepository
+  )
+
+  $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+  $startInfo.FileName = (Get-Command gh -ErrorAction Stop).Source
+  $startInfo.UseShellExecute = $false
+  $startInfo.RedirectStandardInput = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  foreach ($argument in @("secret", "set", $SecretName, "--repo", $TargetRepository, "--app", "actions")) {
+    [void]$startInfo.ArgumentList.Add($argument)
+  }
+
+  $process = [System.Diagnostics.Process]::new()
+  $process.StartInfo = $startInfo
+  if (-not $process.Start()) {
+    throw "Unable to start GitHub CLI while configuring $SecretName."
+  }
+
+  $secretStream = [System.IO.File]::OpenRead($SecretFilePath)
+  try {
+    $secretStream.CopyTo($process.StandardInput.BaseStream)
+  }
+  finally {
+    $secretStream.Dispose()
+    $process.StandardInput.Close()
+  }
+
+  $stdout = $process.StandardOutput.ReadToEnd()
+  $stderr = $process.StandardError.ReadToEnd()
+  $process.WaitForExit()
+  if ($process.ExitCode -ne 0) {
+    throw "Unable to configure $SecretName in ${TargetRepository}: $stderr$stdout"
+  }
+}
+
 if ($Rotate -and $CheckOnly) {
   throw "-Rotate cannot be used together with -CheckOnly."
 }
@@ -72,8 +115,7 @@ if ($Rotate) {
 
   Test-TauriUpdaterSigningMaterial -KeyPath $privateKeyPath -Password $signingPassword
 
-  $newPublicKeyText = [System.IO.File]::ReadAllText($publicKeyPath)
-  $newEmbeddedPublicKey = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($newPublicKeyText))
+  $newEmbeddedPublicKey = [System.IO.File]::ReadAllText($publicKeyPath).Trim()
   $tauriConfigText = [System.IO.File]::ReadAllText($tauriConfigPath)
   $updatedTauriConfigText = [System.Text.RegularExpressions.Regex]::Replace(
     $tauriConfigText,
@@ -102,12 +144,12 @@ foreach ($keyPath in @($keyRelativePath, $publicKeyRelativePath, $passwordRelati
   }
 }
 
-$publicKeyText = [System.IO.File]::ReadAllText($publicKeyPath)
+$publicKeyText = [System.IO.File]::ReadAllText($publicKeyPath).Trim()
 $signingPassword = [System.IO.File]::ReadAllText($privateKeyPasswordPath).Trim()
 if ([string]::IsNullOrWhiteSpace($signingPassword)) {
   throw "The local signing-key password file is empty: $privateKeyPasswordPath"
 }
-$expectedPublicKey = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($publicKeyText))
+$expectedPublicKey = $publicKeyText
 $tauriConfig = Get-Content -LiteralPath $tauriConfigPath -Raw | ConvertFrom-Json
 
 if ($tauriConfig.plugins.updater.pubkey -ne $expectedPublicKey) {
@@ -121,17 +163,8 @@ if ($CheckOnly) {
   exit 0
 }
 
-[System.IO.File]::ReadAllText($privateKeyPath) |
-  & gh secret set TAURI_SIGNING_PRIVATE_KEY --repo $Repository --app actions
-if ($LASTEXITCODE -ne 0) {
-  throw "Unable to configure TAURI_SIGNING_PRIVATE_KEY in $Repository."
-}
-
-$signingPassword |
-  & gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --repo $Repository --app actions
-if ($LASTEXITCODE -ne 0) {
-  throw "Unable to configure TAURI_SIGNING_PRIVATE_KEY_PASSWORD in $Repository."
-}
+Set-GitHubActionsSecretFromFile -SecretName "TAURI_SIGNING_PRIVATE_KEY" -SecretFilePath $privateKeyPath -TargetRepository $Repository
+Set-GitHubActionsSecretFromFile -SecretName "TAURI_SIGNING_PRIVATE_KEY_PASSWORD" -SecretFilePath $privateKeyPasswordPath -TargetRepository $Repository
 
 $secretNames = & gh secret list --repo $Repository --app actions --json name --jq '.[].name'
 if ($LASTEXITCODE -ne 0 -or $secretNames -notcontains "TAURI_SIGNING_PRIVATE_KEY" -or $secretNames -notcontains "TAURI_SIGNING_PRIVATE_KEY_PASSWORD") {
