@@ -35,6 +35,7 @@ import { getActiveEditorView, openSearchPanel } from "./components/editor/CodeMi
 import { CustomWindowFrame } from "./components/shared/CustomWindowFrame";
 import { useCustomWindowFrameState } from "./lib/customWindowFrame";
 import { runEditMenuAction } from "./lib/nativeEditActions";
+import { preventNativeContextMenu } from "./lib/nativeContextMenu";
 import { createAndActivateWorkspaceThread } from "./lib/newThreadActions";
 import {
   cycleWorkspaceTerminalLayout,
@@ -148,6 +149,11 @@ export function App() {
   >([]);
   const codexRemoteThreadPrompt = codexRemoteThreadPrompts[0] ?? null;
   const customWindowFrameState = useCustomWindowFrameState();
+
+  useEffect(() => {
+    document.addEventListener("contextmenu", preventNativeContextMenu);
+    return () => document.removeEventListener("contextmenu", preventNativeContextMenu);
+  }, []);
 
   useEffect(() => {
     void loadWorkspaces();

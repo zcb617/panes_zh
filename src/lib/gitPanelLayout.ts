@@ -11,7 +11,7 @@ export interface GitPanelLayoutState {
   workspaceLayoutIntegrated: boolean;
   gitPanelDocked: boolean;
   gitPanelDockedInWorkspace: boolean;
-  showWorkspaceHeaderReveal: boolean;
+  showWorkspaceHeaderToggle: boolean;
   showEdgeReveal: boolean;
 }
 
@@ -30,7 +30,7 @@ export function getGitPanelLayoutState({
     workspaceLayoutIntegrated,
     gitPanelDocked,
     gitPanelDockedInWorkspace,
-    showWorkspaceHeaderReveal: workspaceLayoutIntegrated && !showGitPanel,
+    showWorkspaceHeaderToggle: workspaceLayoutIntegrated,
     showEdgeReveal: !showGitPanel && !settingsActive && !workspaceLayoutIntegrated,
   };
 }

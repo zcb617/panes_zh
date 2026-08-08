@@ -75,7 +75,7 @@ export function ThreeColumnLayout() {
   const {
     gitPanelDocked,
     gitPanelDockedInWorkspace,
-    showWorkspaceHeaderReveal,
+    showWorkspaceHeaderToggle,
     showEdgeReveal,
   } = getGitPanelLayoutState({
     activeView,
@@ -258,13 +258,16 @@ export function ThreeColumnLayout() {
       <ActiveWorkspacePaneShell
         dockedGitPanel={
           gitPanelDockedInWorkspace ? (
-            <GitPanel onClose={() => setGitPanelVisible(false)} />
+            <GitPanel />
           ) : undefined
         }
         gitPanelSize={gitPanelSize}
         onGitPanelResize={setGitPanelSize}
         onGitPanelUnpin={() => setGitPanelPinned(false)}
-        onShowGitPanel={showWorkspaceHeaderReveal ? () => setGitPanelVisible(true) : undefined}
+        gitPanelVisible={showGitPanel}
+        onToggleGitPanel={
+          showWorkspaceHeaderToggle ? () => setGitPanelVisible(!showGitPanel) : undefined
+        }
       />
     )
   );
@@ -339,7 +342,7 @@ export function ThreeColumnLayout() {
               onResize={setGitPanelSize}
             >
               <div className="content-panel" style={{ height: "100%" }}>
-                <GitPanel onClose={() => setGitPanelVisible(false)} />
+                <GitPanel />
               </div>
             </Panel>
           </PanelGroup>
@@ -410,7 +413,6 @@ export function ThreeColumnLayout() {
                     setGitPanelPinned(true);
                     setGitFlyoutVisible(false);
                   }}
-                  onClose={() => setGitPanelVisible(false)}
                 />
               </div>
             </div>

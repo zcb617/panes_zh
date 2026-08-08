@@ -6,7 +6,6 @@ import {
   ArrowDown,
   ArrowUp,
   X,
-  PanelRightClose,
   PanelRightOpen,
   Undo2,
   FileDiff,
@@ -44,10 +43,9 @@ interface Props {
   mode?: "docked" | "flyout";
   visible?: boolean;
   onPin?: () => void;
-  onClose?: () => void;
 }
 
-export function GitPanel({ mode = "docked", visible = true, onPin, onClose }: Props) {
+export function GitPanel({ mode = "docked", visible = true, onPin }: Props) {
   const { t } = useTranslation("git");
   const {
     workspaces,
@@ -605,18 +603,6 @@ export function GitPanel({ mode = "docked", visible = true, onPin, onClose }: Pr
             aria-label={t("panel.pin")}
           >
             <PanelRightOpen size={13} />
-          </button>
-        ) : null}
-
-        {onClose ? (
-          <button
-            type="button"
-            className="git-toolbar-btn no-drag"
-            onClick={onClose}
-            title={t("panel.hide")}
-            aria-label={t("panel.hide")}
-          >
-            <PanelRightClose size={14} />
           </button>
         ) : null}
 

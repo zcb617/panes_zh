@@ -14,12 +14,12 @@ describe("getGitPanelLayoutState", () => {
       workspaceLayoutIntegrated: true,
       gitPanelDocked: true,
       gitPanelDockedInWorkspace: true,
-      showWorkspaceHeaderReveal: false,
+      showWorkspaceHeaderToggle: true,
       showEdgeReveal: false,
     });
   });
 
-  it("places the hidden Git restore control in the workspace header", () => {
+  it("keeps the Git toggle in the workspace header when Git is hidden", () => {
     expect(
       getGitPanelLayoutState({
         activeView: "chat",
@@ -29,7 +29,7 @@ describe("getGitPanelLayoutState", () => {
       }),
     ).toMatchObject({
       workspaceLayoutIntegrated: true,
-      showWorkspaceHeaderReveal: true,
+      showWorkspaceHeaderToggle: true,
       showEdgeReveal: false,
     });
   });
@@ -44,7 +44,7 @@ describe("getGitPanelLayoutState", () => {
       }),
     ).toMatchObject({
       workspaceLayoutIntegrated: false,
-      showWorkspaceHeaderReveal: false,
+      showWorkspaceHeaderToggle: false,
       showEdgeReveal: true,
     });
   });
@@ -60,7 +60,7 @@ describe("getGitPanelLayoutState", () => {
     ).toMatchObject({
       workspaceLayoutIntegrated: false,
       gitPanelDocked: false,
-      showWorkspaceHeaderReveal: false,
+      showWorkspaceHeaderToggle: false,
       showEdgeReveal: false,
     });
   });

@@ -15,6 +15,7 @@ import {
 import {
   FilePen,
   MessageSquare,
+  PanelRightClose,
   PanelRightOpen,
   SquareSplitVertical,
   SquareTerminal,
@@ -147,7 +148,8 @@ interface WorkspacePaneShellProps {
   gitPanelSize?: number;
   onGitPanelResize?: (size: number) => void;
   onGitPanelUnpin?: () => void;
-  onShowGitPanel?: () => void;
+  gitPanelVisible?: boolean;
+  onToggleGitPanel?: () => void;
 }
 
 export function WorkspacePaneShell({
@@ -156,7 +158,8 @@ export function WorkspacePaneShell({
   gitPanelSize = 26,
   onGitPanelResize,
   onGitPanelUnpin,
-  onShowGitPanel,
+  gitPanelVisible = false,
+  onToggleGitPanel,
 }: WorkspacePaneShellProps) {
   const { t } = useTranslation("app");
   const { t: tGit } = useTranslation("git");
@@ -492,15 +495,16 @@ export function WorkspacePaneShell({
               );
             })}
           </div>
-          {onShowGitPanel ? (
+          {onToggleGitPanel ? (
             <button
               type="button"
-              className="workspace-pane-header-git-reveal"
-              title={tGit("panel.show")}
-              aria-label={tGit("panel.show")}
-              onClick={onShowGitPanel}
+              className="workspace-pane-header-git-toggle"
+              title={tGit(gitPanelVisible ? "panel.hide" : "panel.show")}
+              aria-label={tGit(gitPanelVisible ? "panel.hide" : "panel.show")}
+              aria-pressed={gitPanelVisible}
+              onClick={onToggleGitPanel}
             >
-              <PanelRightOpen size={15} />
+              {gitPanelVisible ? <PanelRightClose size={15} /> : <PanelRightOpen size={15} />}
             </button>
           ) : null}
         </div>
@@ -513,7 +517,7 @@ export function WorkspacePaneShell({
             id="main-layout-panels"
             autoSaveId="panes:main-layout-panels"
             direction="horizontal"
-            style={{ height: "100%", flex: 1 }}
+            style={{ height: "100%", flex: 1, minWidth: 0, minHeight: 0 }}
           >
             <Panel
               id="main-layout-content"
@@ -521,13 +525,15 @@ export function WorkspacePaneShell({
               defaultSize={100 - gitPanelSize}
               minSize={35}
             >
-              <PaneNodeView
-                node={layout.root}
-                workspaceId={workspaceId}
-                focusedLeafId={layout.focusedLeafId}
-                leafCount={countPaneLeaves(layout.root)}
-                surfaceDrag={surfaceDrag}
-              />
+              <div className="workspace-pane-docked-content">
+                <PaneNodeView
+                  node={layout.root}
+                  workspaceId={workspaceId}
+                  focusedLeafId={layout.focusedLeafId}
+                  leafCount={countPaneLeaves(layout.root)}
+                  surfaceDrag={surfaceDrag}
+                />
+              </div>
             </Panel>
 
             <PanelResizeHandle
