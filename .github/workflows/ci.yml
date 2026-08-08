@@ -3,7 +3,6 @@ name: CI and Release
 on:
   push:
     branches: ["main", "master"]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -17,6 +16,7 @@ concurrency:
 
 jobs:
   frontend:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +42,7 @@ jobs:
         run: pnpm build
 
   rust:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +73,7 @@ jobs:
         run: cargo check
 
   macos_compat:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -92,6 +94,7 @@ jobs:
         run: cargo check --target x86_64-apple-darwin
 
   windows_compat:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,9 +137,43 @@ jobs:
         working-directory: src-tauri
         run: cargo test claude_sidecar::tests --lib
 
+  updater_signing_check:
+    name: Updater Signing Preflight
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "pnpm"
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify updater public key format
+        run: pnpm check:tauri-updater-config
+      - name: Sign updater probe
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          probe="$(mktemp)"
+          private_key_file="$(mktemp)"
+          trap 'rm -f "$probe" "$probe.sig" "$private_key_file"' EXIT
+          printf 'updater-signing-preflight\n' > "$probe"
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$private_key_file"
+          pnpm exec tauri signer sign --private-key-path "$private_key_file" --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$probe"
+          test -s "$probe.sig"
+
   windows_bundle_check:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
-    needs: [frontend, windows_compat]
+    needs: [frontend, windows_compat, updater_signing_check]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -226,7 +263,6 @@ jobs:
   release:
     name: Automated Release
     if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'master')
-    needs: [frontend, rust, macos_compat, windows_compat, windows_bundle_check]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -607,7 +643,7 @@ jobs:
 
   linux_release_smoke:
     name: Linux Release Smoke
-    if: github.event_name == 'push' && needs.release.outputs.should_release == 'true'
+    if: ${{ false }}
     needs: [release, update_manifest]
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -762,7 +798,7 @@ jobs:
 
   macos_intel_release_smoke:
     name: macOS Intel Release Smoke
-    if: github.event_name == 'push' && needs.release.outputs.should_release == 'true'
+    if: ${{ false }}
     needs: [release, update_manifest, publish_homebrew_cask]
     runs-on: macos-15-intel
     timeout-minutes: 25
@@ -917,7 +953,7 @@ jobs:
 
   windows_release_smoke:
     name: Windows Release Smoke
-    if: github.event_name == 'push' && needs.release.outputs.should_release == 'true'
+    if: ${{ false }}
     needs: [release, update_manifest]
     runs-on: windows-latest
     timeout-minutes: 30

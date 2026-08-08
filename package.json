@@ -21,6 +21,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "check:codex-schema": "node scripts/check-codex-app-server-parity.mjs",
+    "check:tauri-updater-config": "node scripts/verify-tauri-updater-config.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "release:check": "node scripts/should-release.mjs",
