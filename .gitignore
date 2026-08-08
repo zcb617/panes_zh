@@ -49,3 +49,4 @@ build-flatpak/
 .tmp
 .pnpm-store
 .agents
+.codex
