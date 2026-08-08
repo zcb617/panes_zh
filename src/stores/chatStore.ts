@@ -31,6 +31,7 @@ interface ChatState {
   olderLoadBlockedUntil: number;
   status: ThreadStatus;
   streaming: boolean;
+  turnStartedAt: number | null;
   usageLimits: ContextUsage | null;
   usageLimitsLoading: boolean;
   error?: string;
@@ -789,6 +790,12 @@ function collapseTrailingSteerMessages(messages: Message[]): Message[] {
 
 function isThreadStatusStreaming(status: ThreadStatus): boolean {
   return isThreadTurnActive(status);
+}
+
+function resolveRestoredTurnStartedAt(messages: Message[]): number | null {
+  const lastMessage = messages[messages.length - 1];
+  const startedAt = lastMessage ? Date.parse(lastMessage.createdAt) : Number.NaN;
+  return Number.isFinite(startedAt) ? startedAt : null;
 }
 
 function hasRenderableAssistantContent(message: Message): boolean {
@@ -1678,6 +1685,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   olderLoadBlockedUntil: 0,
   status: "idle",
   streaming: false,
+  turnStartedAt: null,
   usageLimits: null,
   usageLimitsLoading: false,
   setActiveThread: async (threadId) => {
@@ -1728,6 +1736,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         loadingOlderMessages: false,
         olderLoadBlockedUntil: 0,
         streaming: false,
+        turnStartedAt: null,
         status: "idle",
         usageLimits: null,
         usageLimitsLoading: false,
@@ -1814,6 +1823,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             let nextMessages = state.messages;
             let nextStreaming = state.streaming;
             let nextStatus = state.status;
+            let nextTurnStartedAt = state.turnStartedAt;
             let nextUsageLimits = state.usageLimits;
             let nextUsageLimitsLoading = state.usageLimitsLoading;
             let hydrationRecalcRequired = false;
@@ -1838,8 +1848,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
               );
               nextStatus = nextRuntimeState.status;
               nextStreaming = nextRuntimeState.streaming;
-              if (queuedEvent.type === "TurnCompleted") {
+              if (
+                queuedEvent.type === "TurnCompleted" ||
+                (queuedEvent.type === "Error" && !queuedEvent.recoverable)
+              ) {
                 pendingTurnMetaByThread.delete(threadId);
+                nextTurnStartedAt = null;
               }
             }
             if (hydrationRecalcRequired) {
@@ -1850,6 +1864,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               nextMessages === state.messages &&
               nextStatus === state.status &&
               nextStreaming === state.streaming &&
+              nextTurnStartedAt === state.turnStartedAt &&
               nextUsageLimits === state.usageLimits &&
               nextUsageLimitsLoading === state.usageLimitsLoading
             ) {
@@ -1861,6 +1876,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               messages: nextMessages,
               status: nextStatus,
               streaming: nextStreaming,
+              turnStartedAt: nextTurnStartedAt,
               usageLimits: nextUsageLimits,
               usageLimitsLoading: nextUsageLimitsLoading,
             };
@@ -1976,6 +1992,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         unlisten,
         error: undefined,
         streaming: isThreadStatusStreaming(threadStatus),
+        turnStartedAt: isThreadStatusStreaming(threadStatus)
+          ? resolveRestoredTurnStartedAt(messages)
+          : null,
         status: threadStatus,
         usageLimits: null,
         usageLimitsLoading: shouldRefreshUsageLimits,
@@ -2016,6 +2035,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         olderLoadBlockedUntil: 0,
         usageLimits: null,
         usageLimitsLoading: false,
+        turnStartedAt: null,
         error: String(error),
       });
     }
@@ -2139,6 +2159,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ]),
       status: "streaming",
       streaming: true,
+      turnStartedAt: Date.now(),
       error: undefined
     }));
     schedulePendingTurnShellMetric(threadId, clientTurnId);
@@ -2163,6 +2184,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ),
         status: "error",
         streaming: false,
+        turnStartedAt: null,
         error: String(error),
       }));
       return false;
@@ -2240,7 +2262,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const nextMessages = last?.role === "assistant" && !lastHasContent
         ? messages.slice(0, -1)
         : messages;
-      set({ status: "idle", streaming: false, messages: nextMessages });
+      set({ status: "idle", streaming: false, turnStartedAt: null, messages: nextMessages });
     } catch (error) {
       set({ error: String(error) });
     }

@@ -390,6 +390,7 @@
     "attachFiles": "附加文件",
     "sendMessage": "发送消息",
     "sendingMessage": "正在发送消息",
+    "workingFor": "已执行 {{duration}}",
     "sendFollowUp": "发送后续消息",
     "enablePlanMode": "启用计划模式（Shift+Tab）",
     "disablePlanMode": "禁用计划模式（Shift+Tab）",

@@ -104,6 +104,7 @@ import {
 import { buildComposerRuntimeSnapshot } from "./composerRuntime";
 import { resolveReasoningEffortForModel } from "./reasoningEffort";
 import { resolveUsageStatusKey } from "./usageStatus";
+import { formatWorkingDuration } from "./workingDuration";
 import { ToolInputQuestionnaire } from "./ToolInputQuestionnaire";
 import {
   buildPermissionsApprovalResponse,
@@ -1319,6 +1320,24 @@ function MessageCopyButton({ message }: { message: Message }) {
   );
 }
 
+function WorkingDurationIndicator({ startedAt }: { startedAt: number }) {
+  const { t } = useTranslation("chat");
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    setNow(Date.now());
+    const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, [startedAt]);
+
+  return (
+    <div className="chat-working-duration" role="status" aria-live="polite">
+      <span className="chat-working-duration-dot" aria-hidden="true" />
+      <span>{t("panel.workingFor", { duration: formatWorkingDuration(now - startedAt) })}</span>
+    </div>
+  );
+}
+
 function MessageRowView({
   message,
   index,
@@ -1729,6 +1748,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     respondApproval,
     hydrateActionOutput,
     streaming,
+    turnStartedAt,
     usageLimits,
     usageLimitsLoading,
     error,
@@ -1747,6 +1767,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       respondApproval: state.respondApproval,
       hydrateActionOutput: state.hydrateActionOutput,
       streaming: state.streaming,
+      turnStartedAt: state.turnStartedAt,
       usageLimits: state.usageLimits,
       usageLimitsLoading: state.usageLimitsLoading,
       error: state.error,
@@ -5755,6 +5776,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
               </div>
             )}
             {/* ── Messages ── */}
+            {streaming && turnStartedAt !== null && (
+              <WorkingDurationIndicator startedAt={turnStartedAt} />
+            )}
             <div
               ref={viewportRef}
               style={{

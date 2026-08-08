@@ -390,6 +390,7 @@
     "attachFiles": "Anexar arquivos",
     "sendMessage": "Enviar mensagem",
     "sendingMessage": "Enviando mensagem",
+    "workingFor": "Processando há {{duration}}",
     "sendFollowUp": "Enviar acompanhamento",
     "enablePlanMode": "Ativar modo de plano (Shift+Tab)",
     "disablePlanMode": "Desativar modo de plano (Shift+Tab)",

@@ -4836,6 +4836,28 @@ button, input, textarea, select {
   background: var(--content-bg);
 }
 
+.chat-working-duration {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--divider);
+  color: var(--text-2);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.chat-working-duration-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--info);
+  box-shadow: 0 0 0 3px rgba(var(--info-rgb), 0.12);
+  animation: pulse-soft 1.5s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
 .chat-input-box:focus-within {
   border-color: var(--focus-ring);
   box-shadow: var(--focus-ring-shadow);

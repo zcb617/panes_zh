@@ -390,6 +390,7 @@
     "attachFiles": "Attach files",
     "sendMessage": "Send message",
     "sendingMessage": "Sending message",
+    "workingFor": "Working for {{duration}}",
     "sendFollowUp": "Send follow-up",
     "enablePlanMode": "Enable plan mode (Shift+Tab)",
     "disablePlanMode": "Disable plan mode (Shift+Tab)",
