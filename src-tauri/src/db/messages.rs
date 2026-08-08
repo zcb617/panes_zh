@@ -160,42 +160,101 @@ pub fn append_thread_messages(
                 .format("%Y-%m-%d %H:%M:%S%.3f")
                 .to_string()
         });
-        inserted += tx.execute(
-            "INSERT INTO messages (
-                id, thread_id, role, content, blocks_json, turn_engine_id, remote_turn_id, turn_model_id,
-                turn_reasoning_effort, schema_version, stream_seq, status, token_input,
-                token_output, created_at
+        let existing = tx
+            .query_row(
+                "SELECT id, turn_engine_id
+                 FROM messages
+                 WHERE thread_id = ?1
+                   AND remote_turn_id = ?2
+                   AND role = ?3
+                 LIMIT 1",
+                params![thread_id, remote_turn_id, message.role],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
-            SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 0, ?10, ?11, ?12, ?13
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM messages
-                WHERE thread_id = ?2
-                  AND remote_turn_id = ?7
-                  AND role = ?3
-            )",
-            params![
-                Uuid::new_v4().to_string(),
-                thread_id,
-                message.role,
-                message.content,
-                message.blocks.to_string(),
-                message.turn_engine_id,
-                remote_turn_id,
-                message.turn_model_id,
-                message.turn_reasoning_effort,
-                message.status.as_str(),
-                message.token_input as i64,
-                message.token_output as i64,
-                created_at,
-            ],
-        )
-        .context("failed to insert imported thread message")?;
+            .optional()
+            .context("failed to find imported thread message")?;
+
+        match existing {
+            Some((message_id, Some(existing_turn_engine_id)))
+                if existing_turn_engine_id == remote_turn_id
+                    && is_latest_thread_message(&tx, thread_id, &message_id)? =>
+            {
+                tx.execute(
+                    "UPDATE messages
+                     SET content = ?1,
+                         blocks_json = ?2,
+                         turn_model_id = ?3,
+                         turn_reasoning_effort = ?4,
+                         status = ?5,
+                         token_input = ?6,
+                         token_output = ?7
+                     WHERE id = ?8",
+                    params![
+                        message.content,
+                        message.blocks.to_string(),
+                        message.turn_model_id,
+                        message.turn_reasoning_effort,
+                        message.status.as_str(),
+                        message.token_input as i64,
+                        message.token_output as i64,
+                        message_id,
+                    ],
+                )
+                .context("failed to replace latest imported thread message")?;
+            }
+            Some(_) => {}
+            None => {
+                inserted += tx
+                    .execute(
+                        "INSERT INTO messages (
+                            id, thread_id, role, content, blocks_json, turn_engine_id, remote_turn_id, turn_model_id,
+                            turn_reasoning_effort, schema_version, stream_seq, status, token_input,
+                            token_output, created_at
+                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 0, ?10, ?11, ?12, ?13)",
+                        params![
+                            Uuid::new_v4().to_string(),
+                            thread_id,
+                            message.role,
+                            message.content,
+                            message.blocks.to_string(),
+                            message.turn_engine_id,
+                            remote_turn_id,
+                            message.turn_model_id,
+                            message.turn_reasoning_effort,
+                            message.status.as_str(),
+                            message.token_input as i64,
+                            message.token_output as i64,
+                            created_at,
+                        ],
+                    )
+                    .context("failed to insert imported thread message")?;
+            }
+        }
     }
 
     tx.commit()
         .context("failed to commit thread message import transaction")?;
     Ok(inserted)
+}
+
+fn is_latest_thread_message(
+    tx: &rusqlite::Transaction<'_>,
+    thread_id: &str,
+    message_id: &str,
+) -> anyhow::Result<bool> {
+    let latest_message_id = tx
+        .query_row(
+            "SELECT id
+             FROM messages
+             WHERE thread_id = ?1
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT 1",
+            params![thread_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("failed to find latest thread message")?;
+    Ok(latest_message_id.as_deref() == Some(message_id))
 }
 
 fn bind_legacy_local_turn_to_remote_turn(
@@ -1453,6 +1512,108 @@ mod tests {
 
         assert_eq!(appended, 1);
         assert_eq!(get_thread_messages(&db, &thread_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn append_thread_messages_replaces_only_the_latest_remote_message() {
+        let db = test_db();
+        let thread_id = test_thread(&db);
+        let initial = vec![
+            ImportedMessageRecord {
+                role: "assistant".to_string(),
+                content: Some("older partial answer".to_string()),
+                blocks: json!([{ "type": "text", "content": "older partial answer" }]),
+                status: MessageStatusDto::Streaming,
+                turn_engine_id: Some("remote-older".to_string()),
+                remote_turn_id: Some("remote-older".to_string()),
+                turn_model_id: None,
+                turn_reasoning_effort: None,
+                token_input: 0,
+                token_output: 0,
+                created_at: Some("2026-08-08 12:00:00.000".to_string()),
+            },
+            ImportedMessageRecord {
+                role: "assistant".to_string(),
+                content: Some("latest partial answer".to_string()),
+                blocks: json!([{ "type": "text", "content": "latest partial answer" }]),
+                status: MessageStatusDto::Streaming,
+                turn_engine_id: Some("remote-latest".to_string()),
+                remote_turn_id: Some("remote-latest".to_string()),
+                turn_model_id: None,
+                turn_reasoning_effort: None,
+                token_input: 0,
+                token_output: 0,
+                created_at: Some("2026-08-08 12:01:00.000".to_string()),
+            },
+        ];
+        append_thread_messages(&db, &thread_id, &initial).unwrap();
+
+        let refreshed = vec![
+            ImportedMessageRecord {
+                role: "assistant".to_string(),
+                content: Some("older complete answer".to_string()),
+                blocks: json!([{ "type": "text", "content": "older complete answer" }]),
+                status: MessageStatusDto::Completed,
+                turn_engine_id: Some("remote-older".to_string()),
+                remote_turn_id: Some("remote-older".to_string()),
+                turn_model_id: None,
+                turn_reasoning_effort: None,
+                token_input: 0,
+                token_output: 0,
+                created_at: Some("2026-08-08 12:00:00.000".to_string()),
+            },
+            ImportedMessageRecord {
+                role: "assistant".to_string(),
+                content: Some("latest complete answer".to_string()),
+                blocks: json!([
+                    { "type": "text", "content": "latest complete answer" },
+                    { "type": "action", "actionId": "latest-action" }
+                ]),
+                status: MessageStatusDto::Completed,
+                turn_engine_id: Some("remote-latest".to_string()),
+                remote_turn_id: Some("remote-latest".to_string()),
+                turn_model_id: Some("gpt-5.3-codex".to_string()),
+                turn_reasoning_effort: Some("high".to_string()),
+                token_input: 12,
+                token_output: 34,
+                created_at: Some("2026-08-08 12:01:00.000".to_string()),
+            },
+        ];
+
+        assert_eq!(
+            append_thread_messages(&db, &thread_id, &refreshed).unwrap(),
+            0
+        );
+
+        let messages = get_thread_messages(&db, &thread_id).unwrap();
+        let older = messages
+            .iter()
+            .find(|message| message.content.as_deref() == Some("older partial answer"))
+            .unwrap();
+        assert_eq!(older.content.as_deref(), Some("older partial answer"));
+        assert_eq!(older.status, MessageStatusDto::Streaming);
+
+        let latest = messages
+            .iter()
+            .find(|message| message.content.as_deref() == Some("latest complete answer"))
+            .unwrap();
+        assert_eq!(latest.content.as_deref(), Some("latest complete answer"));
+        assert_eq!(latest.status, MessageStatusDto::Completed);
+        assert_eq!(latest.turn_model_id.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(
+            latest
+                .token_usage
+                .as_ref()
+                .map(|usage| (usage.input, usage.output)),
+            Some((12, 34))
+        );
+        assert!(latest
+            .blocks
+            .as_ref()
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .any(|block| block.get("actionId").and_then(Value::as_str) == Some("latest-action")));
     }
 
     #[test]
