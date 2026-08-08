@@ -174,8 +174,18 @@ export function parseLocalAbsolutePathTarget(rawTarget: string): ParsedLocalPath
   }
 
   const hashIndex = rawTarget.indexOf("#");
-  const basePath = hashIndex >= 0 ? rawTarget.slice(0, hashIndex) : rawTarget;
+  const encodedBasePath = hashIndex >= 0 ? rawTarget.slice(0, hashIndex) : rawTarget;
   const hash = hashIndex >= 0 ? rawTarget.slice(hashIndex) : "";
+  let basePath = encodedBasePath;
+  try {
+    // Markdown parsers percent-encode non-ASCII link destinations before they
+    // reach this layer. Decode those destinations so an existing chat link
+    // resolves to the actual filesystem name instead of a literal "%E7...".
+    basePath = decodeURIComponent(encodedBasePath);
+  } catch {
+    // A direct filesystem path can legitimately contain a bare percent sign.
+    // Keep that path usable rather than rejecting it as malformed URL syntax.
+  }
   const parsed = stripLocationSuffix(basePath, isLocalAbsolutePath);
 
   return {

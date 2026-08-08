@@ -79,6 +79,21 @@ describe("renderMarkdownToHtml", () => {
     expect(html).toContain('data-local-file-reference="file:///repo/README.md#L4"');
   });
 
+  it("preserves the raw Windows path of an existing chat link with a Chinese filename", () => {
+    const content = [
+      "文章已完成并保存：[给开源项目打了钱，为什么维护还是撑不起来.md](E:/content_factory/drafts/2026-08-08/给开源项目打了钱，为什么维护还是撑不起来.md)",
+    ].join("\n");
+
+    const html = renderMarkdownToHtml(content);
+
+    expect(html).toContain(
+      'href="E:\\content_factory\\drafts\\2026-08-08\\给开源项目打了钱，为什么维护还是撑不起来.md"',
+    );
+    expect(html).toContain(
+      'data-local-file-reference="E:/content_factory/drafts/2026-08-08/%E7%BB%99%E5%BC%80%E6%BA%90%E9%A1%B9%E7%9B%AE%E6%89%93%E4%BA%86%E9%92%B1%EF%BC%8C%E4%B8%BA%E4%BB%80%E4%B9%88%E7%BB%B4%E6%8A%A4%E8%BF%98%E6%98%AF%E6%92%91%E4%B8%8D%E8%B5%B7%E6%9D%A5.md"',
+    );
+  });
+
   it("does not allow local file URLs in image sources", () => {
     const html = renderMarkdownToHtml("![local](file:///repo/secret.png)");
 

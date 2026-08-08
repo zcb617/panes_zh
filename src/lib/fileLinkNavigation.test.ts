@@ -443,6 +443,21 @@ describe("fileLinkNavigation", () => {
       "drafts/2026-08-08/给开源项目，中文 文件.md",
       null,
     );
+
+    mockOpenFileAtLocation.mockClear();
+
+    await expect(
+      navigateLinkTarget(
+        "E:/content_factory/drafts/2026-08-08/%E7%BB%99%E5%BC%80%E6%BA%90%E9%A1%B9%E7%9B%AE%EF%BC%8C%E4%B8%AD%E6%96%87%20%E6%96%87%E4%BB%B6.md",
+        { shiftKey: true },
+      ),
+    ).resolves.toBe("internal");
+
+    expect(mockOpenFileAtLocation).toHaveBeenCalledWith(
+      "E:/content_factory",
+      "drafts/2026-08-08/给开源项目，中文 文件.md",
+      null,
+    );
   });
 
   it("opens repo-relative local links against the active repo on shift-click", async () => {
