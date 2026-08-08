@@ -134,9 +134,43 @@ jobs:
         working-directory: src-tauri
         run: cargo test claude_sidecar::tests --lib
 
+  updater_signing_check:
+    name: Updater Signing Preflight
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "pnpm"
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify updater public key format
+        run: pnpm check:tauri-updater-config
+      - name: Sign updater probe
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          probe="$(mktemp)"
+          private_key_file="$(mktemp)"
+          trap 'rm -f "$probe" "$probe.sig" "$private_key_file"' EXIT
+          printf 'updater-signing-preflight\n' > "$probe"
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$private_key_file"
+          pnpm exec tauri signer sign --private-key-path "$private_key_file" --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$probe"
+          test -s "$probe.sig"
+
   windows_bundle_check:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
-    needs: [frontend, windows_compat]
+    needs: [frontend, windows_compat, updater_signing_check]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -226,7 +260,7 @@ jobs:
   release:
     name: Automated Release
     if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'master')
-    needs: [frontend, rust, macos_compat, windows_compat, windows_bundle_check]
+    needs: [frontend, rust, macos_compat, windows_compat, updater_signing_check]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
