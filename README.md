@@ -228,9 +228,9 @@ Common bundle artifacts include macOS DMGs/app archives, Linux DEB/AppImage outp
 
 ### Release signing
 
-GitHub Actions signs updater artifacts automatically with the repository Actions secret `TAURI_SIGNING_PRIVATE_KEY`; it is not tracked in Git or exported in a developer shell. The local recovery copy is `.tauri-signing/panes-updater.key` and is ignored by Git; do not commit or share it. The client public key and update URL are maintained in `src-tauri/tauri.conf.json`. Keep the private key secret unchanged after release: replacing it requires a manual reinstall for users on an older public key.
+GitHub Actions signs updater artifacts automatically with the repository Actions secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; neither is tracked in Git or exported in a developer shell. The local recovery material is `.tauri-signing/panes-updater.key`, its `.pub` file, and `.tauri-signing/panes-updater.key.password`. They are ignored by Git; do not commit, share, or sync them to an untrusted service. The password file is intentional: Tauri updater private keys require a password, so it lets the repository restore signing without requiring anyone to memorize that password. The client public key and update URL are maintained in `src-tauri/tauri.conf.json`. Keep the signing material unchanged after release: replacing it requires a manual reinstall for users on an older public key.
 
-To configure or restore the GitHub Actions secret from that local recovery copy, run `./scripts/configure-tauri-updater-signing.ps1`. Use `-CheckOnly` to verify the local key and the embedded public key without changing GitHub.
+To configure or restore both GitHub Actions secrets from that local recovery copy, run `./scripts/configure-tauri-updater-signing.ps1`. Use `-CheckOnly` to verify the local key, password, and embedded public key without changing GitHub. To rotate the key intentionally, run `./scripts/configure-tauri-updater-signing.ps1 -Rotate`; it archives the previous local recovery material, generates a new key/password pair, updates the embedded public key, and configures both GitHub secrets.
 
 Git is recommended for the repo-management features, but the app can still launch without it.
 
