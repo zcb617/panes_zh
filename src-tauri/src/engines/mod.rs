@@ -383,12 +383,25 @@ pub struct OpenCodeRemoteSessionSummary {
     pub archived: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAnnotationMetadata {
+    pub comment: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_label: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TurnAttachment {
     pub file_name: String,
     pub file_path: String,
     pub size_bytes: u64,
     pub mime_type: Option<String>,
+    pub browser_annotation: Option<BrowserAnnotationMetadata>,
 }
 
 #[derive(Debug, Clone)]

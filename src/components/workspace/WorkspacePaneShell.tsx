@@ -147,7 +147,6 @@ interface WorkspacePaneShellProps {
   dockedGitPanel?: ReactNode;
   gitPanelSize?: number;
   onGitPanelResize?: (size: number) => void;
-  onGitPanelUnpin?: () => void;
   gitPanelVisible?: boolean;
   onToggleGitPanel?: () => void;
 }
@@ -157,7 +156,6 @@ export function WorkspacePaneShell({
   dockedGitPanel,
   gitPanelSize = 26,
   onGitPanelResize,
-  onGitPanelUnpin,
   gitPanelVisible = false,
   onToggleGitPanel,
 }: WorkspacePaneShellProps) {
@@ -539,9 +537,7 @@ export function WorkspacePaneShell({
             <PanelResizeHandle
               id="main-layout-git-resize-handle"
               className="resize-handle"
-              aria-label={tGit("panel.unpin")}
-              title={tGit("panel.unpin")}
-              onClick={onGitPanelUnpin}
+              aria-label="调整右侧面板宽度"
             />
 
             <Panel

@@ -582,6 +582,7 @@ function createOptimisticUserMessage(
       filePath: attachment.filePath,
       sizeBytes: attachment.sizeBytes,
       mimeType: attachment.mimeType,
+      browserAnnotation: attachment.browserAnnotation,
     });
   }
 
@@ -616,6 +617,7 @@ function createSteerBlock(
     filePath: attachment.filePath,
     sizeBytes: attachment.sizeBytes,
     mimeType: attachment.mimeType,
+    browserAnnotation: attachment.browserAnnotation,
   }));
   const skills: SkillBlock[] = [];
   const mentions: MentionBlock[] = [];

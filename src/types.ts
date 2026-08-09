@@ -407,6 +407,7 @@ export interface AttachmentBlock {
   filePath: string;
   sizeBytes: number;
   mimeType?: string;
+  browserAnnotation?: BrowserAnnotationMetadata;
 }
 
 export interface SkillBlock {
@@ -1367,12 +1368,53 @@ export type StreamEvent =
 
 // ── Attachments ─────────────────────────────────────────────────────
 
+export interface BrowserAnnotationMetadata {
+  comment: string;
+  number?: number;
+  sourceUrl?: string;
+  targetLabel?: string;
+}
+
+export interface BrowserBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface BrowserAnnotationRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface BrowserAnnotationSelection {
+  url: string;
+  title: string;
+  targetLabel: string;
+  rect: BrowserAnnotationRect;
+}
+
+export interface BrowserAnnotationSubmission {
+  selection: BrowserAnnotationSelection;
+  comment: string;
+}
+
+export interface BrowserAnnotationAttachment {
+  fileName: string;
+  filePath: string;
+  sizeBytes: number;
+  mimeType: string;
+}
+
 export interface ChatAttachment {
   id: string;
   fileName: string;
   filePath: string;
   sizeBytes: number;
   mimeType?: string;
+  browserAnnotation?: BrowserAnnotationMetadata;
 }
 
 export interface AttachmentPreview {

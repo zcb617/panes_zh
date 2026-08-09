@@ -1543,6 +1543,203 @@ button, input, textarea, select {
 }
 
 /* ── Git Panel ── */
+.right-tool-panel {
+  position: relative;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--content-bg);
+}
+
+.right-tool-tabs {
+  display: flex;
+  align-items: stretch;
+  height: 34px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--divider);
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+
+.right-tool-tabs button {
+  position: relative;
+  padding: 0 9px;
+  border: 0;
+  color: var(--text-3);
+  background: transparent;
+  font-size: 12px;
+  line-height: 34px;
+  cursor: pointer;
+}
+
+.right-tool-tabs button:hover {
+  color: var(--text-1);
+}
+
+.right-tool-tabs button.right-tool-tab-active {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.right-tool-tabs button.right-tool-tab-active::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent-fill);
+}
+
+.right-tool-tabs button:focus-visible,
+.browser-toolbar-button:focus-visible,
+.browser-annotate-button:focus-visible,
+.browser-clear-annotations:focus-visible,
+.browser-address-form input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.right-tool-content {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+}
+
+.browser-panel {
+  position: relative;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--content-bg);
+}
+
+.browser-panel-toolbar {
+  height: var(--panel-header-height);
+  min-height: var(--panel-header-height);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--divider);
+  background: var(--content-bg);
+}
+
+.browser-nav-actions {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 1px;
+}
+
+.browser-toolbar-button {
+  display: inline-flex;
+  width: 25px;
+  height: 25px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  background: transparent;
+  cursor: pointer;
+}
+
+.browser-toolbar-button:hover {
+  color: var(--text-1);
+  background: var(--wash-06);
+}
+
+.browser-address-form {
+  min-width: 0;
+  height: 26px;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  background: var(--bg-2);
+}
+
+.browser-address-form:focus-within {
+  border-color: var(--accent-fill);
+}
+
+.browser-address-form input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  color: var(--text-1);
+  background: transparent;
+  font-size: 12px;
+}
+
+.browser-address-form input::placeholder {
+  color: var(--text-4);
+}
+
+.browser-annotate-button,
+.browser-clear-annotations {
+  display: inline-flex;
+  height: 26px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  background: var(--bg-2);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.browser-annotate-button:hover,
+.browser-annotate-button-active,
+.browser-clear-annotations:hover:not(:disabled) {
+  border-color: var(--accent-fill);
+  color: var(--accent-fill);
+  background: rgba(var(--accent-rgb), 0.10);
+}
+
+.browser-webview-host {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  background: var(--content-bg);
+}
+
+.browser-panel-error {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  left: 10px;
+  z-index: 2;
+  padding: 7px 9px;
+  border: 1px solid rgba(214, 69, 69, 0.44);
+  border-radius: var(--radius-sm);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--content-bg) 94%, #d64545);
+  font-size: 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.browser-annotate-button:disabled,
+.browser-clear-annotations:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .git-panel {
   position: relative;
   height: 100%;

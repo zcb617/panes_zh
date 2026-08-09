@@ -19,8 +19,8 @@ use crate::{
     engines::{
         approval_response_route_for_engine, normalize_approval_response_for_engine,
         trim_action_output_delta_content, validate_engine_sandbox_mode, ApprovalRequestRoute,
-        EngineEvent, OutputStream, SandboxPolicy, ThreadScope, TurnAttachment,
-        TurnCompletionStatus, TurnInput, TurnInputItem, STREAMED_DIFF_MAX_CHARS,
+        BrowserAnnotationMetadata, EngineEvent, OutputStream, SandboxPolicy, ThreadScope,
+        TurnAttachment, TurnCompletionStatus, TurnInput, TurnInputItem, STREAMED_DIFF_MAX_CHARS,
     },
     models::{
         ActionOutputDto, EngineInfoDto, EngineModelDto, MessageDto, MessageStatusDto,
@@ -42,6 +42,9 @@ const ENGINE_EVENT_LOG_ACTION_OUTPUT_MAX_CHARS: usize = 4_096;
 const TRUNCATED_SUFFIX: &str = "\n... [truncated]";
 const MAX_ATTACHMENTS_PER_TURN: usize = 10;
 const MAX_PASTED_IMAGE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_BROWSER_ANNOTATION_COMMENT_CHARS: usize = 2_000;
+const MAX_BROWSER_ANNOTATION_URL_CHARS: usize = 4_096;
+const MAX_BROWSER_ANNOTATION_TARGET_CHARS: usize = 600;
 const TEXT_ATTACHMENT_EXTENSIONS: &[&str] = &[
     "txt", "md", "json", "js", "ts", "tsx", "jsx", "py", "rs", "go", "css", "html", "yaml", "yml",
     "toml", "xml", "sql", "sh", "csv",
@@ -136,6 +139,8 @@ enum ContentBlock {
         size_bytes: u64,
         #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
         mime_type: Option<String>,
+        #[serde(rename = "browserAnnotation", skip_serializing_if = "Option::is_none")]
+        browser_annotation: Option<BrowserAnnotationMetadata>,
     },
 
     #[serde(rename = "skill")]
@@ -211,6 +216,8 @@ pub struct ChatAttachmentPayload {
     pub size_bytes: u64,
     #[serde(default)]
     pub mime_type: Option<String>,
+    #[serde(default)]
+    pub browser_annotation: Option<BrowserAnnotationMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -265,6 +272,7 @@ pub async fn save_pasted_image_attachment(
         file_path: file_path.display().to_string(),
         size_bytes: bytes.len() as u64,
         mime_type: Some(normalized_mime),
+        browser_annotation: None,
     })
 }
 
@@ -427,11 +435,15 @@ pub async fn send_message(
     let attachments = normalize_attachments(attachments)?;
     let input_items = normalize_input_items(message.as_str(), input_items)?;
     let plan_mode = plan_mode.unwrap_or(false);
+    let browser_annotation_context = browser_annotation_context(&attachments);
+    let engine_message = format_engine_message(&message, &browser_annotation_context);
+    let engine_input_items =
+        append_browser_annotation_context(&input_items, &browser_annotation_context);
     let turn_input = TurnInput {
-        message: message.clone(),
+        message: engine_message,
         attachments: attachments.clone(),
         plan_mode,
-        input_items: input_items.clone(),
+        input_items: engine_input_items,
     };
     let current_turn_model_id = thread_last_model_id(thread.engine_metadata.as_ref())
         .unwrap_or_else(|| thread.model_id.clone());
@@ -972,11 +984,15 @@ pub async fn steer_message(
     let attachments = normalize_attachments(attachments)?;
     let input_items = normalize_input_items(message.as_str(), input_items)?;
     let plan_mode = plan_mode.unwrap_or(false);
+    let browser_annotation_context = browser_annotation_context(&attachments);
+    let engine_message = format_engine_message(&message, &browser_annotation_context);
+    let engine_input_items =
+        append_browser_annotation_context(&input_items, &browser_annotation_context);
     let turn_input = TurnInput {
-        message: message.clone(),
+        message: engine_message,
         attachments: attachments.clone(),
         plan_mode,
-        input_items: input_items.clone(),
+        input_items: engine_input_items,
     };
     let effective_model_id = thread_last_model_id(thread.engine_metadata.as_ref())
         .unwrap_or_else(|| thread.model_id.clone());
@@ -1070,6 +1086,7 @@ fn build_user_blocks(
             file_path: attachment.file_path.clone(),
             size_bytes: attachment.size_bytes,
             mime_type: attachment.mime_type.clone(),
+            browser_annotation: attachment.browser_annotation.clone(),
         });
     }
 
@@ -1186,15 +1203,116 @@ fn normalize_attachments(
             attachment.file_name.trim().to_string()
         };
 
+        let browser_annotation = normalize_browser_annotation(attachment.browser_annotation)?;
+
         normalized.push(TurnAttachment {
             file_name,
             file_path,
             size_bytes: attachment.size_bytes,
             mime_type: attachment.mime_type,
+            browser_annotation,
         });
     }
 
     Ok(normalized)
+}
+
+fn normalize_browser_annotation_text(
+    value: Option<String>,
+    maximum_length: usize,
+    field_name: &str,
+) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > maximum_length {
+        return Err(format!("{field_name} is too long."));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn normalize_browser_annotation(
+    annotation: Option<BrowserAnnotationMetadata>,
+) -> Result<Option<BrowserAnnotationMetadata>, String> {
+    let Some(annotation) = annotation else {
+        return Ok(None);
+    };
+    let Some(comment) = normalize_browser_annotation_text(
+        Some(annotation.comment),
+        MAX_BROWSER_ANNOTATION_COMMENT_CHARS,
+        "Browser annotation comment",
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(BrowserAnnotationMetadata {
+        comment,
+        number: annotation.number.filter(|number| *number > 0),
+        source_url: normalize_browser_annotation_text(
+            annotation.source_url,
+            MAX_BROWSER_ANNOTATION_URL_CHARS,
+            "Browser annotation URL",
+        )?,
+        target_label: normalize_browser_annotation_text(
+            annotation.target_label,
+            MAX_BROWSER_ANNOTATION_TARGET_CHARS,
+            "Browser annotation target",
+        )?,
+    }))
+}
+
+fn browser_annotation_context(attachments: &[TurnAttachment]) -> String {
+    let mut lines = Vec::new();
+    for attachment in attachments {
+        let Some(annotation) = attachment.browser_annotation.as_ref() else {
+            continue;
+        };
+        let number = annotation
+            .number
+            .map(|number| format!(" #{number}"))
+            .unwrap_or_default();
+        lines.push(format!("标注{number}：{}", annotation.comment));
+        if let Some(url) = annotation.source_url.as_deref() {
+            lines.push(format!("页面：{url}"));
+        }
+        if let Some(target) = annotation.target_label.as_deref() {
+            lines.push(format!("定位目标：{target}"));
+        }
+    }
+
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n[浏览器标注附件：以下文字与对应截图关联，仅用于理解用户的问题，不要在回复中复述为用户的聊天原文。]\n{}",
+            lines.join("\n")
+        )
+    }
+}
+
+fn format_engine_message(message: &str, browser_annotation_context: &str) -> String {
+    if browser_annotation_context.is_empty() {
+        message.to_string()
+    } else {
+        format!("{message}{browser_annotation_context}")
+    }
+}
+
+fn append_browser_annotation_context(
+    input_items: &[TurnInputItem],
+    browser_annotation_context: &str,
+) -> Vec<TurnInputItem> {
+    let mut result = input_items.to_vec();
+    if !browser_annotation_context.is_empty() {
+        result.push(TurnInputItem::Text {
+            text: browser_annotation_context.to_string(),
+        });
+    }
+    result
 }
 
 fn validate_attachments_for_engine_model(
@@ -4364,7 +4482,60 @@ mod tests {
             file_path: format!("/tmp/{file_name}"),
             size_bytes: 1,
             mime_type: mime_type.map(ToOwned::to_owned),
+            browser_annotation: None,
         }
+    }
+
+    #[test]
+    fn browser_annotation_comment_is_hidden_from_visible_message_text() {
+        let attachment = TurnAttachment {
+            file_name: "browser-annotation.png".to_string(),
+            file_path: "/tmp/browser-annotation.png".to_string(),
+            size_bytes: 1,
+            mime_type: Some("image/png".to_string()),
+            browser_annotation: Some(BrowserAnnotationMetadata {
+                comment: "文字太小了".to_string(),
+                number: Some(1),
+                source_url: Some("https://www.qq.com/".to_string()),
+                target_label: Some("div: 嘉兴市 雨 25℃".to_string()),
+            }),
+        };
+
+        let blocks = build_user_blocks(
+            "请优化这个页面",
+            &[TurnInputItem::Text {
+                text: "请优化这个页面".to_string(),
+            }],
+            &[attachment.clone()],
+            false,
+            false,
+        );
+        let visible_text = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(visible_text, "请优化这个页面");
+        assert!(!visible_text.contains("文字太小了"));
+        assert!(browser_annotation_context(&[attachment]).contains("文字太小了"));
+    }
+
+    #[test]
+    fn browser_annotation_metadata_requires_a_comment() {
+        let annotation = BrowserAnnotationMetadata {
+            comment: "   ".to_string(),
+            number: Some(1),
+            source_url: Some("https://www.qq.com/".to_string()),
+            target_label: Some("div: 嘉兴市 雨 25℃".to_string()),
+        };
+
+        assert!(normalize_browser_annotation(Some(annotation))
+            .expect("empty annotation comment should not fail")
+            .is_none());
     }
 
     #[test]

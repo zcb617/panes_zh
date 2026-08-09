@@ -184,6 +184,7 @@ function createPendingSubmissionMessage(
       filePath: attachment.filePath,
       sizeBytes: attachment.sizeBytes,
       mimeType: attachment.mimeType,
+      browserAnnotation: attachment.browserAnnotation,
     })),
   ];
   blocks.push({ type: "text", content: text, planMode: planMode || undefined });

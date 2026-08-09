@@ -7,6 +7,9 @@ import type {
   ApprovalResponse,
   ActionOutputPayload,
   AttachmentPreview,
+  BrowserAnnotationAttachment,
+  BrowserAnnotationSelection,
+  BrowserBounds,
   ChatAttachment,
   ChatEngineId,
   ChatInputItem,
@@ -414,6 +417,34 @@ export const ipc = {
       mimeType,
       dataBase64,
     }),
+  browserShow: (scope: string, bounds: BrowserBounds, initialUrl?: string | null) =>
+    invoke<void>("browser_show", {
+      scope,
+      bounds,
+      initialUrl: initialUrl ?? null,
+    }),
+  browserSetBounds: (scope: string, bounds: BrowserBounds) =>
+    invoke<void>("browser_set_bounds", { scope, bounds }),
+  browserHide: (scope: string) => invoke<void>("browser_hide", { scope }),
+  browserTransferScope: (fromScope: string, toScope: string) =>
+    invoke<void>("browser_transfer_scope", { fromScope, toScope }),
+  browserNavigate: (scope: string, url: string) =>
+    invoke<string>("browser_navigate", { scope, url }),
+  browserReload: (scope: string) => invoke<void>("browser_reload", { scope }),
+  browserGoBack: (scope: string) => invoke<void>("browser_go_back", { scope }),
+  browserGoForward: (scope: string) => invoke<void>("browser_go_forward", { scope }),
+  browserSetAnnotationEnabled: (scope: string, enabled: boolean) =>
+    invoke<void>("browser_set_annotation_enabled", { scope, enabled }),
+  browserClearPendingAnnotation: (scope: string) =>
+    invoke<void>("browser_clear_pending_annotation", { scope }),
+  browserClearAllAnnotations: (scope: string) =>
+    invoke<void>("browser_clear_all_annotations", { scope }),
+  browserCaptureAnnotation: (
+    scope: string,
+    number: number,
+    selection: BrowserAnnotationSelection,
+  ) =>
+    invoke<BrowserAnnotationAttachment>("browser_capture_annotation", { scope, number, selection }),
   readAttachmentPreview: (filePath: string, mimeType?: string | null) =>
     invoke<AttachmentPreview | null>("read_attachment_preview", {
       filePath,

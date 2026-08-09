@@ -39,7 +39,9 @@ dependencies = [
  "tokio-util",
  "toml 0.8.2",
  "uuid",
+ "webview2-com",
  "which",
+ "windows",
 ]
 
 [[package]]

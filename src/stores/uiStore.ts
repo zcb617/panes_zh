@@ -7,6 +7,7 @@ import {
 const SIDEBAR_PINNED_KEY = "panes:sidebarPinned";
 const GIT_PANEL_PINNED_KEY = "panes:gitPanelPinned";
 const GIT_PANEL_VISIBLE_KEY = "panes:gitPanelVisible";
+const ACTIVE_RIGHT_TOOL_KEY = "panes:activeRightTool";
 const EXPLORER_OPEN_KEY = "panes:explorerOpen";
 
 interface MessageFocusTarget {
@@ -21,6 +22,7 @@ interface FocusModeSnapshot {
 }
 
 export type ActiveView = "chat" | "harnesses" | "extensions" | "settings";
+export type ActiveRightTool = "git" | "browser";
 export type SettingsSection =
   | "overview"
   | "appearance"
@@ -39,6 +41,7 @@ interface UiState {
   sidebarPinned: boolean;
   showGitPanel: boolean;
   gitPanelPinned: boolean;
+  activeRightTool: ActiveRightTool;
   showExplorer: boolean;
   focusMode: boolean;
   focusModeSnapshot: FocusModeSnapshot | null;
@@ -58,6 +61,7 @@ interface UiState {
   setGitPanelVisible: (visible: boolean) => void;
   toggleGitPanelPin: () => void;
   setGitPanelPinned: (pinned: boolean) => void;
+  setActiveRightTool: (tool: ActiveRightTool) => void;
   toggleExplorer: () => void;
   setExplorerOpen: (open: boolean) => void;
   setFocusMode: (enabled: boolean) => void;
@@ -97,6 +101,15 @@ const savedGitPanelVisible = (() => {
   }
 })();
 
+const savedActiveRightTool = (() => {
+  try {
+    const value = localStorage.getItem(ACTIVE_RIGHT_TOOL_KEY);
+    return value === "browser" || value === "git" ? value : null;
+  } catch {
+    return null;
+  }
+})();
+
 const savedExplorerOpen = (() => {
   try {
     return localStorage.getItem(EXPLORER_OPEN_KEY);
@@ -110,6 +123,7 @@ export const useUiStore = create<UiState>((set) => ({
   sidebarPinned: savedPinned !== null ? savedPinned === "true" : true,
   showGitPanel: savedGitPanelVisible !== null ? savedGitPanelVisible === "true" : true,
   gitPanelPinned: savedGitPanelPinned !== null ? savedGitPanelPinned === "true" : true,
+  activeRightTool: savedActiveRightTool ?? "git",
   showExplorer: savedExplorerOpen !== null ? savedExplorerOpen === "true" : true,
   focusMode: false,
   focusModeSnapshot: null,
@@ -189,6 +203,14 @@ export const useUiStore = create<UiState>((set) => ({
       // Ignore storage failures in non-browser/test environments.
     }
     set({ gitPanelPinned: pinned, showGitPanel: true });
+  },
+  setActiveRightTool: (tool) => {
+    try {
+      localStorage.setItem(ACTIVE_RIGHT_TOOL_KEY, tool);
+    } catch {
+      // The selection remains available for this session if storage is unavailable.
+    }
+    set({ activeRightTool: tool, showGitPanel: true });
   },
   toggleExplorer: () =>
     set((state) => {
