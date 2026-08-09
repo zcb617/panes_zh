@@ -1,8 +1,11 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::HashMap, ffi::OsString, path::Path, process::Stdio, sync::Arc, time::Duration,
 };
 
 use anyhow::Context;
+use chrono::Utc;
+use serde::Serialize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
@@ -20,16 +23,55 @@ use super::trim_action_output_delta_content;
 // This channel is only a live fan-out for active Codex subscribers. Tokio's
 // broadcast ring retains every slot until it is overwritten, so keeping a large
 // history here can pin already-delivered protocol payloads while Panes is idle.
-const INCOMING_EVENT_BUFFER_CAPACITY: usize = 64;
+const INCOMING_EVENT_BUFFER_CAPACITY: usize = 640;
 const TRANSPORT_ERROR_LINE_MAX_CHARS: usize = 16 * 1024;
 const TRANSPORT_ERROR_LINE_TRUNCATED_PREFIX: &str = "... [protocol line truncated; showing tail]\n";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodexTransportEventDiagnostics {
+    pub sequence: u64,
+    pub at: String,
+    pub kind: String,
+    pub method: Option<String>,
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexTransportMessage {
+    pub sequence: u64,
+    pub published_at: std::time::Instant,
+    pub message: IncomingMessage,
+}
+
+impl CodexTransportMessage {
+    pub fn diagnostics(&self) -> CodexTransportEventDiagnostics {
+        let mut diagnostics = diagnostics_for_message(&self.message);
+        diagnostics.sequence = self.sequence;
+        diagnostics
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodexTransportDiagnostics {
+    pub pid: Option<u32>,
+    pub process_status: Option<String>,
+    pub pending_count: usize,
+    pub broadcast_receiver_count: usize,
+    pub broadcast_capacity: usize,
+    pub next_incoming_sequence: u64,
+    pub last_event: Option<CodexTransportEventDiagnostics>,
+    pub last_stderr: Option<String>,
+}
 
 pub struct CodexTransport {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<RpcResponse>>>>,
-    incoming_tx: broadcast::Sender<IncomingMessage>,
+    incoming_tx: broadcast::Sender<CodexTransportMessage>,
+    last_event: Arc<Mutex<Option<CodexTransportEventDiagnostics>>>,
+    last_stderr: Arc<Mutex<Option<String>>>,
     next_request_id: std::sync::atomic::AtomicU64,
+    next_incoming_sequence: Arc<AtomicU64>,
 }
 
 impl Drop for CodexTransport {
@@ -76,56 +118,202 @@ impl CodexTransport {
             .ok_or_else(|| anyhow::anyhow!("codex app-server stderr not available"))?;
 
         let (incoming_tx, _) = broadcast::channel(INCOMING_EVENT_BUFFER_CAPACITY);
+        let next_incoming_sequence = Arc::new(AtomicU64::new(1));
         let pending = Arc::new(Mutex::new(
             HashMap::<String, oneshot::Sender<RpcResponse>>::new(),
         ));
+        let last_event = Arc::new(Mutex::new(None));
+        let last_stderr = Arc::new(Mutex::new(None));
 
         {
             let pending = pending.clone();
             let incoming_tx = incoming_tx.clone();
+            let last_event = last_event.clone();
+            let next_incoming_sequence = next_incoming_sequence.clone();
             tokio::spawn(async move {
+                crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                    "at": Utc::now().to_rfc3339(),
+                    "event": "codex_stdout_reader_started",
+                }))
+                .await;
                 let mut lines = BufReader::new(stdout).lines();
 
                 loop {
                     match lines.next_line().await {
-                        Ok(Some(line)) => match parse_incoming(&line) {
-                            Ok(IncomingMessage::Response(response)) => {
-                                let sender = pending.lock().await.remove(&response.id);
-                                if let Some(sender) = sender {
-                                    let _ = sender.send(response);
+                        Ok(Some(line)) => {
+                            let sequence = next_incoming_sequence.fetch_add(1, Ordering::Relaxed);
+                            let line_bytes = line.len();
+                            let parsed_at = Utc::now().to_rfc3339();
+                            match parse_incoming(&line) {
+                                Ok(IncomingMessage::Response(response)) => {
+                                    let diagnostics = CodexTransportEventDiagnostics {
+                                        sequence,
+                                        at: parsed_at.clone(),
+                                        kind: "response".to_string(),
+                                        method: None,
+                                        id: Some(response.id.clone()),
+                                    };
+                                    record_last_event(&last_event, diagnostics.clone()).await;
+                                    crate::engines::codex::append_codex_transport_log(
+                                        &serde_json::json!({
+                                            "at": parsed_at,
+                                            "event": "codex_stdout_message",
+                                            "sequence": sequence,
+                                            "line_bytes": line_bytes,
+                                            "kind": diagnostics.kind,
+                                            "method": diagnostics.method,
+                                            "id": diagnostics.id,
+                                            "route": "pending_response",
+                                        }),
+                                    )
+                                    .await;
+                                    let sender = pending.lock().await.remove(&response.id);
+                                    let pending_found = sender.is_some();
+                                    if let Some(sender) = sender {
+                                        let _ = sender.send(response);
+                                    }
+                                    crate::engines::codex::append_codex_transport_log(
+                                        &serde_json::json!({
+                                            "at": Utc::now().to_rfc3339(),
+                                            "event": "codex_stdout_response_routed",
+                                            "sequence": sequence,
+                                            "pending_found": pending_found,
+                                        }),
+                                    )
+                                    .await;
+                                }
+                                Ok(other) => {
+                                    let mut diagnostics = diagnostics_for_message(&other);
+                                    diagnostics.sequence = sequence;
+                                    record_last_event(&last_event, diagnostics.clone()).await;
+                                    crate::engines::codex::append_codex_transport_log(
+                                        &serde_json::json!({
+                                            "at": parsed_at,
+                                            "event": "codex_stdout_message",
+                                            "sequence": sequence,
+                                            "line_bytes": line_bytes,
+                                            "kind": diagnostics.kind,
+                                            "method": diagnostics.method,
+                                            "id": diagnostics.id,
+                                            "route": "broadcast",
+                                        }),
+                                    )
+                                    .await;
+                                    let published_at = std::time::Instant::now();
+                                    let envelope = CodexTransportMessage {
+                                        sequence,
+                                        published_at,
+                                        message: trim_buffered_incoming_message(other),
+                                    };
+                                    let receiver_count = incoming_tx.receiver_count();
+                                    let send_result = incoming_tx.send(envelope);
+                                    crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                                    "at": Utc::now().to_rfc3339(),
+                                    "event": "codex_broadcast_publish",
+                                    "sequence": sequence,
+                                    "capacity": INCOMING_EVENT_BUFFER_CAPACITY,
+                                    "receiver_count_before": receiver_count,
+                                    "receivers_notified": send_result.as_ref().ok().copied().unwrap_or(0),
+                                    "send_result": if send_result.is_ok() { "published" } else { "no_receivers" },
+                                })).await;
+                                }
+                                Err(error) => {
+                                    log::warn!("codex stdout parse error: {error}");
+                                    record_last_event(
+                                        &last_event,
+                                        CodexTransportEventDiagnostics {
+                                            sequence,
+                                            at: parsed_at.clone(),
+                                            kind: "parse_error".to_string(),
+                                            method: Some("transport/parse_error".to_string()),
+                                            id: None,
+                                        },
+                                    )
+                                    .await;
+                                    publish_transport_message(
+                                        &incoming_tx,
+                                        sequence,
+                                        IncomingMessage::Notification {
+                                            method: "transport/parse_error".to_string(),
+                                            params: transport_parse_error_payload(
+                                                &error.to_string(),
+                                                &line,
+                                            ),
+                                        },
+                                        "parse_error",
+                                    )
+                                    .await;
                                 }
                             }
-                            Ok(other) => {
-                                let _ = incoming_tx.send(trim_buffered_incoming_message(other));
-                            }
-                            Err(error) => {
-                                log::warn!("codex stdout parse error: {error}");
-                                let _ = incoming_tx.send(IncomingMessage::Notification {
-                                    method: "transport/parse_error".to_string(),
-                                    params: transport_parse_error_payload(
-                                        &error.to_string(),
-                                        &line,
-                                    ),
-                                });
-                            }
-                        },
+                        }
                         Ok(None) => {
-                            let _ = incoming_tx.send(IncomingMessage::Notification {
-                                method: "transport/eof".to_string(),
-                                params: serde_json::value::RawValue::from_string("{}".to_string())
+                            let sequence = next_incoming_sequence.fetch_add(1, Ordering::Relaxed);
+                            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                                "at": Utc::now().to_rfc3339(),
+                                "event": "codex_stdout_reader_eof",
+                                "sequence": sequence,
+                            }))
+                            .await;
+                            record_last_event(
+                                &last_event,
+                                CodexTransportEventDiagnostics {
+                                    sequence,
+                                    at: Utc::now().to_rfc3339(),
+                                    kind: "transport".to_string(),
+                                    method: Some("transport/eof".to_string()),
+                                    id: None,
+                                },
+                            )
+                            .await;
+                            publish_transport_message(
+                                &incoming_tx,
+                                sequence,
+                                IncomingMessage::Notification {
+                                    method: "transport/eof".to_string(),
+                                    params: serde_json::value::RawValue::from_string(
+                                        "{}".to_string(),
+                                    )
                                     .expect("\"{}\" is valid json"),
-                            });
+                                },
+                                "eof",
+                            )
+                            .await;
                             break;
                         }
                         Err(error) => {
+                            let sequence = next_incoming_sequence.fetch_add(1, Ordering::Relaxed);
                             log::warn!("codex stdout read error: {error}");
-                            let _ = incoming_tx.send(IncomingMessage::Notification {
-                                method: "transport/read_error".to_string(),
-                                params: serde_json::value::to_raw_value(&serde_json::json!({
-                                  "error": error.to_string(),
-                                }))
-                                .expect("internal error payload is valid json"),
-                            });
+                            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                                "at": Utc::now().to_rfc3339(),
+                                "event": "codex_stdout_reader_error",
+                                "sequence": sequence,
+                                "error": error.to_string(),
+                            }))
+                            .await;
+                            record_last_event(
+                                &last_event,
+                                CodexTransportEventDiagnostics {
+                                    sequence,
+                                    at: Utc::now().to_rfc3339(),
+                                    kind: "transport".to_string(),
+                                    method: Some("transport/read_error".to_string()),
+                                    id: None,
+                                },
+                            )
+                            .await;
+                            publish_transport_message(
+                                &incoming_tx,
+                                sequence,
+                                IncomingMessage::Notification {
+                                    method: "transport/read_error".to_string(),
+                                    params: serde_json::value::to_raw_value(&serde_json::json!({
+                                      "error": error.to_string(),
+                                    }))
+                                    .expect("internal error payload is valid json"),
+                                },
+                                "read_error",
+                            )
+                            .await;
                             break;
                         }
                     }
@@ -134,18 +322,47 @@ impl CodexTransport {
         }
 
         {
+            let last_stderr = last_stderr.clone();
             tokio::spawn(async move {
+                crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                    "at": Utc::now().to_rfc3339(),
+                    "event": "codex_stderr_reader_started",
+                }))
+                .await;
                 let mut lines = BufReader::new(stderr).lines();
                 loop {
                     match lines.next_line().await {
                         Ok(Some(line)) => {
                             if !line.trim().is_empty() {
+                                let trimmed = trim_transport_error_line(line.trim());
+                                *last_stderr.lock().await = Some(trimmed.clone());
                                 log::debug!("codex stderr: {line}");
+                                crate::engines::codex::append_codex_transport_log(
+                                    &serde_json::json!({
+                                        "at": Utc::now().to_rfc3339(),
+                                        "event": "codex_stderr_line",
+                                        "line": trimmed,
+                                    }),
+                                )
+                                .await;
                             }
                         }
-                        Ok(None) => break,
+                        Ok(None) => {
+                            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                                "at": Utc::now().to_rfc3339(),
+                                "event": "codex_stderr_reader_eof",
+                            }))
+                            .await;
+                            break;
+                        }
                         Err(error) => {
                             log::debug!("codex stderr read error: {error}");
+                            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                                "at": Utc::now().to_rfc3339(),
+                                "event": "codex_stderr_reader_error",
+                                "error": error.to_string(),
+                            }))
+                            .await;
                             break;
                         }
                     }
@@ -158,11 +375,14 @@ impl CodexTransport {
             stdin: Mutex::new(stdin),
             pending,
             incoming_tx,
+            last_event,
+            last_stderr,
             next_request_id: std::sync::atomic::AtomicU64::new(1),
+            next_incoming_sequence,
         })
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<IncomingMessage> {
+    pub fn subscribe(&self) -> broadcast::Receiver<CodexTransportMessage> {
         self.incoming_tx.subscribe()
     }
 
@@ -172,6 +392,14 @@ impl CodexTransport {
         params: serde_json::Value,
         timeout: Duration,
     ) -> anyhow::Result<serde_json::Value> {
+        let request_started_at = std::time::Instant::now();
+        crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+            "at": Utc::now().to_rfc3339(),
+            "event": "codex_rpc_request_start",
+            "method": method,
+            "timeout_ms": timeout.as_millis(),
+        }))
+        .await;
         self.ensure_alive().await?;
 
         let id = self
@@ -185,6 +413,16 @@ impl CodexTransport {
 
         if let Err(error) = self.write_payload(&payload).await {
             self.pending.lock().await.remove(&id);
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": Utc::now().to_rfc3339(),
+                "event": "codex_rpc_request_complete",
+                "request_id": id,
+                "method": method,
+                "result": "write_error",
+                "error": error.to_string(),
+                "elapsed_ms": request_started_at.elapsed().as_millis(),
+            }))
+            .await;
             return Err(error);
         }
 
@@ -192,25 +430,80 @@ impl CodexTransport {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
                 self.pending.lock().await.remove(&id);
+                crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                    "at": Utc::now().to_rfc3339(),
+                    "event": "codex_rpc_request_complete",
+                    "request_id": id,
+                    "method": method,
+                    "result": "response_channel_closed",
+                    "elapsed_ms": request_started_at.elapsed().as_millis(),
+                }))
+                .await;
                 anyhow::bail!("codex response channel closed for method `{method}`")
             }
             Err(_) => {
                 self.pending.lock().await.remove(&id);
+                crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                    "at": Utc::now().to_rfc3339(),
+                    "event": "codex_rpc_request_complete",
+                    "request_id": id,
+                    "method": method,
+                    "result": "timeout",
+                    "elapsed_ms": request_started_at.elapsed().as_millis(),
+                }))
+                .await;
                 anyhow::bail!("codex request timeout for method `{method}`")
             }
         };
 
         if let Some(error) = response.error {
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": Utc::now().to_rfc3339(),
+                "event": "codex_rpc_request_complete",
+                "request_id": id,
+                "method": method,
+                "result": "rpc_error",
+                "error": error.message.clone(),
+                "elapsed_ms": request_started_at.elapsed().as_millis(),
+            }))
+            .await;
             anyhow::bail!("{}", error);
         }
 
+        crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+            "at": Utc::now().to_rfc3339(),
+            "event": "codex_rpc_request_complete",
+            "request_id": id,
+            "method": method,
+            "result": "ok",
+            "elapsed_ms": request_started_at.elapsed().as_millis(),
+        }))
+        .await;
         Ok(response.result.unwrap_or(serde_json::Value::Null))
     }
 
     pub async fn notify(&self, method: &str, params: serde_json::Value) -> anyhow::Result<()> {
+        let started_at = std::time::Instant::now();
+        crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+            "at": Utc::now().to_rfc3339(),
+            "event": "codex_rpc_notify_start",
+            "method": method,
+        }))
+        .await;
         self.ensure_alive().await?;
-        self.write_payload(&notification_payload(method, params))
-            .await
+        let result = self
+            .write_payload(&notification_payload(method, params))
+            .await;
+        crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+            "at": Utc::now().to_rfc3339(),
+            "event": "codex_rpc_notify_complete",
+            "method": method,
+            "result": if result.is_ok() { "ok" } else { "error" },
+            "error": result.as_ref().err().map(ToString::to_string),
+            "elapsed_ms": started_at.elapsed().as_millis(),
+        }))
+        .await;
+        result
     }
 
     pub async fn respond_success(
@@ -218,9 +511,27 @@ impl CodexTransport {
         request_id: &serde_json::Value,
         result: serde_json::Value,
     ) -> anyhow::Result<()> {
+        let started_at = std::time::Instant::now();
+        crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+            "at": Utc::now().to_rfc3339(),
+            "event": "codex_rpc_response_start",
+            "response_kind": "success",
+        }))
+        .await;
         self.ensure_alive().await?;
-        self.write_payload(&response_success_payload(request_id, result))
-            .await
+        let result = self
+            .write_payload(&response_success_payload(request_id, result))
+            .await;
+        crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+            "at": Utc::now().to_rfc3339(),
+            "event": "codex_rpc_response_complete",
+            "response_kind": "success",
+            "result": if result.is_ok() { "ok" } else { "error" },
+            "error": result.as_ref().err().map(ToString::to_string),
+            "elapsed_ms": started_at.elapsed().as_millis(),
+        }))
+        .await;
+        result
     }
 
     pub async fn respond_error(
@@ -230,13 +541,55 @@ impl CodexTransport {
         message: &str,
         data: Option<serde_json::Value>,
     ) -> anyhow::Result<()> {
+        let started_at = std::time::Instant::now();
+        crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+            "at": Utc::now().to_rfc3339(),
+            "event": "codex_rpc_response_start",
+            "response_kind": "error",
+            "code": code,
+        }))
+        .await;
         self.ensure_alive().await?;
-        self.write_payload(&response_error_payload(request_id, code, message, data))
-            .await
+        let result = self
+            .write_payload(&response_error_payload(request_id, code, message, data))
+            .await;
+        crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+            "at": Utc::now().to_rfc3339(),
+            "event": "codex_rpc_response_complete",
+            "response_kind": "error",
+            "code": code,
+            "result": if result.is_ok() { "ok" } else { "error" },
+            "error": result.as_ref().err().map(ToString::to_string),
+            "elapsed_ms": started_at.elapsed().as_millis(),
+        }))
+        .await;
+        result
     }
 
     pub async fn is_alive(&self) -> bool {
         self.ensure_alive().await.is_ok()
+    }
+
+    pub async fn diagnostics(&self) -> CodexTransportDiagnostics {
+        let process_status = {
+            let mut child = self.child.lock().await;
+            match child.try_wait() {
+                Ok(Some(status)) => Some(format!("exited: {status}")),
+                Ok(None) => Some("running".to_string()),
+                Err(error) => Some(format!("status_error: {error}")),
+            }
+        };
+
+        CodexTransportDiagnostics {
+            pid: self.child.lock().await.id(),
+            process_status,
+            pending_count: self.pending.lock().await.len(),
+            broadcast_receiver_count: self.incoming_tx.receiver_count(),
+            broadcast_capacity: INCOMING_EVENT_BUFFER_CAPACITY,
+            next_incoming_sequence: self.next_incoming_sequence.load(Ordering::Relaxed),
+            last_event: self.last_event.lock().await.clone(),
+            last_stderr: self.last_stderr.lock().await.clone(),
+        }
     }
 
     pub async fn shutdown(&self) -> anyhow::Result<()> {
@@ -272,6 +625,68 @@ impl CodexTransport {
             anyhow::bail!("codex app-server exited with status {status}");
         }
         Ok(())
+    }
+}
+
+async fn record_last_event(
+    last_event: &Arc<Mutex<Option<CodexTransportEventDiagnostics>>>,
+    event: CodexTransportEventDiagnostics,
+) {
+    *last_event.lock().await = Some(event);
+}
+
+async fn publish_transport_message(
+    incoming_tx: &broadcast::Sender<CodexTransportMessage>,
+    sequence: u64,
+    message: IncomingMessage,
+    source: &str,
+) {
+    let diagnostics = diagnostics_for_message(&message);
+    let receiver_count = incoming_tx.receiver_count();
+    let envelope = CodexTransportMessage {
+        sequence,
+        published_at: std::time::Instant::now(),
+        message,
+    };
+    let send_result = incoming_tx.send(envelope);
+    crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+        "at": Utc::now().to_rfc3339(),
+        "event": "codex_broadcast_publish",
+        "sequence": sequence,
+        "capacity": INCOMING_EVENT_BUFFER_CAPACITY,
+        "source": source,
+        "kind": diagnostics.kind,
+        "method": diagnostics.method,
+        "receiver_count_before": receiver_count,
+        "receivers_notified": send_result.as_ref().ok().copied().unwrap_or(0),
+        "send_result": if send_result.is_ok() { "published" } else { "no_receivers" },
+    }))
+    .await;
+}
+
+fn diagnostics_for_message(message: &IncomingMessage) -> CodexTransportEventDiagnostics {
+    match message {
+        IncomingMessage::Response(response) => CodexTransportEventDiagnostics {
+            sequence: 0,
+            at: Utc::now().to_rfc3339(),
+            kind: "response".to_string(),
+            method: None,
+            id: Some(response.id.clone()),
+        },
+        IncomingMessage::Request { id, method, .. } => CodexTransportEventDiagnostics {
+            sequence: 0,
+            at: Utc::now().to_rfc3339(),
+            kind: "request".to_string(),
+            method: Some(method.clone()),
+            id: Some(id.clone()),
+        },
+        IncomingMessage::Notification { method, .. } => CodexTransportEventDiagnostics {
+            sequence: 0,
+            at: Utc::now().to_rfc3339(),
+            kind: "notification".to_string(),
+            method: Some(method.clone()),
+            id: None,
+        },
     }
 }
 
@@ -386,7 +801,7 @@ mod tests {
     #[test]
     fn incoming_event_buffer_capacity_bounds_idle_retention() {
         assert!(
-            INCOMING_EVENT_BUFFER_CAPACITY <= 64,
+            INCOMING_EVENT_BUFFER_CAPACITY <= 640,
             "Codex incoming events are live fan-out only; raising this can retain large protocol payloads while idle"
         );
     }

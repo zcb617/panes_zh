@@ -4,7 +4,6 @@ interface GitPanelLayoutInput {
   activeView: ActiveView;
   activeWorkspaceId: string | null;
   showGitPanel: boolean;
-  gitPanelPinned: boolean;
 }
 
 export interface GitPanelLayoutState {
@@ -19,11 +18,10 @@ export function getGitPanelLayoutState({
   activeView,
   activeWorkspaceId,
   showGitPanel,
-  gitPanelPinned,
 }: GitPanelLayoutInput): GitPanelLayoutState {
   const settingsActive = activeView === "settings";
   const workspaceLayoutIntegrated = activeView === "chat" && activeWorkspaceId !== null;
-  const gitPanelDocked = showGitPanel && gitPanelPinned && !settingsActive;
+  const gitPanelDocked = showGitPanel && !settingsActive;
   const gitPanelDockedInWorkspace = gitPanelDocked && workspaceLayoutIntegrated;
 
   return {

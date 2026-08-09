@@ -2963,7 +2963,6 @@ export function TerminalPanel({ workspaceId, embedded = false }: TerminalPanelPr
   const focusMode = useUiStore((state) => state.focusMode);
   const showSidebar = useUiStore((state) => state.showSidebar);
   const showGitPanel = useUiStore((state) => state.showGitPanel);
-  const gitPanelPinned = useUiStore((state) => state.gitPanelPinned);
   const isOpen = workspaceState?.isOpen ?? false;
   const layoutMode = workspaceState?.layoutMode ?? "chat";
   const sessions = workspaceState?.sessions ?? [];
@@ -2977,7 +2976,7 @@ export function TerminalPanel({ workspaceId, embedded = false }: TerminalPanelPr
   const isMac = isMacDesktop();
   const useTitlebarSafeInset =
     !embedded && isMac && focusMode && !showSidebar && layoutMode === "terminal";
-  const gitPanelDocked = showGitPanel && gitPanelPinned;
+  const gitPanelDocked = showGitPanel;
   const useFocusModeHeaderHeight = !embedded && focusMode && gitPanelDocked;
   const linuxDesktop = isLinuxDesktop();
   const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);

@@ -42,6 +42,8 @@ const OPENCODE_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const OPENCODE_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const OPENCODE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const OPENCODE_RECONCILE_MESSAGE_LIMIT: usize = 128;
+const OPENCODE_EVENT_BUFFER_CAPACITY: usize = 1024;
+const OPENCODE_EVENT_QUEUE_CAPACITY: usize = OPENCODE_EVENT_BUFFER_CAPACITY;
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
 const SERVER_READY_PREFIX: &str = "opencode server listening";
 const DEFAULT_HOST: &str = "127.0.0.1";
@@ -253,6 +255,47 @@ struct OpenCodeBusEvent {
     event_type: String,
     #[serde(default)]
     properties: Value,
+}
+
+enum OpenCodeIncomingEvent {
+    Message(Arc<OpenCodeBusEvent>),
+    Lagged(u64),
+    Closed,
+}
+
+fn spawn_opencode_incoming_pump(
+    event_bus: broadcast::Sender<Arc<OpenCodeBusEvent>>,
+) -> mpsc::Receiver<OpenCodeIncomingEvent> {
+    let (queue_tx, queue_rx) = mpsc::channel(OPENCODE_EVENT_QUEUE_CAPACITY);
+    let mut subscription = event_bus.subscribe();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = queue_tx.closed() => break,
+                incoming = subscription.recv() => {
+                    let item = match incoming {
+                        Ok(event) => OpenCodeIncomingEvent::Message(event),
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            OpenCodeIncomingEvent::Lagged(skipped)
+                        }
+                        Err(broadcast::error::RecvError::Closed) => OpenCodeIncomingEvent::Closed,
+                    };
+                    let closed = matches!(&item, OpenCodeIncomingEvent::Closed);
+
+                    if queue_tx.send(item).await.is_err() {
+                        break;
+                    }
+
+                    if closed {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    queue_rx
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -706,7 +749,7 @@ impl Engine for OpenCodeEngine {
         // that caused follow-up turns to immediately complete with no content
         // when a fresh `/event` HTTP connection delivered the prior turn's
         // buffered busy/idle events into the new turn's mapper.
-        let mut events = session.server.event_bus.subscribe();
+        let mut incoming_rx = spawn_opencode_incoming_pump(session.server.event_bus.clone());
 
         let prompt = build_prompt_body(
             &session.model_id,
@@ -767,16 +810,16 @@ impl Engine for OpenCodeEngine {
                         }
                     }
                 }
-                incoming = timeout(SSE_IDLE_TIMEOUT, events.recv()) => {
+                incoming = timeout(SSE_IDLE_TIMEOUT, incoming_rx.recv()) => {
                     let event = match incoming.context("timed out waiting for OpenCode events")? {
-                        Ok(event) => event,
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        Some(OpenCodeIncomingEvent::Message(event)) => event,
+                        Some(OpenCodeIncomingEvent::Lagged(skipped)) => {
                             log::warn!(
                                 "opencode event bus lagged by {skipped} events for thread {engine_thread_id}"
                             );
                             continue;
                         }
-                        Err(broadcast::error::RecvError::Closed) => {
+                        None | Some(OpenCodeIncomingEvent::Closed) => {
                             anyhow::bail!("OpenCode event bus closed before the turn completed");
                         }
                     };
@@ -2478,7 +2521,8 @@ async fn start_server(cwd: &str) -> Result<OpenCodeServer> {
         .context("timed out waiting for OpenCode server startup")?
         .context("OpenCode server exited before startup completed")?;
 
-    let (event_bus, _) = broadcast::channel::<Arc<OpenCodeBusEvent>>(1024);
+    let (event_bus, _) =
+        broadcast::channel::<Arc<OpenCodeBusEvent>>(OPENCODE_EVENT_BUFFER_CAPACITY);
     let pump_cancel = CancellationToken::new();
     let server = OpenCodeServer {
         cwd: cwd.to_string(),

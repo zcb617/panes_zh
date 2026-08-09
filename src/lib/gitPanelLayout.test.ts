@@ -8,7 +8,6 @@ describe("getGitPanelLayoutState", () => {
         activeView: "chat",
         activeWorkspaceId: "workspace-1",
         showGitPanel: true,
-        gitPanelPinned: true,
       }),
     ).toEqual({
       workspaceLayoutIntegrated: true,
@@ -25,7 +24,6 @@ describe("getGitPanelLayoutState", () => {
         activeView: "chat",
         activeWorkspaceId: "workspace-1",
         showGitPanel: false,
-        gitPanelPinned: true,
       }),
     ).toMatchObject({
       workspaceLayoutIntegrated: true,
@@ -40,7 +38,6 @@ describe("getGitPanelLayoutState", () => {
         activeView: "chat",
         activeWorkspaceId: null,
         showGitPanel: false,
-        gitPanelPinned: true,
       }),
     ).toMatchObject({
       workspaceLayoutIntegrated: false,
@@ -55,7 +52,6 @@ describe("getGitPanelLayoutState", () => {
         activeView: "settings",
         activeWorkspaceId: "workspace-1",
         showGitPanel: false,
-        gitPanelPinned: true,
       }),
     ).toMatchObject({
       workspaceLayoutIntegrated: false,

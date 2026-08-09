@@ -35,6 +35,7 @@ const CLAUDE_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 const CLAUDE_RUNTIME_INFO_TIMEOUT: Duration = Duration::from_secs(5);
 const ARCHIVED_CLAUDE_SDK_NODE_MODULES: &str = "claude-sdk-node_modules.tar.gz";
 const SIDECAR_EVENT_BUFFER_CAPACITY: usize = 1024;
+const CLAUDE_EVENT_QUEUE_CAPACITY: usize = SIDECAR_EVENT_BUFFER_CAPACITY;
 const MINIMUM_NODE_VERSION: &str = "20.5";
 const NODE_RUNTIME_PROBE_SCRIPT: &str = r#"
 const version = process.versions.node;
@@ -558,6 +559,47 @@ impl ClaudeTransport {
         let _ = child.kill().await;
         let _ = child.wait().await;
     }
+}
+
+enum ClaudeIncomingEvent {
+    Message(SidecarEvent),
+    Lagged(u64),
+    Closed,
+}
+
+fn spawn_claude_incoming_pump(
+    transport: Arc<ClaudeTransport>,
+) -> mpsc::Receiver<ClaudeIncomingEvent> {
+    let (queue_tx, queue_rx) = mpsc::channel(CLAUDE_EVENT_QUEUE_CAPACITY);
+    let mut subscription = transport.subscribe();
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = queue_tx.closed() => break,
+                incoming = subscription.recv() => {
+                    let item = match incoming {
+                        Ok(event) => ClaudeIncomingEvent::Message(event),
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            ClaudeIncomingEvent::Lagged(skipped)
+                        }
+                        Err(broadcast::error::RecvError::Closed) => ClaudeIncomingEvent::Closed,
+                    };
+
+                    let closed = matches!(&item, ClaudeIncomingEvent::Closed);
+                    if queue_tx.send(item).await.is_err() {
+                        break;
+                    }
+
+                    if closed {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    queue_rx
 }
 
 // ── Per-thread config ─────────────────────────────────────────────────
@@ -1817,7 +1859,7 @@ impl Engine for ClaudeSidecarEngine {
             "params": params,
         });
 
-        let mut rx = transport.subscribe();
+        let mut incoming_rx = spawn_claude_incoming_pump(Arc::clone(&transport));
         transport.send_command(&command).await?;
 
         let engine_thread_id_owned = engine_thread_id.to_string();
@@ -1838,9 +1880,9 @@ impl Engine for ClaudeSidecarEngine {
                     }
                     return Ok(());
                 }
-                event = rx.recv() => {
+                event = incoming_rx.recv() => {
                     match event {
-                        Ok(sidecar_event) => {
+                        Some(ClaudeIncomingEvent::Message(sidecar_event)) => {
                             // Filter events by request ID
                             if let Some(eid) = sidecar_event.request_id() {
                                 if eid != request_id {
@@ -2095,7 +2137,7 @@ impl Engine for ClaudeSidecarEngine {
                                 | SidecarEvent::Version { .. } => {}
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                        Some(ClaudeIncomingEvent::Lagged(n)) => {
                             log::warn!("claude sidecar: event receiver lagged by {n} messages");
                             let message = format!(
                                 "Claude sidecar event stream skipped {n} messages under load."
@@ -2129,7 +2171,7 @@ impl Engine for ClaudeSidecarEngine {
                             }
                             break;
                         }
-                        Err(broadcast::error::RecvError::Closed) => {
+                        None | Some(ClaudeIncomingEvent::Closed) => {
                             if !auth_invalidated_transport {
                                 event_tx
                                     .send(EngineEvent::Error {

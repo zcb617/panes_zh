@@ -4,7 +4,10 @@ use std::{
     env,
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -15,6 +18,7 @@ use serde::Deserialize;
 use tokio::time::timeout;
 use tokio::{
     fs as tokio_fs,
+    io::AsyncWriteExt,
     process::Command,
     sync::{broadcast, mpsc, oneshot, Mutex},
 };
@@ -33,7 +37,7 @@ use crate::{process_utils, runtime_env};
 use super::{
     codex_event_mapper::TurnEventMapper,
     codex_protocol::{raw_value_to_value, IncomingMessage},
-    codex_transport::CodexTransport,
+    codex_transport::{CodexTransport, CodexTransportMessage},
     ApprovalRequestRoute, CodexRemoteThreadSummary, Engine, EngineEvent, EngineThread,
     ImportedThreadMessage, ModelAvailabilityNux, ModelInfo, ModelUpgradeInfo,
     ReasoningEffortOption, SandboxPolicy, ThreadScope, ThreadSyncSnapshot, TurnAttachment,
@@ -77,11 +81,116 @@ const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const TRANSPORT_RESTART_MAX_ATTEMPTS: usize = 3;
 const TRANSPORT_RESTART_BASE_BACKOFF: Duration = Duration::from_millis(250);
 const TRANSPORT_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(2);
+const ENGINE_EVENT_SEND_WARN_THRESHOLD: Duration = Duration::from_millis(25);
+const ENGINE_EVENT_QUEUE_REMAINING_WARN_THRESHOLD: usize = 16;
+const CODEX_INCOMING_QUEUE_CAPACITY: usize = 640;
 const CODEX_MISSING_DEFAULT_DETAILS: &str = "`codex` executable not found in PATH";
 const MAX_ATTACHMENTS_PER_TURN: usize = 10;
 const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_TEXT_ATTACHMENT_CHARS: usize = 40_000;
 const PLAN_MODE_PROMPT_PREFIX: &str = "Plan the solution first. Do not execute commands or edit files until the plan is complete. Reply with a structured plan using one line per step in the exact format `- [pending] Step`.";
+
+static NEXT_ENGINE_EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+enum CodexIncomingQueueItem {
+    Message(CodexTransportMessage),
+    Lagged {
+        skipped: u64,
+        last_received_sequence: Option<u64>,
+        receiver_queue_len: usize,
+    },
+}
+
+fn spawn_codex_incoming_pump(
+    transport: Arc<CodexTransport>,
+    consumer: &'static str,
+) -> mpsc::Receiver<CodexIncomingQueueItem> {
+    let (queue_tx, queue_rx) = mpsc::channel(CODEX_INCOMING_QUEUE_CAPACITY);
+    let mut subscription = transport.subscribe();
+
+    tokio::spawn(async move {
+        let mut last_received_sequence: Option<u64> = None;
+
+        loop {
+            tokio::select! {
+                _ = queue_tx.closed() => break,
+                incoming = subscription.recv() => {
+                    match incoming {
+                        Ok(message) => {
+                            log_transport_subscription_receive(&message, consumer).await;
+                            last_received_sequence = Some(message.sequence);
+                            if queue_tx
+                                .send(CodexIncomingQueueItem::Message(message))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            let receiver_queue_len = subscription.len();
+                            append_codex_transport_log(&serde_json::json!({
+                                "at": Utc::now().to_rfc3339(),
+                                "event": "codex_broadcast_subscription_lagged",
+                                "consumer": consumer,
+                                "skipped_messages": skipped,
+                                "last_received_sequence": last_received_sequence,
+                                "receiver_queue_len": receiver_queue_len,
+                                "capacity": 640,
+                                "stage": "fast_pump",
+                            })).await;
+                            if queue_tx
+                                .send(CodexIncomingQueueItem::Lagged {
+                                    skipped,
+                                    last_received_sequence,
+                                    receiver_queue_len,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            append_codex_transport_log(&serde_json::json!({
+                                "at": Utc::now().to_rfc3339(),
+                                "event": "codex_broadcast_subscription_closed",
+                                "consumer": consumer,
+                                "last_received_sequence": last_received_sequence,
+                                "stage": "fast_pump",
+                            })).await;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    queue_rx
+}
+
+async fn log_codex_incoming_queue_receive(
+    message: &CodexTransportMessage,
+    consumer: &str,
+    queue_depth: usize,
+) {
+    let diagnostics = message.diagnostics();
+    let record = serde_json::json!({
+        "at": Utc::now().to_rfc3339(),
+        "event": "codex_incoming_queue_receive",
+        "consumer": consumer,
+        "sequence": diagnostics.sequence,
+        "kind": diagnostics.kind,
+        "method": diagnostics.method,
+        "id": diagnostics.id,
+        "age_ms": message.published_at.elapsed().as_millis(),
+        "queue_capacity": CODEX_INCOMING_QUEUE_CAPACITY,
+        "queue_depth_after": queue_depth,
+    });
+    log::debug!("codex incoming queue receive: {record}");
+    append_codex_transport_log(&record).await;
+}
 
 pub struct CodexEngine {
     state: Arc<Mutex<CodexState>>,
@@ -528,7 +637,7 @@ impl Engine for CodexEngine {
         }
 
         let mut mapper = TurnEventMapper::default();
-        let mut subscription = transport.subscribe();
+        let mut incoming_rx = spawn_codex_incoming_pump(transport.clone(), "turn");
         let thread_id = engine_thread_id.to_string();
 
         let runtime = self.thread_runtime(&thread_id).await;
@@ -580,7 +689,12 @@ impl Engine for CodexEngine {
                 match response {
                   Ok(Ok(snapshot)) => {
                     if let Some(event) = mapper.map_rate_limits_snapshot(&snapshot) {
-                      event_tx.send(event).await.ok();
+                      send_engine_event_with_diagnostics(
+                        &event_tx,
+                        event,
+                        &thread_id,
+                        "rate_limits",
+                      ).await;
                     }
                   }
                   Ok(Err(error)) => {
@@ -633,10 +747,15 @@ impl Engine for CodexEngine {
                     "turn/start result",
                   );
                   self.set_active_turn(&thread_id, &turn_id).await;
-                  event_tx.send(EngineEvent::TurnStarted {
-                    client_turn_id: None,
-                    remote_turn_id: Some(turn_id),
-                  }).await.ok();
+                  send_engine_event_with_diagnostics(
+                    &event_tx,
+                    EngineEvent::TurnStarted {
+                      client_turn_id: None,
+                      remote_turn_id: Some(turn_id),
+                    },
+                    &thread_id,
+                    "turn_started_result",
+                  ).await;
                 }
 
                 for event in mapper.map_turn_result(&result) {
@@ -654,23 +773,41 @@ impl Engine for CodexEngine {
                     completion_seen = true;
                     self.clear_active_turn(&thread_id).await;
                   }
-                  event_tx.send(event).await.ok();
+                  send_engine_event_with_diagnostics(
+                    &event_tx,
+                    event,
+                    &thread_id,
+                    "turn_start_result",
+                  ).await;
                 }
 
                 if !completion_seen {
                   completion_last_progress_at = Some(Instant::now());
                 }
               }
-              incoming = subscription.recv() => {
+              incoming = incoming_rx.recv() => {
                 match incoming {
-                  Ok(IncomingMessage::Notification { method, params }) => {
+                  Some(CodexIncomingQueueItem::Message(message)) => {
+                    log_codex_incoming_queue_receive(&message, "turn", incoming_rx.len()).await;
+                    match message.message {
+                  IncomingMessage::Notification { method, params } => {
                     let params = raw_value_to_value(&params);
                     let normalized_method = normalize_method(&method);
                     if let Some(error_message) =
                       transport_failure_message(normalized_method.as_str(), &params)
                     {
                       self.clear_active_turn(&thread_id).await;
-                      self.invalidate_transport(&error_message).await;
+                      self
+                        .invalidate_transport_with_details(
+                          &error_message,
+                          serde_json::json!({
+                            "thread_id": thread_id,
+                            "turn_id": expected_turn_id.as_deref(),
+                            "notification_method": normalized_method,
+                            "transport_error": error_message,
+                          }),
+                        )
+                        .await;
                       if turn_request_done
                         && self
                           .try_emit_reconciled_turn_completion(
@@ -700,10 +837,15 @@ impl Engine for CodexEngine {
                           "turn/started notification",
                         );
                         self.set_active_turn(&thread_id, &turn_id).await;
-                        event_tx.send(EngineEvent::TurnStarted {
-                          client_turn_id: None,
-                          remote_turn_id: Some(turn_id),
-                        }).await.ok();
+                        send_engine_event_with_diagnostics(
+                          &event_tx,
+                          EngineEvent::TurnStarted {
+                            client_turn_id: None,
+                            remote_turn_id: Some(turn_id),
+                          },
+                          &thread_id,
+                          "turn_started_notification",
+                        ).await;
                       }
                     } else if !belongs_to_turn(&params, expected_turn_id.as_deref()) {
                       continue;
@@ -741,10 +883,15 @@ impl Engine for CodexEngine {
                         completion_seen = true;
                         self.clear_active_turn(&thread_id).await;
                       }
-                      event_tx.send(event).await.ok();
+                      send_engine_event_with_diagnostics(
+                        &event_tx,
+                        event,
+                        &thread_id,
+                        "turn_event",
+                      ).await;
                     }
                   }
-                  Ok(IncomingMessage::Request { id, raw_id, method, params }) => {
+                  IncomingMessage::Request { id, raw_id, method, params } => {
                     let params = raw_value_to_value(&params);
                     log::debug!(
                       "codex server request: method={method}, id={id}, raw_id={raw_id}, params_keys={:?}",
@@ -776,13 +923,15 @@ impl Engine for CodexEngine {
                                 reason.clone(),
                             )
                             .await;
-                        event_tx
-                            .send(EngineEvent::Error {
+                        send_engine_event_with_diagnostics(
+                            &event_tx,
+                            EngineEvent::Error {
                                 message,
                                 recoverable: true,
-                            })
-                            .await
-                            .ok();
+                            },
+                            &thread_id,
+                            "unsupported_external_auth_tokens",
+                        ).await;
                         transport
                         .respond_error(
                           &raw_id,
@@ -815,7 +964,12 @@ impl Engine for CodexEngine {
                           &approval.server_method,
                         )
                         .await;
-                      event_tx.send(approval.event).await.ok();
+                      send_engine_event_with_diagnostics(
+                        &event_tx,
+                        approval.event,
+                        &thread_id,
+                        "approval_request",
+                      ).await;
                     } else {
                       log::warn!(
                         "codex server request not mapped: method={method}, normalized={normalized_method}"
@@ -825,13 +979,15 @@ impl Engine for CodexEngine {
                         true,
                       );
 
-                      event_tx
-                        .send(EngineEvent::Error {
+                      send_engine_event_with_diagnostics(
+                        &event_tx,
+                        EngineEvent::Error {
                           message: message.clone(),
                           recoverable,
-                        })
-                        .await
-                        .ok();
+                        },
+                        &thread_id,
+                        "unsupported_server_request",
+                      ).await;
 
                       transport
                         .respond_error(
@@ -847,15 +1003,39 @@ impl Engine for CodexEngine {
                         .ok();
                     }
                   }
-                  Ok(IncomingMessage::Response(_)) => {
+                  IncomingMessage::Response(_) => {
                     // Responses are routed by request ID in the transport pending map.
                   }
-                  Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                  }
+                  }
+                  Some(CodexIncomingQueueItem::Lagged {
+                    skipped,
+                    last_received_sequence,
+                    receiver_queue_len,
+                  }) => {
+                    append_codex_transport_log(&serde_json::json!({
+                      "at": Utc::now().to_rfc3339(),
+                      "event": "codex_incoming_queue_lagged_consumed",
+                      "consumer": "turn",
+                      "skipped_messages": skipped,
+                      "last_received_sequence": last_received_sequence,
+                      "receiver_queue_len": receiver_queue_len,
+                      "queue_capacity": CODEX_INCOMING_QUEUE_CAPACITY,
+                    })).await;
                     let error_message = format!(
                         "codex transport lagged while waiting for turn events; skipped {skipped} messages"
                     );
                     self.clear_active_turn(&thread_id).await;
-                    self.invalidate_transport(&error_message).await;
+                    self
+                        .invalidate_transport_with_details(
+                          &error_message,
+                          serde_json::json!({
+                            "thread_id": thread_id,
+                            "turn_id": expected_turn_id.as_deref(),
+                            "skipped_messages": skipped,
+                          }),
+                        )
+                        .await;
                     if turn_request_done
                         && self
                             .try_emit_reconciled_turn_completion(
@@ -872,10 +1052,22 @@ impl Engine for CodexEngine {
                     }
                     return Err(anyhow::anyhow!(error_message));
                   }
-                  Err(broadcast::error::RecvError::Closed) => {
+                  None => {
+                    append_codex_transport_log(&serde_json::json!({
+                      "at": Utc::now().to_rfc3339(),
+                      "event": "codex_incoming_queue_closed",
+                      "consumer": "turn",
+                    })).await;
                     self.clear_active_turn(&thread_id).await;
                     self
-                      .invalidate_transport("codex transport subscription closed while waiting for turn events")
+                      .invalidate_transport_with_details(
+                        "codex transport subscription closed while waiting for turn events",
+                        serde_json::json!({
+                          "thread_id": thread_id,
+                          "turn_id": expected_turn_id.as_deref(),
+                          "subscription_error": "closed",
+                        }),
+                      )
                       .await;
                     if turn_request_done
                         && self
@@ -927,21 +1119,27 @@ impl Engine for CodexEngine {
                 )
                 .await
             {
-                event_tx
-                    .send(EngineEvent::Error {
+                send_engine_event_with_diagnostics(
+                    &event_tx,
+                    EngineEvent::Error {
                         message: "Timed out waiting for `turn/completed` from codex app-server"
                             .to_string(),
                         recoverable: false,
-                    })
-                    .await
-                    .ok();
-                event_tx
-                    .send(EngineEvent::TurnCompleted {
+                    },
+                    &thread_id,
+                    "completion_timeout_error",
+                )
+                .await;
+                send_engine_event_with_diagnostics(
+                    &event_tx,
+                    EngineEvent::TurnCompleted {
                         token_usage: None,
                         status: TurnCompletionStatus::Failed,
-                    })
-                    .await
-                    .ok();
+                    },
+                    &thread_id,
+                    "completion_timeout_completed",
+                )
+                .await;
             }
         }
 
@@ -1274,7 +1472,7 @@ impl CodexEngine {
         }
 
         let mut mapper = TurnEventMapper::default();
-        let mut subscription = transport.subscribe();
+        let mut incoming_rx = spawn_codex_incoming_pump(transport.clone(), "review");
         let source_thread_id = source_engine_thread_id.to_string();
         let mut active_thread_id = source_thread_id.clone();
         let requested_delivery = delivery.map(str::to_string);
@@ -1324,7 +1522,12 @@ impl CodexEngine {
                 match response {
                   Ok(Ok(snapshot)) => {
                     if let Some(event) = mapper.map_rate_limits_snapshot(&snapshot) {
-                      event_tx.send(event).await.ok();
+                      send_engine_event_with_diagnostics(
+                        &event_tx,
+                        event,
+                        &active_thread_id,
+                        "review_rate_limits",
+                      ).await;
                     }
                   }
                   Ok(Err(error)) => {
@@ -1387,10 +1590,15 @@ impl CodexEngine {
                     "review/start result",
                   );
                   self.set_active_turn(&active_thread_id, &turn_id).await;
-                  event_tx.send(EngineEvent::TurnStarted {
-                    client_turn_id: None,
-                    remote_turn_id: Some(turn_id),
-                  }).await.ok();
+                  send_engine_event_with_diagnostics(
+                    &event_tx,
+                    EngineEvent::TurnStarted {
+                      client_turn_id: None,
+                      remote_turn_id: Some(turn_id),
+                    },
+                    &active_thread_id,
+                    "review_turn_started_result",
+                  ).await;
                 }
 
                 for event in mapper.map_turn_result(&result) {
@@ -1408,23 +1616,41 @@ impl CodexEngine {
                     completion_seen = true;
                     self.clear_active_turn(&active_thread_id).await;
                   }
-                  event_tx.send(event).await.ok();
+                  send_engine_event_with_diagnostics(
+                    &event_tx,
+                    event,
+                    &active_thread_id,
+                    "review_start_result",
+                  ).await;
                 }
 
                 if !completion_seen {
                   completion_last_progress_at = Some(Instant::now());
                 }
               }
-              incoming = subscription.recv() => {
+              incoming = incoming_rx.recv() => {
                 match incoming {
-                  Ok(IncomingMessage::Notification { method, params }) => {
+                  Some(CodexIncomingQueueItem::Message(message)) => {
+                    log_codex_incoming_queue_receive(&message, "review", incoming_rx.len()).await;
+                    match message.message {
+                  IncomingMessage::Notification { method, params } => {
                     let params = raw_value_to_value(&params);
                     let normalized_method = normalize_method(&method);
                     if let Some(error_message) =
                       transport_failure_message(normalized_method.as_str(), &params)
                     {
                       self.clear_active_turn(&active_thread_id).await;
-                      self.invalidate_transport(&error_message).await;
+                      self
+                        .invalidate_transport_with_details(
+                          &error_message,
+                          serde_json::json!({
+                            "thread_id": active_thread_id,
+                            "turn_id": expected_turn_id.as_deref(),
+                            "notification_method": normalized_method,
+                            "transport_error": error_message,
+                          }),
+                        )
+                        .await;
                       if turn_request_done
                         && self
                           .try_emit_reconciled_turn_completion(
@@ -1455,10 +1681,15 @@ impl CodexEngine {
                           "turn/started review notification",
                         );
                         self.set_active_turn(&active_thread_id, &turn_id).await;
-                        event_tx.send(EngineEvent::TurnStarted {
-                          client_turn_id: None,
-                          remote_turn_id: Some(turn_id),
-                        }).await.ok();
+                        send_engine_event_with_diagnostics(
+                          &event_tx,
+                          EngineEvent::TurnStarted {
+                            client_turn_id: None,
+                            remote_turn_id: Some(turn_id),
+                          },
+                          &active_thread_id,
+                          "review_turn_started_notification",
+                        ).await;
                       }
                     } else if !belongs_to_turn(&params, expected_turn_id.as_deref()) {
                       continue;
@@ -1496,10 +1727,15 @@ impl CodexEngine {
                         completion_seen = true;
                         self.clear_active_turn(&active_thread_id).await;
                       }
-                      event_tx.send(event).await.ok();
+                      send_engine_event_with_diagnostics(
+                        &event_tx,
+                        event,
+                        &active_thread_id,
+                        "review_event",
+                      ).await;
                     }
                   }
-                  Ok(IncomingMessage::Request { id, raw_id, method, params }) => {
+                  IncomingMessage::Request { id, raw_id, method, params } => {
                     let params = raw_value_to_value(&params);
                     log::debug!(
                       "codex review server request: method={method}, id={id}, raw_id={raw_id}, params_keys={:?}",
@@ -1531,13 +1767,15 @@ impl CodexEngine {
                                 reason.clone(),
                             )
                             .await;
-                        event_tx
-                            .send(EngineEvent::Error {
+                        send_engine_event_with_diagnostics(
+                            &event_tx,
+                            EngineEvent::Error {
                                 message,
                                 recoverable: true,
-                            })
-                            .await
-                            .ok();
+                            },
+                            &active_thread_id,
+                            "review_unsupported_external_auth_tokens",
+                        ).await;
                         transport
                         .respond_error(
                           &raw_id,
@@ -1570,7 +1808,12 @@ impl CodexEngine {
                           &approval.server_method,
                         )
                         .await;
-                      event_tx.send(approval.event).await.ok();
+                      send_engine_event_with_diagnostics(
+                        &event_tx,
+                        approval.event,
+                        &active_thread_id,
+                        "review_approval_request",
+                      ).await;
                     } else {
                       log::warn!(
                         "codex review server request not mapped: method={method}, normalized={normalized_method}"
@@ -1580,13 +1823,15 @@ impl CodexEngine {
                         true,
                       );
 
-                      event_tx
-                        .send(EngineEvent::Error {
+                      send_engine_event_with_diagnostics(
+                        &event_tx,
+                        EngineEvent::Error {
                           message: message.clone(),
                           recoverable,
-                        })
-                        .await
-                        .ok();
+                        },
+                        &active_thread_id,
+                        "review_unsupported_server_request",
+                      ).await;
 
                       transport
                         .respond_error(
@@ -1602,13 +1847,37 @@ impl CodexEngine {
                         .ok();
                     }
                   }
-                  Ok(IncomingMessage::Response(_)) => {}
-                  Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                  IncomingMessage::Response(_) => {}
+                  }
+                  }
+                  Some(CodexIncomingQueueItem::Lagged {
+                    skipped,
+                    last_received_sequence,
+                    receiver_queue_len,
+                  }) => {
+                    append_codex_transport_log(&serde_json::json!({
+                      "at": Utc::now().to_rfc3339(),
+                      "event": "codex_incoming_queue_lagged_consumed",
+                      "consumer": "review",
+                      "skipped_messages": skipped,
+                      "last_received_sequence": last_received_sequence,
+                      "receiver_queue_len": receiver_queue_len,
+                      "queue_capacity": CODEX_INCOMING_QUEUE_CAPACITY,
+                    })).await;
                     let error_message = format!(
                         "codex transport lagged while waiting for review events; skipped {skipped} messages"
                     );
                     self.clear_active_turn(&active_thread_id).await;
-                    self.invalidate_transport(&error_message).await;
+                    self
+                        .invalidate_transport_with_details(
+                          &error_message,
+                          serde_json::json!({
+                            "thread_id": active_thread_id,
+                            "turn_id": expected_turn_id.as_deref(),
+                            "skipped_messages": skipped,
+                          }),
+                        )
+                        .await;
                     if turn_request_done
                         && self
                             .try_emit_reconciled_turn_completion(
@@ -1626,10 +1895,22 @@ impl CodexEngine {
                     drop(started_tx.take());
                     return Err(anyhow::anyhow!(error_message));
                   }
-                  Err(broadcast::error::RecvError::Closed) => {
+                  None => {
+                    append_codex_transport_log(&serde_json::json!({
+                      "at": Utc::now().to_rfc3339(),
+                      "event": "codex_incoming_queue_closed",
+                      "consumer": "review",
+                    })).await;
                     self.clear_active_turn(&active_thread_id).await;
                     self
-                      .invalidate_transport("codex transport subscription closed while waiting for review events")
+                      .invalidate_transport_with_details(
+                        "codex transport subscription closed while waiting for review events",
+                        serde_json::json!({
+                          "thread_id": active_thread_id,
+                          "turn_id": expected_turn_id.as_deref(),
+                          "subscription_error": "closed",
+                        }),
+                      )
                       .await;
                     if turn_request_done
                         && self
@@ -1682,21 +1963,27 @@ impl CodexEngine {
                 )
                 .await
             {
-                event_tx
-                    .send(EngineEvent::Error {
+                send_engine_event_with_diagnostics(
+                    &event_tx,
+                    EngineEvent::Error {
                         message: "Timed out waiting for `turn/completed` from codex review"
                             .to_string(),
                         recoverable: false,
-                    })
-                    .await
-                    .ok();
-                event_tx
-                    .send(EngineEvent::TurnCompleted {
+                    },
+                    &active_thread_id,
+                    "review_completion_timeout_error",
+                )
+                .await;
+                send_engine_event_with_diagnostics(
+                    &event_tx,
+                    EngineEvent::TurnCompleted {
                         token_usage: None,
                         status: TurnCompletionStatus::Failed,
-                    })
-                    .await
-                    .ok();
+                    },
+                    &active_thread_id,
+                    "review_completion_timeout_completed",
+                )
+                .await;
             }
         }
 
@@ -2046,7 +2333,13 @@ impl CodexEngine {
                     reconciled.status
                 );
                 for event in build_reconciled_turn_completion_events(reconciled, mode) {
-                    event_tx.send(event).await.ok();
+                    send_engine_event_with_diagnostics(
+                        &event_tx,
+                        event,
+                        engine_thread_id,
+                        "reconciled_turn_completion",
+                    )
+                    .await;
                 }
                 self.clear_active_turn(engine_thread_id).await;
                 true
@@ -2210,7 +2503,18 @@ impl CodexEngine {
 
         for attempt in 0..TRANSPORT_RESTART_MAX_ATTEMPTS {
             match CodexTransport::spawn(codex_executable.to_string_lossy().as_ref()).await {
-                Ok(transport) => return Ok(Arc::new(transport)),
+                Ok(transport) => {
+                    let transport = Arc::new(transport);
+                    let diagnostics = transport.diagnostics().await;
+                    let record = serde_json::json!({
+                        "at": Utc::now().to_rfc3339(),
+                        "event": "codex_transport_spawned",
+                        "panes_pid": std::process::id(),
+                        "transport": diagnostics,
+                    });
+                    append_codex_transport_log(&record).await;
+                    return Ok(transport);
+                }
                 Err(error) => {
                     log::warn!(
                         "failed to spawn codex transport (attempt {}/{}): {error}",
@@ -2232,9 +2536,24 @@ impl CodexEngine {
     }
 
     async fn invalidate_transport(&self, reason: &str) {
-        let transport = {
+        self.invalidate_transport_with_details(reason, serde_json::json!({}))
+            .await;
+    }
+
+    async fn invalidate_transport_with_details(&self, reason: &str, details: serde_json::Value) {
+        let (transport, active_turns) = {
             let mut state = self.state.lock().await;
             let transport = state.transport.take();
+            let active_turns = state
+                .active_turn_ids
+                .iter()
+                .map(|(thread_id, turn_id)| {
+                    serde_json::json!({
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                    })
+                })
+                .collect::<Vec<_>>();
             state.initialized = false;
             state.approval_requests.clear();
             state.active_turn_ids.clear();
@@ -2245,13 +2564,42 @@ impl CodexEngine {
                 diagnostics.stale = true;
             }
             state.runtime_monitor_transport_tag = None;
-            transport
+            (transport, active_turns)
         };
 
-        if let Some(transport) = transport {
-            log::warn!("resetting codex transport: {reason}");
-            transport.shutdown().await.ok();
-        }
+        let diagnostics_before = match transport.as_ref() {
+            Some(transport) => Some(transport.diagnostics().await),
+            None => None,
+        };
+        let shutdown_error = match transport.as_ref() {
+            Some(transport) => transport
+                .shutdown()
+                .await
+                .err()
+                .map(|error| error.to_string()),
+            None => None,
+        };
+        let diagnostics_after = match transport.as_ref() {
+            Some(transport) => Some(transport.diagnostics().await),
+            None => None,
+        };
+
+        let record = serde_json::json!({
+            "at": Utc::now().to_rfc3339(),
+            "event": "codex_transport_reset",
+            "reason": reason,
+            "reason_category": codex_transport_reset_category(reason),
+            "details": details,
+            "panes_pid": std::process::id(),
+            "active_turns": active_turns,
+            "transport_present": transport.is_some(),
+            "before_shutdown": diagnostics_before,
+            "shutdown_error": shutdown_error,
+            "after_shutdown": diagnostics_after,
+        });
+
+        log::warn!("codex transport lifecycle: {record}");
+        append_codex_transport_log(&record).await;
     }
 
     async fn ensure_initialized(&self, transport: &CodexTransport) -> anyhow::Result<()> {
@@ -2429,6 +2777,7 @@ impl CodexEngine {
         let state = self.state.clone();
         let runtime_events = self.runtime_events.clone();
         tokio::spawn(async move {
+            let mut incoming_rx = spawn_codex_incoming_pump(transport.clone(), "runtime_monitor");
             if let Ok(diagnostics) =
                 refresh_protocol_diagnostics_for_runtime_monitor(transport.as_ref(), state.clone())
                     .await
@@ -2439,13 +2788,20 @@ impl CodexEngine {
                 });
             }
 
-            let mut subscription = transport.subscribe();
             loop {
-                match subscription.recv().await {
-                    Ok(IncomingMessage::Notification { method, params }) => {
-                        let params = raw_value_to_value(&params);
-                        let normalized_method = normalize_method(&method);
-                        match normalized_method.as_str() {
+                match incoming_rx.recv().await {
+                    Some(CodexIncomingQueueItem::Message(message)) => {
+                        log_codex_incoming_queue_receive(
+                            &message,
+                            "runtime_monitor",
+                            incoming_rx.len(),
+                        )
+                        .await;
+                        match message.message {
+                            IncomingMessage::Notification { method, params } => {
+                                let params = raw_value_to_value(&params);
+                                let normalized_method = normalize_method(&method);
+                                match normalized_method.as_str() {
                             "transport/eof" | "transport/readerror" | "transport/read_error" => {
                                 log::debug!(
                                     "codex runtime monitor exiting after transport event: {method}"
@@ -2756,14 +3112,38 @@ impl CodexEngine {
                             }
                             _ => {}
                         }
+                            }
+                            IncomingMessage::Request { .. } | IncomingMessage::Response(_) => {}
+                        }
                     }
-                    Ok(IncomingMessage::Request { .. }) | Ok(IncomingMessage::Response(_)) => {}
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    Some(CodexIncomingQueueItem::Lagged {
+                        skipped,
+                        last_received_sequence,
+                        receiver_queue_len,
+                    }) => {
+                        append_codex_transport_log(&serde_json::json!({
+                            "at": Utc::now().to_rfc3339(),
+                            "event": "codex_incoming_queue_lagged_consumed",
+                            "consumer": "runtime_monitor",
+                            "skipped_messages": skipped,
+                            "last_received_sequence": last_received_sequence,
+                            "receiver_queue_len": receiver_queue_len,
+                            "queue_capacity": CODEX_INCOMING_QUEUE_CAPACITY,
+                        }))
+                        .await;
                         log::warn!(
                             "codex runtime monitor lagged on notifications, skipped {skipped} messages"
                         );
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    None => {
+                        append_codex_transport_log(&serde_json::json!({
+                            "at": Utc::now().to_rfc3339(),
+                            "event": "codex_incoming_queue_closed",
+                            "consumer": "runtime_monitor",
+                        }))
+                        .await;
+                        break;
+                    }
                 }
             }
         });
@@ -6474,6 +6854,178 @@ fn belongs_to_thread(params: &serde_json::Value, thread_id: &str) -> bool {
     true
 }
 
+fn codex_transport_reset_category(reason: &str) -> &'static str {
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("lagged") {
+        "event_queue_lagged"
+    } else if reason.contains("subscription closed") {
+        "subscription_closed"
+    } else if reason.contains("closed the connection") {
+        "transport_eof"
+    } else if reason.contains("connection failed") {
+        "transport_read_error"
+    } else if reason.contains("unreadable protocol") {
+        "transport_parse_error"
+    } else if reason.contains("auth failure") {
+        "authentication_failure"
+    } else if reason.contains("not alive") {
+        "process_not_alive"
+    } else if reason.contains("initialize failed") {
+        "initialize_failure"
+    } else {
+        "other"
+    }
+}
+
+async fn send_engine_event_with_diagnostics(
+    event_tx: &mpsc::Sender<EngineEvent>,
+    event: EngineEvent,
+    thread_id: &str,
+    source: &str,
+) {
+    let event_sequence = NEXT_ENGINE_EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let event_kind = engine_event_kind(&event);
+    let max_capacity = event_tx.max_capacity();
+    let available_before = event_tx.capacity();
+    let queued_before = max_capacity.saturating_sub(available_before);
+    append_codex_transport_log(&serde_json::json!({
+        "at": Utc::now().to_rfc3339(),
+        "event": "codex_engine_event_send_start",
+        "event_sequence": event_sequence,
+        "thread_id": thread_id,
+        "source": source,
+        "event_kind": event_kind,
+        "queue_capacity": max_capacity,
+        "queue_depth": queued_before,
+        "available": available_before,
+    }))
+    .await;
+    let started_at = Instant::now();
+    let result = event_tx.send(event).await;
+    let wait_ms = started_at.elapsed().as_millis();
+    let available_after = event_tx.capacity();
+    let queued_after = max_capacity.saturating_sub(available_after);
+
+    let record = serde_json::json!({
+        "at": Utc::now().to_rfc3339(),
+        "event": "codex_engine_event_send_complete",
+        "event_sequence": event_sequence,
+        "thread_id": thread_id,
+        "source": source,
+        "event_kind": event_kind,
+        "queue_capacity": max_capacity,
+        "queue_depth_before": queued_before,
+        "queue_depth_after": queued_after,
+        "available_before": available_before,
+        "available_after": available_after,
+        "wait_ms": wait_ms,
+        "send_result": if result.is_ok() { "sent" } else { "receiver_closed" },
+        "warn_threshold_ms": ENGINE_EVENT_SEND_WARN_THRESHOLD.as_millis(),
+        "warn_remaining_capacity": ENGINE_EVENT_QUEUE_REMAINING_WARN_THRESHOLD,
+    });
+    if wait_ms >= ENGINE_EVENT_SEND_WARN_THRESHOLD.as_millis()
+        || available_before <= ENGINE_EVENT_QUEUE_REMAINING_WARN_THRESHOLD
+        || result.is_err()
+    {
+        log::warn!("codex EngineEvent queue: {record}");
+    } else {
+        log::debug!("codex EngineEvent queue: {record}");
+    }
+    append_codex_transport_log(&record).await;
+}
+
+async fn log_transport_subscription_receive(message: &CodexTransportMessage, consumer: &str) {
+    let diagnostics = message.diagnostics();
+    let record = serde_json::json!({
+        "at": Utc::now().to_rfc3339(),
+        "event": "codex_broadcast_subscription_recv",
+        "consumer": consumer,
+        "sequence": diagnostics.sequence,
+        "kind": diagnostics.kind,
+        "method": diagnostics.method,
+        "id": diagnostics.id,
+        "age_ms": message.published_at.elapsed().as_millis(),
+        "capacity": 64,
+    });
+    log::debug!("codex broadcast subscription receive: {record}");
+    append_codex_transport_log(&record).await;
+}
+
+pub(crate) fn engine_event_kind(event: &EngineEvent) -> &'static str {
+    match event {
+        EngineEvent::TurnStarted { .. } => "turn_started",
+        EngineEvent::TurnCompleted { .. } => "turn_completed",
+        EngineEvent::TextDelta { .. } => "text_delta",
+        EngineEvent::ThinkingDelta { .. } => "thinking_delta",
+        EngineEvent::ActionStarted { .. } => "action_started",
+        EngineEvent::ActionOutputDelta { .. } => "action_output_delta",
+        EngineEvent::ActionProgressUpdated { .. } => "action_progress_updated",
+        EngineEvent::ActionCompleted { .. } => "action_completed",
+        EngineEvent::DiffUpdated { .. } => "diff_updated",
+        EngineEvent::ApprovalRequested { .. } => "approval_requested",
+        EngineEvent::UsageLimitsUpdated { .. } => "usage_limits_updated",
+        EngineEvent::ModelRerouted { .. } => "model_rerouted",
+        EngineEvent::Notice { .. } => "notice",
+        EngineEvent::Error { .. } => "error",
+    }
+}
+
+static CODEX_TRANSPORT_LOG_WRITER: OnceLock<mpsc::UnboundedSender<Vec<u8>>> = OnceLock::new();
+
+pub(crate) async fn append_codex_transport_log(record: &serde_json::Value) {
+    let mut line = match serde_json::to_vec(record) {
+        Ok(line) => line,
+        Err(error) => {
+            log::warn!("failed to serialize Codex transport log: {error}");
+            return;
+        }
+    };
+    line.push(b'\n');
+
+    let sender = CODEX_TRANSPORT_LOG_WRITER.get_or_init(|| {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move {
+            let log_dir = crate::runtime_env::app_data_dir().join("logs");
+            if let Err(error) = tokio_fs::create_dir_all(&log_dir).await {
+                log::warn!(
+                    "failed to create Codex transport log directory {}: {error}",
+                    log_dir.display()
+                );
+                return;
+            }
+
+            let path = log_dir.join("codex-transport.jsonl");
+            let mut file = match tokio_fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .await
+            {
+                Ok(file) => file,
+                Err(error) => {
+                    log::warn!(
+                        "failed to open Codex transport log {}: {error}",
+                        path.display()
+                    );
+                    return;
+                }
+            };
+
+            while let Some(line) = receiver.recv().await {
+                if let Err(error) = file.write_all(&line).await {
+                    log::warn!(
+                        "failed to write Codex transport log {}: {error}",
+                        path.display()
+                    );
+                    break;
+                }
+            }
+        });
+        sender
+    });
+    let _ = sender.send(line);
+}
+
 fn transport_failure_message(
     normalized_method: &str,
     params: &serde_json::Value,
@@ -7263,6 +7815,28 @@ mod tests {
             )
             .as_deref(),
             Some("codex app-server sent an unreadable protocol message: expected value at line 1 column 1")
+        );
+    }
+
+    #[test]
+    fn codex_transport_reset_category_preserves_the_trigger_source() {
+        assert_eq!(
+            codex_transport_reset_category(
+                "codex transport lagged while waiting for turn events; skipped 7 messages"
+            ),
+            "event_queue_lagged"
+        );
+        assert_eq!(
+            codex_transport_reset_category("codex app-server closed the connection unexpectedly"),
+            "transport_eof"
+        );
+        assert_eq!(
+            codex_transport_reset_category("codex app-server connection failed: broken pipe"),
+            "transport_read_error"
+        );
+        assert_eq!(
+            codex_transport_reset_category("codex initialize failed (attempt 1/3)"),
+            "initialize_failure"
         );
     }
 

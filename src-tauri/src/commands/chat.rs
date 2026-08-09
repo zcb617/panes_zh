@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -36,7 +37,7 @@ const STREAM_EVENT_COALESCE_MAX_CHARS: usize = 8_192;
 const STREAM_EVENT_COALESCE_IDLE_FLUSH_INTERVAL: Duration = Duration::from_millis(24);
 const STREAM_DB_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const STREAM_DB_BLOCKS_FLUSH_INTERVAL: Duration = Duration::from_millis(900);
-const ENGINE_EVENT_QUEUE_CAPACITY: usize = 128;
+const ENGINE_EVENT_QUEUE_CAPACITY: usize = 1_280;
 const ACTION_OUTPUT_MAX_CHUNKS: usize = 240;
 const ENGINE_EVENT_LOG_ACTION_OUTPUT_MAX_CHARS: usize = 4_096;
 const TRUNCATED_SUFFIX: &str = "\n... [truncated]";
@@ -55,6 +56,46 @@ const IMAGE_ATTACHMENT_EXTENSIONS: &[&str] = &[
 const MESSAGE_WINDOW_DEFAULT_LIMIT: usize = 120;
 const MESSAGE_WINDOW_MAX_LIMIT: usize = 400;
 const MAX_CHAT_NOTIFICATION_PREVIEW_CHARS: usize = 240;
+
+static NEXT_ENGINE_EVENT_CONSUME_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static NEXT_STREAM_PROCESS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static NEXT_STREAM_FLUSH_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+async fn receive_engine_event_with_diagnostics(
+    event_rx: &mut mpsc::Receiver<EngineEvent>,
+    consumer: &str,
+) -> Option<EngineEvent> {
+    let receive_sequence = NEXT_ENGINE_EVENT_CONSUME_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let queue_depth_before = event_rx.len();
+    let started_at = Instant::now();
+    crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "event": "engine_event_consume_start",
+        "receive_sequence": receive_sequence,
+        "consumer": consumer,
+        "queue_depth": queue_depth_before,
+    }))
+    .await;
+    let result = event_rx.recv().await;
+    let wait_ms = started_at.elapsed().as_millis();
+    let queue_depth_after = event_rx.len();
+    let event_kind = result
+        .as_ref()
+        .map(crate::engines::codex::engine_event_kind);
+    crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "event": "engine_event_consume_complete",
+        "receive_sequence": receive_sequence,
+        "consumer": consumer,
+        "event_kind": event_kind,
+        "queue_depth_before": queue_depth_before,
+        "queue_depth_after": queue_depth_after,
+        "wait_ms": wait_ms,
+        "result": if result.is_some() { "event" } else { "closed" },
+    }))
+    .await;
+    result
+}
 
 fn value_to_raw(value: &Value) -> Box<RawValue> {
     serde_json::value::to_raw_value(value).unwrap_or_else(|_| empty_raw_value())
@@ -1845,8 +1886,11 @@ async fn run_turn(
 
     loop {
         let incoming_event = if pending_event.is_some() {
-            match tokio::time::timeout(STREAM_EVENT_COALESCE_IDLE_FLUSH_INTERVAL, event_rx.recv())
-                .await
+            match tokio::time::timeout(
+                STREAM_EVENT_COALESCE_IDLE_FLUSH_INTERVAL,
+                receive_engine_event_with_diagnostics(&mut event_rx, "chat_coalesce"),
+            )
+            .await
             {
                 Ok(event) => event,
                 Err(_) => {
@@ -1899,10 +1943,17 @@ async fn run_turn(
                 }
             }
         } else {
-            event_rx.recv().await
+            receive_engine_event_with_diagnostics(&mut event_rx, "chat_direct").await
         };
 
         let Some(incoming_event) = incoming_event else {
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "event": "engine_event_channel_closed",
+                "consumer": "chat",
+                "thread_id": thread.id.clone(),
+            }))
+            .await;
             break;
         };
 
@@ -2109,8 +2160,26 @@ async fn run_turn(
     }
 
     match engine_task.await {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => {
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "event": "engine_task_complete",
+                "consumer": "chat",
+                "thread_id": thread.id.clone(),
+                "result": "ok",
+            }))
+            .await;
+        }
         Ok(Err(error)) => {
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "event": "engine_task_complete",
+                "consumer": "chat",
+                "thread_id": thread.id.clone(),
+                "result": "error",
+                "error": error.to_string(),
+            }))
+            .await;
             blocks.push(ContentBlock::Error {
                 message: format!("Engine error: {error:#}"),
             });
@@ -2132,6 +2201,15 @@ async fn run_turn(
             );
         }
         Err(error) => {
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "event": "engine_task_complete",
+                "consumer": "chat",
+                "thread_id": thread.id.clone(),
+                "result": "join_error",
+                "error": error.to_string(),
+            }))
+            .await;
             blocks.push(ContentBlock::Error {
                 message: format!("Engine task join error: {error}"),
             });
@@ -2397,8 +2475,11 @@ async fn run_codex_review_turn(
 
     loop {
         let incoming_event = if pending_event.is_some() {
-            match tokio::time::timeout(STREAM_EVENT_COALESCE_IDLE_FLUSH_INTERVAL, event_rx.recv())
-                .await
+            match tokio::time::timeout(
+                STREAM_EVENT_COALESCE_IDLE_FLUSH_INTERVAL,
+                receive_engine_event_with_diagnostics(&mut event_rx, "review_coalesce"),
+            )
+            .await
             {
                 Ok(event) => event,
                 Err(_) => {
@@ -2451,10 +2532,17 @@ async fn run_codex_review_turn(
                 }
             }
         } else {
-            event_rx.recv().await
+            receive_engine_event_with_diagnostics(&mut event_rx, "review_direct").await
         };
 
         let Some(incoming_event) = incoming_event else {
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "event": "engine_event_channel_closed",
+                "consumer": "review",
+                "thread_id": review_thread.id.clone(),
+            }))
+            .await;
             break;
         };
 
@@ -2661,8 +2749,26 @@ async fn run_codex_review_turn(
     }
 
     match engine_task.await {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => {
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "event": "engine_task_complete",
+                "consumer": "review",
+                "thread_id": review_thread.id.clone(),
+                "result": "ok",
+            }))
+            .await;
+        }
         Ok(Err(error)) => {
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "event": "engine_task_complete",
+                "consumer": "review",
+                "thread_id": review_thread.id.clone(),
+                "result": "error",
+                "error": error.to_string(),
+            }))
+            .await;
             blocks.push(ContentBlock::Error {
                 message: format!("Engine error: {error}"),
             });
@@ -2684,6 +2790,15 @@ async fn run_codex_review_turn(
             );
         }
         Err(error) => {
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "event": "engine_task_complete",
+                "consumer": "review",
+                "thread_id": review_thread.id.clone(),
+                "result": "join_error",
+                "error": error.to_string(),
+            }))
+            .await;
             blocks.push(ContentBlock::Error {
                 message: format!("Engine task join error: {error}"),
             });
@@ -2894,6 +3009,18 @@ async fn process_stream_event(
     approval_index: &mut HashMap<String, usize>,
     max_output_chars: usize,
 ) -> EventProgress {
+    let process_sequence = NEXT_STREAM_PROCESS_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let processing_started_at = Instant::now();
+    crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "event": "engine_event_processing_start",
+        "process_sequence": process_sequence,
+        "engine_id": thread.engine_id.clone(),
+        "thread_id": thread.id.clone(),
+        "message_id": assistant_message_id,
+        "event_kind": crate::engines::codex::engine_event_kind(event),
+    }))
+    .await;
     let mut normalized_event = event.clone();
     match &mut normalized_event {
         EngineEvent::ActionOutputDelta { content, .. } => {
@@ -3041,13 +3168,39 @@ async fn process_stream_event(
         _ => {}
     }
 
-    apply_event_to_blocks(
+    let progress = apply_event_to_blocks(
         blocks,
         action_index,
         approval_index,
         &normalized_event,
         max_output_chars,
-    )
+    );
+    let processing_ms = processing_started_at.elapsed().as_millis();
+    let record = serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "event": "engine_event_processing_complete",
+        "process_sequence": process_sequence,
+        "engine_id": thread.engine_id.clone(),
+        "thread_id": thread.id.clone(),
+        "message_id": assistant_message_id.to_string(),
+        "event_kind": crate::engines::codex::engine_event_kind(&normalized_event),
+        "processing_ms": processing_ms,
+        "persist_engine_event_logs": state.config.debug.persist_engine_event_logs,
+        "blocks_changed": progress.blocks_changed,
+        "force_persist": progress.force_persist,
+        "message_status_changed": progress.message_status.is_some(),
+        "thread_status_changed": progress.thread_status.is_some(),
+        "token_usage_changed": progress.token_usage.is_some(),
+        "turn_model_changed": progress.turn_model_id.is_some(),
+    });
+    if processing_ms >= 25 {
+        log::warn!("engine event processing: {record}");
+    } else {
+        log::debug!("engine event processing: {record}");
+    }
+    crate::engines::codex::append_codex_transport_log(&record).await;
+
+    progress
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3112,7 +3265,33 @@ async fn flush_stream_state(
     last_blocks_persist_at: &mut Instant,
     force: bool,
 ) {
+    let flush_sequence = NEXT_STREAM_FLUSH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let flush_started_at = Instant::now();
+    crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "event": "engine_stream_state_flush_start",
+        "flush_sequence": flush_sequence,
+        "engine_id": thread.engine_id.clone(),
+        "thread_id": thread.id.clone(),
+        "message_id": assistant_message_id,
+        "force": force,
+        "blocks_dirty": *blocks_dirty,
+        "message_state_dirty": *message_state_dirty,
+        "thread_status_dirty": *thread_status_dirty,
+        "turn_model_dirty": *turn_model_dirty,
+    }))
+    .await;
     if !*blocks_dirty && !*message_state_dirty && !*thread_status_dirty && !*turn_model_dirty {
+        crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+            "at": chrono::Utc::now().to_rfc3339(),
+            "event": "engine_stream_state_flush_complete",
+            "flush_sequence": flush_sequence,
+            "thread_id": thread.id.clone(),
+            "message_id": assistant_message_id,
+            "result": "no_dirty_state",
+            "flush_ms": flush_started_at.elapsed().as_millis(),
+        }))
+        .await;
         return;
     }
 
@@ -3128,6 +3307,18 @@ async fn flush_stream_state(
         force || now.duration_since(*last_blocks_persist_at) >= STREAM_DB_BLOCKS_FLUSH_INTERVAL;
 
     if !should_flush_blocks && !should_flush_state {
+        crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+            "at": chrono::Utc::now().to_rfc3339(),
+            "event": "engine_stream_state_flush_complete",
+            "flush_sequence": flush_sequence,
+            "thread_id": thread.id.clone(),
+            "message_id": assistant_message_id,
+            "result": "deferred_by_interval",
+            "flush_ms": flush_started_at.elapsed().as_millis(),
+            "should_flush_state": should_flush_state,
+            "should_flush_blocks": should_flush_blocks,
+        }))
+        .await;
         return;
     }
 
@@ -3227,6 +3418,32 @@ async fn flush_stream_state(
     if did_flush_state {
         *last_persist_at = now;
     }
+
+    let flush_ms = flush_started_at.elapsed().as_millis();
+    let record = serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "event": "engine_stream_state_flush_complete",
+        "flush_sequence": flush_sequence,
+        "engine_id": thread.engine_id.clone(),
+        "thread_id": thread.id.clone(),
+        "message_id": assistant_message_id.to_string(),
+        "flush_ms": flush_ms,
+        "did_flush_state": did_flush_state,
+        "did_flush_blocks": did_flush_blocks,
+        "force": force,
+        "should_flush_state": should_flush_state,
+        "should_flush_blocks": should_flush_blocks,
+        "blocks_dirty_after": *blocks_dirty,
+        "message_state_dirty_after": *message_state_dirty,
+        "thread_status_dirty_after": *thread_status_dirty,
+        "turn_model_dirty_after": *turn_model_dirty,
+    });
+    if flush_ms >= 25 {
+        log::warn!("engine stream state flush: {record}");
+    } else {
+        log::debug!("engine stream state flush: {record}");
+    }
+    crate::engines::codex::append_codex_transport_log(&record).await;
 }
 
 async fn maybe_update_thread_title(
