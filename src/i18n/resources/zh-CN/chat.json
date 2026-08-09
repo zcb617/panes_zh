@@ -496,6 +496,27 @@
     "emptyHintCommands": "命令",
     "emptyHintSlash": "斜杠操作"
   },
+  "fileContextMenu": {
+    "openFile": "打开文件",
+    "openInTarget": "在 {{target}} 中打开",
+    "openWith": "打开方式",
+    "loadingTargets": "正在加载打开方式…",
+    "systemDefaultApp": "系统默认应用",
+    "saveAs": "另存为…",
+    "copyPath": "复制路径",
+    "copyFileContents": "复制文件内容",
+    "revealInFileExplorer": "在资源管理器中打开",
+    "saveDialogTitle": "另存为",
+    "toasts": {
+      "openFailed": "打开文件失败。",
+      "saveFailed": "另存为失败。",
+      "saved": "文件已另存为。",
+      "pathCopied": "文件路径已复制。",
+      "contentCopied": "文件内容已复制。",
+      "copyFailed": "复制失败。",
+      "revealFailed": "无法在资源管理器中打开文件。"
+    }
+  },
   "messageBlocks": {
     "diffFallback": "差异（{{scope}}）",
     "parsing": "正在解析…",

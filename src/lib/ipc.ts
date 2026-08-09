@@ -569,8 +569,16 @@ export const ipc = {
   unstageFiles: (repoPath: string, files: string[]) =>
     invoke<void>("unstage_files", { repoPath, files }),
   revealPath: (path: string) => invoke<void>("reveal_path", { path }),
+  openContainingDirectory: (path: string) =>
+    invoke<void>("open_containing_directory", { path }),
   openPathWithDefaultApp: (path: string) =>
     invoke<void>("open_path_with_default_app", { path }),
+  openPathWithTextEditor: (path: string, editorId: string | null) =>
+    invoke<void>("open_path_with_text_editor", { path, editorId }),
+  saveFileAs: (sourcePath: string, destinationPath: string) =>
+    invoke<void>("save_file_as", { sourcePath, destinationPath }),
+  readTextFileForClipboard: (path: string) =>
+    invoke<string | null>("read_text_file_for_clipboard", { path }),
   getDefaultFileOpenTarget: () =>
     invoke<DefaultFileOpenTarget>("get_default_file_open_target"),
   setDefaultFileOpenTarget: (editorId: string | null) =>

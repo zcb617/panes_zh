@@ -3112,6 +3112,31 @@ button, input, textarea, select {
   background: var(--danger-surface);
 }
 
+.chat-file-context-menu-item {
+  gap: 8px;
+}
+
+.chat-file-context-menu-item > svg:first-child {
+  flex: 0 0 auto;
+}
+
+.chat-file-context-menu-open-with {
+  position: relative;
+}
+
+.chat-file-context-menu-open-with > .chat-file-context-menu-item {
+  justify-content: space-between;
+}
+
+.chat-file-context-menu-submenu {
+  position: absolute;
+  top: -4px;
+  left: calc(100% - 3px);
+  min-width: 208px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+
 /* Chat/Terminal content area */
 .chat-terminal-content {
   flex: 1;

@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -263,9 +264,49 @@ pub async fn reveal_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn open_containing_directory(path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        open_containing_directory_impl(PathBuf::from(path)).map_err(err_to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub async fn open_path_with_default_app(path: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         open_path_with_default_app_impl(PathBuf::from(path)).map_err(err_to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn open_path_with_text_editor(
+    path: String,
+    editor_id: Option<String>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        open_path_with_text_editor_impl(PathBuf::from(path), editor_id).map_err(err_to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn save_file_as(source_path: String, destination_path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        save_file_as_impl(PathBuf::from(source_path), PathBuf::from(destination_path))
+            .map_err(err_to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn read_text_file_for_clipboard(path: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        read_text_file_for_clipboard_impl(PathBuf::from(path)).map_err(err_to_string)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -900,6 +941,30 @@ fn reveal_path_impl(path: PathBuf) -> anyhow::Result<()> {
     spawn_path_command(command, &plan.display_target, "reveal")
 }
 
+fn open_containing_directory_impl(path: PathBuf) -> anyhow::Result<()> {
+    let directory = resolve_containing_directory(&path)?;
+    let directory = directory.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve containing directory for: {}",
+            path.display()
+        )
+    })?;
+    reveal_path_impl(directory)
+}
+
+fn resolve_containing_directory(path: &Path) -> anyhow::Result<PathBuf> {
+    if !path.exists() {
+        anyhow::bail!("path does not exist: {}", path.display());
+    }
+    if path.is_dir() {
+        return Ok(path.to_path_buf());
+    }
+
+    path.parent()
+        .map(Path::to_path_buf)
+        .context("file path does not have a parent directory")
+}
+
 fn open_path_with_default_app_impl(path: PathBuf) -> anyhow::Result<()> {
     if !path.exists() {
         anyhow::bail!("path does not exist: {}", path.display());
@@ -917,16 +982,89 @@ fn open_path_with_default_app_impl(path: PathBuf) -> anyhow::Result<()> {
         }
     }
 
+    open_path_with_system_default_app_impl(&path)
+}
+
+fn open_path_with_text_editor_impl(path: PathBuf, editor_id: Option<String>) -> anyhow::Result<()> {
+    if let Some(editor_id) = editor_id.filter(|value| !value.trim().is_empty()) {
+        if !path.exists() {
+            anyhow::bail!("path does not exist: {}", path.display());
+        }
+
+        let application = detect_text_editor_applications()
+            .into_iter()
+            .find(|application| application.dto.id == editor_id)
+            .context("the selected text editor is no longer available")?;
+        return launch_text_editor(&application, &path);
+    }
+
+    open_path_with_system_default_app_impl(&path)
+}
+
+fn open_path_with_system_default_app_impl(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        anyhow::bail!("path does not exist: {}", path.display());
+    }
+
     let platform = reveal_platform();
     let (xdg_open, gio) = resolve_linux_openers(platform);
 
-    let Some(plan) = build_open_command_plan(&path, platform, xdg_open, gio)? else {
+    let Some(plan) = build_open_command_plan(path, platform, xdg_open, gio)? else {
         return Ok(());
     };
 
     let mut command = Command::new(&plan.program);
     command.args(&plan.args);
     spawn_path_command(command, &plan.display_target, "open")
+}
+
+fn save_file_as_impl(source_path: PathBuf, destination_path: PathBuf) -> anyhow::Result<()> {
+    let source_metadata = fs::metadata(&source_path)
+        .with_context(|| format!("failed to access source file: {}", source_path.display()))?;
+    anyhow::ensure!(source_metadata.is_file(), "source path is not a file");
+
+    let destination_parent = destination_path
+        .parent()
+        .context("destination path does not have a parent directory")?;
+    anyhow::ensure!(
+        destination_parent.is_dir(),
+        "destination directory does not exist"
+    );
+
+    fs::copy(&source_path, &destination_path).with_context(|| {
+        format!(
+            "failed to save {} as {}",
+            source_path.display(),
+            destination_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn read_text_file_for_clipboard_impl(path: PathBuf) -> anyhow::Result<Option<String>> {
+    let metadata = fs::metadata(&path)
+        .with_context(|| format!("failed to access file: {}", path.display()))?;
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+
+    let mut sample = [0_u8; 8 * 1024];
+    let mut file = fs::File::open(&path)
+        .with_context(|| format!("failed to open file: {}", path.display()))?;
+    let sample_length = file
+        .read(&mut sample)
+        .with_context(|| format!("failed to inspect file: {}", path.display()))?;
+    if sample[..sample_length].contains(&0) {
+        return Ok(None);
+    }
+
+    let bytes =
+        fs::read(&path).with_context(|| format!("failed to read file: {}", path.display()))?;
+    if bytes.contains(&0) {
+        return Ok(None);
+    }
+
+    Ok(String::from_utf8(bytes).ok())
 }
 
 fn reveal_platform() -> RevealPlatform {
@@ -993,7 +1131,7 @@ fn build_reveal_command_plan(
             };
 
             Ok(Some(RevealCommandPlan {
-                program: OsString::from("explorer"),
+                program: OsString::from("explorer.exe"),
                 args,
                 display_target: path.to_path_buf(),
             }))
@@ -1292,7 +1430,8 @@ mod tests {
     use super::extract_windows_launch_program;
     use super::{
         build_open_command_plan, build_reveal_command_plan, is_text_document_type,
-        resolve_target_path_for_repo_lookup, RevealPlatform,
+        read_text_file_for_clipboard_impl, resolve_containing_directory,
+        resolve_target_path_for_repo_lookup, save_file_as_impl, RevealPlatform,
     };
     use uuid::Uuid;
 
@@ -1320,6 +1459,48 @@ mod tests {
         assert!(!is_text_document_type("application/pdf"));
     }
 
+    #[test]
+    fn clipboard_reader_returns_text_and_ignores_binary_files() {
+        with_temp_path(|_dir, file| {
+            assert_eq!(
+                read_text_file_for_clipboard_impl(file.clone()).expect("text should be readable"),
+                Some("hello".to_string())
+            );
+
+            fs::write(&file, [0x4d, 0x5a, 0, 0x90]).expect("binary file should be writable");
+            assert_eq!(
+                read_text_file_for_clipboard_impl(file).expect("binary inspection should succeed"),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn save_file_as_copies_the_source_file() {
+        with_temp_path(|dir, file| {
+            let destination = dir.join("copied-file.txt");
+            save_file_as_impl(file, destination.clone()).expect("file should be copied");
+            assert_eq!(
+                fs::read_to_string(destination).expect("copy should be readable"),
+                "hello"
+            );
+        });
+    }
+
+    #[test]
+    fn resolves_the_containing_directory_for_a_file() {
+        with_temp_path(|dir, file| {
+            assert_eq!(
+                resolve_containing_directory(&file).expect("file should have a parent"),
+                dir.clone()
+            );
+            assert_eq!(
+                resolve_containing_directory(&dir).expect("directory should resolve to itself"),
+                dir
+            );
+        });
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn extracts_the_executable_from_a_registered_windows_open_command() {
@@ -1341,7 +1522,7 @@ mod tests {
                 .expect("plan should build")
                 .expect("plan should exist");
 
-            assert_eq!(plan.program.to_string_lossy(), "explorer");
+            assert_eq!(plan.program.to_string_lossy(), "explorer.exe");
             assert_eq!(plan.args.len(), 1);
             assert_eq!(
                 plan.args[0].to_string_lossy(),
@@ -1358,7 +1539,7 @@ mod tests {
                 .expect("plan should build")
                 .expect("plan should exist");
 
-            assert_eq!(plan.program.to_string_lossy(), "explorer");
+            assert_eq!(plan.program.to_string_lossy(), "explorer.exe");
             assert_eq!(plan.args, vec![dir.as_os_str().to_os_string()]);
             assert_eq!(plan.display_target, dir);
         });

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { File, FileText, Image, X } from "lucide-react";
 import { ipc } from "../../lib/ipc";
+import { useChatFileContextMenu } from "./useChatFileContextMenu";
 
 interface AttachmentChipData {
   fileName: string;
@@ -82,6 +83,7 @@ export function AttachmentChip({
   const effectiveMimeType = getEffectiveMimeType(attachment);
   const [thumbnailSrc, setThumbnailSrc] = useState<string | null>(null);
   const [thumbnailFailed, setThumbnailFailed] = useState(false);
+  const { openLocalFileContextMenu, contextMenu } = useChatFileContextMenu();
 
   useEffect(() => {
     let cancelled = false;
@@ -123,7 +125,12 @@ export function AttachmentChip({
     .join(" ");
 
   return (
-    <div className={className}>
+    <div
+      className={className}
+      onContextMenu={(event) => {
+        openLocalFileContextMenu(event, attachment.filePath, null);
+      }}
+    >
       {thumbnailSrc && !thumbnailFailed ? (
         <img
           src={thumbnailSrc}
@@ -150,6 +157,7 @@ export function AttachmentChip({
           <X size={10} />
         </button>
       )}
+      {contextMenu}
     </div>
   );
 }

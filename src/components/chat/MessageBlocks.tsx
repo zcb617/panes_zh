@@ -79,6 +79,7 @@ import {
 } from "../shared/DiffViewer";
 import MarkdownContent from "./MarkdownContent";
 import { AttachmentChip } from "./AttachmentChip";
+import { useChatFileContextMenu } from "./useChatFileContextMenu";
 import {
   extractTextLinkMatches,
   getWorkspacePaneLeafIdFromEventTarget,
@@ -176,6 +177,7 @@ function handlePlainTextLinkClick(
 
 function LinkifiedPlainText({ text }: { text: string }) {
   const matches = useMemo(() => extractTextLinkMatches(text), [text]);
+  const { openLocalFileContextMenu, contextMenu } = useChatFileContextMenu();
   if (matches.length === 0) {
     return <>{text}</>;
   }
@@ -193,6 +195,13 @@ function LinkifiedPlainText({ text }: { text: string }) {
         className="chat-plain-link"
         rel="noreferrer noopener"
         onClick={(event) => handlePlainTextLinkClick(event, match.text)}
+        onContextMenu={(event) => {
+          openLocalFileContextMenu(
+            event,
+            match.text,
+            getWorkspacePaneLeafIdFromEventTarget(event.currentTarget),
+          );
+        }}
       >
         {match.text}
       </a>,
@@ -204,7 +213,7 @@ function LinkifiedPlainText({ text }: { text: string }) {
     nodes.push(text.slice(cursor));
   }
 
-  return <>{nodes}</>;
+  return <>{nodes}{contextMenu}</>;
 }
 
 interface MessageBlockHeaderProps {
@@ -551,6 +560,7 @@ function ThinkingBlockView({ block, isStreaming }: { block: ThinkingBlock; isStr
           <MarkdownContent
             content={content}
             streaming={isStreaming}
+            enableFileContextMenu
             className="prose"
             style={{
               fontSize: 12.5,
@@ -1567,6 +1577,7 @@ function renderSingleBlock(
           key={blockKey}
           content={textContent}
           streaming
+          enableFileContextMenu
           className="prose"
           style={{ fontSize: 13, padding: "6px 14px" }}
         />
@@ -1577,6 +1588,7 @@ function renderSingleBlock(
       <MarkdownContent
         key={blockKey}
         content={textContent}
+        enableFileContextMenu
         className="prose"
         style={{ fontSize: 13, padding: "6px 14px" }}
       />

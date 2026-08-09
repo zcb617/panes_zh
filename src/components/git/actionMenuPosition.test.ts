@@ -14,6 +14,19 @@ describe("getActionMenuPosition", () => {
     ).toEqual({ top: 128, left: 120 });
   });
 
+  it("opens on the right when requested", () => {
+    expect(
+      getActionMenuPosition({
+        triggerRect: { top: 100, bottom: 124, right: 260 },
+        menuWidth: 140,
+        menuHeight: 72,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        horizontalPlacement: "after",
+      }),
+    ).toEqual({ top: 128, left: 264 });
+  });
+
   it("flips above when the menu would overflow below", () => {
     expect(
       getActionMenuPosition({
@@ -24,6 +37,19 @@ describe("getActionMenuPosition", () => {
         viewportHeight: 600,
       }),
     ).toEqual({ top: 452, left: 160 });
+  });
+
+  it("moves a context menu upward only as far as needed to keep it visible", () => {
+    expect(
+      getActionMenuPosition({
+        triggerRect: { top: 560, bottom: 584, right: 300 },
+        menuWidth: 140,
+        menuHeight: 104,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        verticalPlacement: "clamp",
+      }),
+    ).toEqual({ top: 488, left: 160 });
   });
 
   it("clamps inside the viewport when space is tight", () => {

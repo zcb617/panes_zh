@@ -94,6 +94,7 @@ import {
   classifyLinkTarget,
   extractTextLinkMatches,
   navigateLinkTarget,
+  resolveActiveWorkspaceLocalFileLinkTarget,
   resolveLocalFileLinkTarget,
 } from "./fileLinkNavigation";
 import { DEFAULT_LINK_OPEN_GESTURE } from "./linkOpenSettings";
@@ -458,6 +459,18 @@ describe("fileLinkNavigation", () => {
       "drafts/2026-08-08/给开源项目，中文 文件.md",
       null,
     );
+  });
+
+  it("resolves active-workspace local links for file context menu actions", () => {
+    expect(
+      resolveActiveWorkspaceLocalFileLinkTarget("src/main.ts#L12C4"),
+    ).toMatchObject({
+      rootPath: "/workspace/apps/app",
+      filePath: "src/main.ts",
+      absolutePath: "/workspace/apps/app/src/main.ts",
+      line: 12,
+      column: 4,
+    });
   });
 
   it("opens repo-relative local links against the active repo on shift-click", async () => {

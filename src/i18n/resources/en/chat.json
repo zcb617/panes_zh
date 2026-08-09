@@ -496,6 +496,27 @@
     "emptyHintCommands": "commands",
     "emptyHintSlash": "slash actions"
   },
+  "fileContextMenu": {
+    "openFile": "Open file",
+    "openInTarget": "Open in {{target}}",
+    "openWith": "Open with",
+    "loadingTargets": "Loading applications…",
+    "systemDefaultApp": "Default app",
+    "saveAs": "Save as…",
+    "copyPath": "Copy path",
+    "copyFileContents": "Copy file contents",
+    "revealInFileExplorer": "Open in file manager",
+    "saveDialogTitle": "Save as",
+    "toasts": {
+      "openFailed": "Could not open the file.",
+      "saveFailed": "Could not save the file.",
+      "saved": "File saved.",
+      "pathCopied": "File path copied.",
+      "contentCopied": "File contents copied.",
+      "copyFailed": "Could not copy to the clipboard.",
+      "revealFailed": "Could not open the file in the file manager."
+    }
+  },
   "messageBlocks": {
     "diffFallback": "diff ({{scope}})",
     "parsing": "Parsing...",

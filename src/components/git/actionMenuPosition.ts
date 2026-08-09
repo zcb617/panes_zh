@@ -10,6 +10,8 @@ interface ActionMenuPositionOptions {
   menuHeight: number;
   viewportWidth: number;
   viewportHeight: number;
+  horizontalPlacement?: "before" | "after";
+  verticalPlacement?: "flip" | "clamp";
   gap?: number;
   padding?: number;
 }
@@ -25,10 +27,14 @@ export function getActionMenuPosition({
   menuHeight,
   viewportWidth,
   viewportHeight,
+  horizontalPlacement = "before",
+  verticalPlacement = "flip",
   gap = 4,
   padding = 8,
 }: ActionMenuPositionOptions): ActionMenuPosition {
-  const unclampedLeft = triggerRect.right - menuWidth;
+  const unclampedLeft = horizontalPlacement === "after"
+    ? triggerRect.right + gap
+    : triggerRect.right - menuWidth;
   const maxLeft = Math.max(padding, viewportWidth - menuWidth - padding);
   const left = Math.min(Math.max(padding, unclampedLeft), maxLeft);
 
@@ -36,7 +42,9 @@ export function getActionMenuPosition({
   const showAbove =
     spaceBelow < menuHeight + gap &&
     triggerRect.top - padding > spaceBelow;
-  const preferredTop = showAbove
+  const preferredTop = verticalPlacement === "clamp"
+    ? triggerRect.bottom + gap
+    : showAbove
     ? triggerRect.top - menuHeight - gap
     : triggerRect.bottom + gap;
   const maxTop = Math.max(padding, viewportHeight - menuHeight - padding);

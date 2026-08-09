@@ -192,6 +192,25 @@ export function getWorkspacePaneLeafIdFromEventTarget(target: EventTarget | null
   return leaf instanceof HTMLElement ? leaf.dataset.workspacePaneLeafId ?? null : null;
 }
 
+export function resolveActiveWorkspaceLocalFileLinkTarget(
+  rawTarget: string,
+): ResolvedLocalFileLink | null {
+  const workspaceState = useWorkspaceStore.getState();
+  const activeWorkspaceId = workspaceState.activeWorkspaceId;
+  const activeWorkspace = activeWorkspaceId
+    ? workspaceState.workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null
+    : null;
+  const repos = activeWorkspaceId
+    ? workspaceState.repos.filter((repo) => repo.workspaceId === activeWorkspaceId)
+    : workspaceState.repos;
+
+  return resolveLocalFileLinkTarget(rawTarget, {
+    workspaceRoot: activeWorkspace?.rootPath ?? null,
+    repos,
+    activeRepoId: workspaceState.activeRepoId,
+  });
+}
+
 export async function navigateLinkTarget(
   rawTarget: string,
   options: LinkNavigationOptions,
@@ -203,18 +222,7 @@ export async function navigateLinkTarget(
 
   const workspaceState = useWorkspaceStore.getState();
   const activeWorkspaceId = workspaceState.activeWorkspaceId;
-  const activeWorkspace = activeWorkspaceId
-    ? workspaceState.workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null
-    : null;
-  const repos = activeWorkspaceId
-    ? workspaceState.repos.filter((repo) => repo.workspaceId === activeWorkspaceId)
-    : workspaceState.repos;
-
-  const localTarget = resolveLocalFileLinkTarget(rawTarget, {
-    workspaceRoot: activeWorkspace?.rootPath ?? null,
-    repos,
-    activeRepoId: workspaceState.activeRepoId,
-  });
+  const localTarget = resolveActiveWorkspaceLocalFileLinkTarget(rawTarget);
 
   if (localTarget) {
     const reveal = localTarget.line

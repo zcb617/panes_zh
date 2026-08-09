@@ -13,6 +13,7 @@ import {
   navigateLinkTarget,
 } from "../../lib/fileLinkNavigation";
 import { renderMarkdownToHtml } from "../../workers/markdownParserCore";
+import { useChatFileContextMenu } from "./useChatFileContextMenu";
 import type {
   MarkdownParseWorkerRequest,
   MarkdownParseWorkerResponse,
@@ -152,6 +153,7 @@ interface MarkdownContentProps {
   className?: string;
   style?: CSSProperties;
   streaming?: boolean;
+  enableFileContextMenu?: boolean;
 }
 
 interface MarkdownWorkerPlaceholderOptions {
@@ -178,27 +180,30 @@ export function shouldRenderMarkdownWorkerPlaceholder({
   );
 }
 
+function getMarkdownLinkTarget(eventTarget: EventTarget | null): string | null {
+  const element = eventTarget instanceof Element
+    ? eventTarget
+    : eventTarget instanceof Node
+      ? eventTarget.parentElement
+      : null;
+  if (!element) {
+    return null;
+  }
+
+  const anchor = element.closest("a");
+  if (!(anchor instanceof HTMLAnchorElement)) {
+    return null;
+  }
+
+  return anchor.dataset.localFileReference ?? anchor.getAttribute("href");
+}
+
 function handleMarkdownLinkClick(event: ReactMouseEvent<HTMLDivElement>): void {
   if (event.defaultPrevented || event.button !== 0) {
     return;
   }
 
-  const target = event.target;
-  const element = target instanceof Element
-    ? target
-    : target instanceof Node
-      ? target.parentElement
-      : null;
-  if (!element) {
-    return;
-  }
-
-  const anchor = element.closest("a");
-  if (!(anchor instanceof HTMLAnchorElement)) {
-    return;
-  }
-
-  const rawTarget = anchor.dataset.localFileReference ?? anchor.getAttribute("href");
+  const rawTarget = getMarkdownLinkTarget(event.target);
   if (!rawTarget) {
     return;
   }
@@ -223,11 +228,13 @@ export default function MarkdownContent({
   className,
   style,
   streaming = false,
+  enableFileContextMenu = false,
 }: MarkdownContentProps) {
   const [workerHtml, setWorkerHtml] = useState<string | null>(null);
   const [workerError, setWorkerError] = useState(false);
   const parseStartedAtRef = useRef(0);
   const hasStreamedRef = useRef(streaming);
+  const { openLocalFileContextMenu, contextMenu } = useChatFileContextMenu();
 
   const workerEligible = content.length >= MARKDOWN_WORKER_THRESHOLD_CHARS;
   const cacheKey = useMemo(() => computeCacheKey(content), [content]);
@@ -308,6 +315,22 @@ export default function MarkdownContent({
     };
   }, [cacheKey, content, hasStreamed, streaming, workerEligible]);
 
+  const handleMarkdownLinkContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (!enableFileContextMenu) {
+      return;
+    }
+
+    const rawTarget = getMarkdownLinkTarget(event.target);
+    if (!rawTarget) {
+      return;
+    }
+    openLocalFileContextMenu(
+      event,
+      rawTarget,
+      getWorkspacePaneLeafIdFromEventTarget(event.currentTarget),
+    );
+  };
+
   if (showWorkerPlaceholder) {
     return (
       <div className={className} style={style}>
@@ -347,11 +370,15 @@ export default function MarkdownContent({
   }
 
   return (
-    <div
-      className={className}
-      style={style}
-      onClickCapture={handleMarkdownLinkClick}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <>
+      <div
+        className={className}
+        style={style}
+        onClickCapture={handleMarkdownLinkClick}
+        onContextMenu={enableFileContextMenu ? handleMarkdownLinkContextMenu : undefined}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+      {contextMenu}
+    </>
   );
 }
