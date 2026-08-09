@@ -14,6 +14,37 @@ pub fn tray_menu_strings(locale: &str) -> (&'static str, &'static str) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScheduledExitConfirmationStrings {
+    pub title: &'static str,
+    pub message: &'static str,
+    pub confirm: &'static str,
+    pub cancel: &'static str,
+}
+
+pub fn scheduled_exit_confirmation_strings(locale: &str) -> ScheduledExitConfirmationStrings {
+    match normalize_app_locale(locale).unwrap_or(DEFAULT_APP_LOCALE) {
+        PT_BR_APP_LOCALE => ScheduledExitConfirmationStrings {
+            title: "Sair do Panes?",
+            message: "Há tarefas agendadas ativas. Elas não serão executadas enquanto o Panes estiver fechado. Tem certeza de que deseja sair?",
+            confirm: "Sair",
+            cancel: "Cancelar",
+        },
+        ZH_CN_APP_LOCALE => ScheduledExitConfirmationStrings {
+            title: "确认退出 Panes？",
+            message: "当前有启用中的计划任务。退出 Panes 后，这些任务将无法按计划执行。确定要退出吗？",
+            confirm: "退出",
+            cancel: "取消",
+        },
+        _ => ScheduledExitConfirmationStrings {
+            title: "Quit Panes?",
+            message: "There are enabled scheduled tasks. They cannot run after Panes exits. Are you sure you want to quit?",
+            confirm: "Quit",
+            cancel: "Cancel",
+        },
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy)]
 pub struct NativeStrings {
@@ -168,8 +199,9 @@ pub fn native_strings(locale: &str) -> NativeStrings {
 #[cfg(test)]
 mod tests {
     use super::{
-        native_strings, normalize_app_locale, resolve_app_locale_with_system, tray_menu_strings,
-        DEFAULT_APP_LOCALE, PT_BR_APP_LOCALE, ZH_CN_APP_LOCALE,
+        native_strings, normalize_app_locale, resolve_app_locale_with_system,
+        scheduled_exit_confirmation_strings, tray_menu_strings, DEFAULT_APP_LOCALE,
+        PT_BR_APP_LOCALE, ZH_CN_APP_LOCALE,
     };
 
     #[test]
@@ -238,5 +270,23 @@ mod tests {
         assert_eq!(tray_menu_strings("en"), ("Open Panes", "Quit Panes"));
         assert_eq!(tray_menu_strings("pt-BR"), ("Abrir Panes", "Sair do Panes"));
         assert_eq!(tray_menu_strings("zh-CN"), ("打开 Panes", "退出 Panes"));
+    }
+
+    #[test]
+    fn returns_localized_scheduled_exit_confirmation_strings() {
+        let en = scheduled_exit_confirmation_strings("en");
+        assert_eq!(en.title, "Quit Panes?");
+        assert_eq!(en.confirm, "Quit");
+        assert_eq!(en.cancel, "Cancel");
+
+        let pt = scheduled_exit_confirmation_strings("pt-BR");
+        assert_eq!(pt.title, "Sair do Panes?");
+        assert_eq!(pt.confirm, "Sair");
+        assert_eq!(pt.cancel, "Cancelar");
+
+        let zh = scheduled_exit_confirmation_strings("zh-CN");
+        assert_eq!(zh.title, "确认退出 Panes？");
+        assert_eq!(zh.confirm, "退出");
+        assert_eq!(zh.cancel, "取消");
     }
 }

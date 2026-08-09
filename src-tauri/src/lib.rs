@@ -20,7 +20,10 @@ mod terminal;
 mod terminal_notifications;
 mod workspace_startup;
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use anyhow::Context;
 use rusqlite::OptionalExtension;
@@ -33,7 +36,10 @@ use git::repo::FileTreeCache;
 use git::watcher::GitWatcherManager;
 #[cfg(target_os = "macos")]
 use locale::native_strings;
-use locale::{resolve_app_locale, tray_menu_strings};
+use locale::{
+    resolve_app_locale, scheduled_exit_confirmation_strings, tray_menu_strings,
+    ScheduledExitConfirmationStrings,
+};
 use models::{EngineRuntimeUpdatedDto, ThreadDto, ThreadStatusDto};
 use power::KeepAwakeManager;
 use scheduled_tasks::ScheduledTaskManager;
@@ -46,6 +52,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, RunEvent, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use terminal::TerminalManager;
 
 pub fn maybe_handle_cli_subcommand() -> anyhow::Result<bool> {
@@ -415,6 +422,9 @@ fn build_system_tray(
     let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
     let menu_window = main_window.clone();
     let tray_click_window = main_window;
+    let exit_confirmation = scheduled_exit_confirmation_strings(locale);
+    let exit_confirmation_open = Arc::new(AtomicBool::new(false));
+    let menu_exit_confirmation_open = Arc::clone(&exit_confirmation_open);
 
     let mut builder = TrayIconBuilder::new()
         .tooltip("Panes")
@@ -422,7 +432,7 @@ fn build_system_tray(
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "tray-open" => show_main_window(&menu_window),
-            "tray-quit" => app.exit(0),
+            "tray-quit" => request_tray_exit(app, exit_confirmation, &menu_exit_confirmation_open),
             _ => {}
         })
         .on_tray_icon_event(move |_tray, event| match event {
@@ -444,6 +454,45 @@ fn build_system_tray(
     }
     builder.build(app)?;
     Ok(())
+}
+
+fn request_tray_exit(
+    app: &tauri::AppHandle,
+    strings: ScheduledExitConfirmationStrings,
+    confirmation_open: &Arc<AtomicBool>,
+) {
+    let has_enabled_tasks =
+        match db::scheduled_tasks::has_tasks_in_enabled_column(&app.state::<AppState>().db) {
+            Ok(has_enabled_tasks) => has_enabled_tasks,
+            Err(error) => {
+                log::warn!("failed to check enabled scheduled tasks before exit: {error}");
+                true
+            }
+        };
+    if !has_enabled_tasks {
+        app.exit(0);
+        return;
+    }
+    if confirmation_open.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let app_handle = app.clone();
+    let confirmation_open = Arc::clone(confirmation_open);
+    app.dialog()
+        .message(strings.message)
+        .title(strings.title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            strings.confirm.to_string(),
+            strings.cancel.to_string(),
+        ))
+        .show(move |confirmed| {
+            confirmation_open.store(false, Ordering::SeqCst);
+            if confirmed {
+                app_handle.exit(0);
+            }
+        });
 }
 
 fn show_main_window(window: &WebviewWindow) {

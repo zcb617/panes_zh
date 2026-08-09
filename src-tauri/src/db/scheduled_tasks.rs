@@ -41,6 +41,12 @@ pub fn list_tasks(db: &Database) -> anyhow::Result<Vec<ScheduledTaskDto>> {
     Ok(tasks)
 }
 
+pub fn has_tasks_in_enabled_column(db: &Database) -> anyhow::Result<bool> {
+    Ok(list_tasks(db)?
+        .into_iter()
+        .any(|task| task.enabled && !task.needs_confirmation))
+}
+
 pub fn get_task(db: &Database, task_id: &str) -> anyhow::Result<Option<ScheduledTaskDto>> {
     let conn = db.connect()?;
     let mut task = conn
@@ -578,6 +584,7 @@ mod tests {
         .unwrap();
         assert!(task.enabled);
         assert!(task.target_valid);
+        assert!(has_tasks_in_enabled_column(&db).unwrap());
         assert_eq!(
             task.runtime_config
                 .as_ref()
@@ -600,6 +607,13 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert!(listed[0].needs_confirmation);
         assert_eq!(listed[0].latest_run.as_ref().unwrap().status, "error");
+        assert!(!has_tasks_in_enabled_column(&db).unwrap());
+
+        acknowledge_latest_run(&db, &task.id).unwrap();
+        assert!(has_tasks_in_enabled_column(&db).unwrap());
+
+        set_task_enabled(&db, &task.id, false, None).unwrap();
+        assert!(!has_tasks_in_enabled_column(&db).unwrap());
     }
 
     #[test]
