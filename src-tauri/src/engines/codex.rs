@@ -632,7 +632,9 @@ impl Engine for CodexEngine {
         cancellation: CancellationToken,
     ) -> Result<(), anyhow::Error> {
         let transport = self.ensure_ready_transport().await?;
-        if let Some(message) = self.unsupported_external_auth_tokens_message().await {
+        if let Some(message) =
+            Self::unsupported_external_auth_tokens_message(transport.as_ref()).await
+        {
             return Err(anyhow::anyhow!(message));
         }
 
@@ -1467,7 +1469,9 @@ impl CodexEngine {
         started_tx: oneshot::Sender<CodexReviewStarted>,
     ) -> Result<(), anyhow::Error> {
         let transport = self.ensure_ready_transport().await?;
-        if let Some(message) = self.unsupported_external_auth_tokens_message().await {
+        if let Some(message) =
+            Self::unsupported_external_auth_tokens_message(transport.as_ref()).await
+        {
             return Err(anyhow::anyhow!(message));
         }
 
@@ -2719,15 +2723,14 @@ impl CodexEngine {
             .unwrap_or(PlanModeActivation::NativeCollaboration)
     }
 
-    async fn unsupported_external_auth_tokens_message(&self) -> Option<String> {
-        let state = self.state.lock().await;
-        let auth_mode = state
-            .protocol_diagnostics
-            .as_ref()
-            .and_then(|diagnostics| diagnostics.account.as_ref())
-            .and_then(|account| account.auth_mode.as_deref());
+    async fn unsupported_external_auth_tokens_message(
+        transport: &CodexTransport,
+    ) -> Option<String> {
+        let MethodCallOutcome::Available(account) = fetch_account_state(transport).await else {
+            return None;
+        };
 
-        if auth_mode == Some("chatgptAuthTokens") {
+        if account.auth_mode.as_deref() == Some("chatgptAuthTokens") {
             Some(unsupported_external_auth_tokens_message(None, None))
         } else {
             None
@@ -3009,24 +3012,25 @@ impl CodexEngine {
                                     );
                                 }
                             }
-                            "skills/changed" | "app/list/updated" => {
-                                if let Some(diagnostics) =
-                                    refresh_protocol_diagnostics_with_fallback(
-                                        transport.as_ref(),
-                                        state.clone(),
-                                        &format!("after {normalized_method}"),
-                                        false,
-                                    )
-                                    .await
-                                {
-                                    let _ = runtime_events.send(
-                                        CodexRuntimeEvent::DiagnosticsUpdated {
-                                            diagnostics,
-                                            toast: None,
-                                        },
-                                    );
-                                }
-                            }
+                            // "skills/changed" | "app/list/updated"
+                            // => {
+                            //     if let Some(diagnostics) =
+                            //         refresh_protocol_diagnostics_with_fallback(
+                            //             transport.as_ref(),
+                            //             state.clone(),
+                            //             &format!("after {normalized_method}"),
+                            //             false,
+                            //         )
+                            //         .await
+                            //     {
+                            //         let _ = runtime_events.send(
+                            //             CodexRuntimeEvent::DiagnosticsUpdated {
+                            //                 diagnostics,
+                            //                 toast: None,
+                            //             },
+                            //         );
+                            //     }
+                            // }
                             "thread/realtime/started"
                             | "thread/realtime/closed"
                             | "thread/realtime/error"
