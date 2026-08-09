@@ -1,6 +1,7 @@
 pub mod app;
 pub mod browser;
 pub mod chat;
+pub mod computer_control;
 pub mod engines;
 pub mod extensions;
 pub mod files;

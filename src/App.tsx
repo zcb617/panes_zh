@@ -12,6 +12,7 @@ import { useUpdateStore } from "./stores/updateStore";
 import {
   ipc,
   listenChatApprovalRequested,
+  listenComputerControlApprovalRequested,
   listenChatTurnFinished,
   listenCodexRemoteThreadRemoved,
   listenEngineRuntimeUpdated,
@@ -30,7 +31,12 @@ import { useFileStore } from "./stores/fileStore";
 import { useKeepAwakeStore } from "./stores/keepAwakeStore";
 import { useTerminalNotificationSettingsStore } from "./stores/terminalNotificationSettingsStore";
 import { toast } from "./stores/toastStore";
-import type { ChatEngineId, RuntimeToast, Thread } from "./types";
+import type {
+  ChatEngineId,
+  ComputerControlApprovalRequest,
+  RuntimeToast,
+  Thread,
+} from "./types";
 import { getActiveEditorView, openSearchPanel } from "./components/editor/CodeMirrorEditor";
 import { CustomWindowFrame } from "./components/shared/CustomWindowFrame";
 import { useCustomWindowFrameState } from "./lib/customWindowFrame";
@@ -148,6 +154,18 @@ export function App() {
     CodexRemoteThreadRemovedEvent[]
   >([]);
   const codexRemoteThreadPrompt = codexRemoteThreadPrompts[0] ?? null;
+  const [computerControlApprovals, setComputerControlApprovals] = useState<
+    ComputerControlApprovalRequest[]
+  >([]);
+  const [computerControlApprovalUpdating, setComputerControlApprovalUpdating] = useState(false);
+  const computerControlApproval = computerControlApprovals[0] ?? null;
+  const computerControlAgentName = computerControlApproval?.agent === "claude"
+    ? "Claude Code"
+    : computerControlApproval?.agent === "opencode"
+      ? "OpenCode"
+      : computerControlApproval?.agent === "codex"
+        ? "Codex"
+        : computerControlApproval?.agent ?? "AI";
   const customWindowFrameState = useCustomWindowFrameState();
 
   useEffect(() => {
@@ -228,6 +246,32 @@ export function App() {
     void listenCodexRemoteThreadRemoved((event) => {
       setCodexRemoteThreadPrompts((current) => {
         if (current.some((item) => item.thread.id === event.thread.id)) {
+          return current;
+        }
+        return [...current, event];
+      });
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenComputerControlApprovalRequested((event) => {
+      setComputerControlApprovals((current) => {
+        if (current.some((item) => item.requestId === event.requestId)) {
           return current;
         }
         return [...current, event];
@@ -676,6 +720,22 @@ export function App() {
     setCodexRemoteThreadPrompts((current) => current.slice(1));
   }
 
+  async function respondComputerControlApproval(allowed: boolean) {
+    const approval = computerControlApproval;
+    if (!approval || computerControlApprovalUpdating) return;
+    setComputerControlApprovalUpdating(true);
+    try {
+      await ipc.respondComputerControlApproval(approval.requestId, allowed);
+    } catch (error) {
+      console.warn("Failed to respond to computer control approval:", error);
+      toast.error(t("app:settingsPage.computerControl.approvalFailed"));
+    } finally {
+      setComputerControlApprovals((current) =>
+        current.filter((item) => item.requestId !== approval.requestId));
+      setComputerControlApprovalUpdating(false);
+    }
+  }
+
   async function archiveCodexRemoteThreadLocally() {
     const prompt = codexRemoteThreadPrompt;
     if (!prompt) return;
@@ -712,7 +772,7 @@ export function App() {
       <UsageLimitsModal />
       <OnboardingWizard />
       <ConfirmDialog
-        open={codexRemoteThreadPrompt !== null}
+        open={codexRemoteThreadPrompt !== null && computerControlApproval === null}
         title={t("app:sidebar.codexRemoteThreadRemovedTitle")}
         message={
           codexRemoteThreadPrompt
@@ -728,6 +788,24 @@ export function App() {
         cancelLabel={t("app:sidebar.keepLocalThread")}
         onConfirm={() => void archiveCodexRemoteThreadLocally()}
         onCancel={dismissCodexRemoteThreadPrompt}
+      />
+      <ConfirmDialog
+        open={computerControlApproval !== null}
+        title={t("app:settingsPage.computerControl.approvalTitle")}
+        message={computerControlApproval
+          ? t("app:settingsPage.computerControl.approvalMessage", {
+              agent: computerControlAgentName,
+              tool: computerControlApproval.tool,
+              application: computerControlApproval.application,
+            })
+          : ""}
+        confirmLabel={computerControlApprovalUpdating
+          ? t("app:settingsPage.computerControl.approvalSubmitting")
+          : t("app:settingsPage.computerControl.approvalAllow")}
+        cancelLabel={t("app:settingsPage.computerControl.approvalDeny")}
+        confirmVariant="primary"
+        onConfirm={() => void respondComputerControlApproval(true)}
+        onCancel={() => void respondComputerControlApproval(false)}
       />
       <ToastContainer />
     </div>

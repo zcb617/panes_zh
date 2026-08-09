@@ -30,6 +30,7 @@ export type SettingsSection =
   | "terminal"
   | "notifications"
   | "usage"
+  | "computer-control"
   | "power"
   | "about"
   | "workspace-general"

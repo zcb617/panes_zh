@@ -1,14 +1,20 @@
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
+#[cfg(target_os = "windows")]
+use std::collections::BTreeSet;
+
 use anyhow::Context;
+use serde::Serialize;
 use tauri::State;
 
 use crate::{
+    config::app_config::AppConfig,
     db, fs_ops,
     models::{FileTreeEntryDto, ReadFileResultDto, ResolvedEditorFileReferenceDto, TrustLevelDto},
     path_utils,
@@ -265,6 +271,602 @@ pub async fn open_path_with_default_app(path: String) -> Result<(), String> {
     .map_err(|error| error.to_string())?
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextEditorApplicationDto {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultFileOpenTargetDto {
+    pub selected_editor_id: Option<String>,
+    pub applications: Vec<TextEditorApplicationDto>,
+}
+
+#[tauri::command]
+pub async fn get_default_file_open_target() -> Result<DefaultFileOpenTargetDto, String> {
+    tokio::task::spawn_blocking(|| {
+        let selected_editor_id = AppConfig::load_or_create()
+            .map_err(err_to_string)?
+            .general
+            .default_file_open_target;
+        let applications = detect_text_editor_applications();
+        let selected_editor_id = selected_editor_id.filter(|selected| {
+            applications
+                .iter()
+                .any(|application| application.dto.id == *selected)
+        });
+
+        Ok(DefaultFileOpenTargetDto {
+            selected_editor_id,
+            applications: applications
+                .into_iter()
+                .map(|application| application.dto)
+                .collect(),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn set_default_file_open_target(
+    state: State<'_, AppState>,
+    editor_id: Option<String>,
+) -> Result<Option<String>, String> {
+    let selected_editor_id = editor_id.filter(|value| !value.trim().is_empty());
+    let config_write_lock = state.config_write_lock.clone();
+    let _guard = config_write_lock.lock_owned().await;
+
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
+        if let Some(selected) = selected_editor_id.as_deref() {
+            let available = detect_text_editor_applications()
+                .iter()
+                .any(|application| application.dto.id == selected);
+            anyhow::ensure!(available, "the selected text editor is no longer available");
+        }
+
+        AppConfig::mutate(|config| {
+            config.general.default_file_open_target = selected_editor_id.clone();
+            Ok(selected_editor_id)
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(err_to_string)
+}
+
+#[derive(Debug, Clone)]
+struct TextEditorApplication {
+    dto: TextEditorApplicationDto,
+    launch: TextEditorLaunch,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+enum TextEditorLaunch {
+    #[cfg(target_os = "windows")]
+    Windows {
+        program: PathBuf,
+    },
+    #[cfg(target_os = "macos")]
+    Macos {
+        bundle_path: PathBuf,
+    },
+    #[cfg(target_os = "linux")]
+    Linux {
+        desktop_file: PathBuf,
+        program: OsString,
+        args: Vec<OsString>,
+    },
+    Unsupported,
+}
+
+fn detect_text_editor_applications() -> Vec<TextEditorApplication> {
+    let mut applications = match reveal_platform() {
+        RevealPlatform::Windows => {
+            #[cfg(target_os = "windows")]
+            {
+                detect_windows_text_editor_applications()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Vec::new()
+            }
+        }
+        RevealPlatform::Macos => {
+            #[cfg(target_os = "macos")]
+            {
+                detect_macos_text_editor_applications()
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Vec::new()
+            }
+        }
+        RevealPlatform::Linux => {
+            #[cfg(target_os = "linux")]
+            {
+                detect_linux_text_editor_applications()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Vec::new()
+            }
+        }
+        RevealPlatform::Unsupported => Vec::new(),
+    };
+
+    applications.sort_by(|left, right| {
+        left.dto
+            .name
+            .to_lowercase()
+            .cmp(&right.dto.name.to_lowercase())
+            .then_with(|| left.dto.id.cmp(&right.dto.id))
+    });
+    applications.dedup_by(|left, right| left.dto.id == right.dto.id);
+    applications
+}
+
+fn is_text_document_type(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value == ".txt"
+        || value == "text/plain"
+        || value.starts_with("text/")
+        || value == "public.text"
+        || value == "public.plain-text"
+        || value.contains("source-code")
+}
+
+fn launch_text_editor(application: &TextEditorApplication, path: &Path) -> anyhow::Result<()> {
+    let mut command = match &application.launch {
+        #[cfg(target_os = "windows")]
+        TextEditorLaunch::Windows { program } => Command::new(program),
+        #[cfg(target_os = "macos")]
+        TextEditorLaunch::Macos { bundle_path } => {
+            let mut command = Command::new("open");
+            command.arg("-a").arg(bundle_path);
+            command
+        }
+        #[cfg(target_os = "linux")]
+        TextEditorLaunch::Linux {
+            desktop_file,
+            program,
+            args,
+        } => {
+            if let Some(gio) = crate::runtime_env::resolve_executable("gio") {
+                let mut command = Command::new(gio);
+                command.arg("launch").arg(desktop_file);
+                command
+            } else {
+                let mut command = Command::new(program);
+                command.args(args);
+                command
+            }
+        }
+        TextEditorLaunch::Unsupported => anyhow::bail!("text editor launch is not supported"),
+    };
+    command.arg(path);
+    spawn_path_command(command, path, "open with the configured text editor")
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_text_editor_applications() -> Vec<TextEditorApplication> {
+    use winreg::{
+        enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE},
+        RegKey,
+    };
+
+    let mut applications = BTreeMap::new();
+    let mut text_program_ids = BTreeSet::new();
+    let mut text_application_keys = BTreeSet::new();
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let root = RegKey::predef(hive);
+        if let Ok(registered) = root.open_subkey("Software\\Classes\\Applications") {
+            for application_key in registered.enum_keys().flatten() {
+                let Ok(application) = registered.open_subkey(&application_key) else {
+                    continue;
+                };
+                let supports_text =
+                    application
+                        .open_subkey("SupportedTypes")
+                        .ok()
+                        .is_some_and(|types| {
+                            types
+                                .enum_values()
+                                .flatten()
+                                .any(|(value_name, _)| is_text_document_type(&value_name))
+                        });
+                if !supports_text {
+                    continue;
+                }
+
+                let Some(command) = application
+                    .open_subkey("shell\\open\\command")
+                    .ok()
+                    .and_then(|key| key.get_value::<String, _>("").ok())
+                else {
+                    continue;
+                };
+                add_windows_command_application(&mut applications, command, &application_key);
+            }
+        }
+
+        for path in [
+            "Software\\Classes\\.txt\\OpenWithProgids",
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.txt\\OpenWithProgids",
+        ] {
+            if let Ok(registered) = root.open_subkey(path) {
+                text_program_ids.extend(registered.enum_values().flatten().map(|(name, _)| name));
+            }
+        }
+        if hive == HKEY_CURRENT_USER {
+            if let Ok(registered) = root.open_subkey(
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.txt\\OpenWithList",
+            ) {
+                for (value_name, _) in registered.enum_values().flatten() {
+                    if value_name == "MRUList" {
+                        continue;
+                    }
+                    if let Ok(application_key) = registered.get_value::<String, _>(&value_name) {
+                        if application_key.to_ascii_lowercase().ends_with(".exe") {
+                            text_application_keys.insert(application_key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for program_id in text_program_ids {
+        for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+            let root = RegKey::predef(hive);
+            let path = format!("Software\\Classes\\{program_id}\\shell\\open\\command");
+            if let Ok(command) = root
+                .open_subkey(path)
+                .and_then(|key| key.get_value::<String, _>(""))
+            {
+                add_windows_command_application(&mut applications, command, &program_id);
+            }
+        }
+    }
+
+    for application_key in text_application_keys {
+        for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+            let root = RegKey::predef(hive);
+            let path =
+                format!("Software\\Classes\\Applications\\{application_key}\\shell\\open\\command");
+            if let Ok(command) = root
+                .open_subkey(path)
+                .and_then(|key| key.get_value::<String, _>(""))
+            {
+                add_windows_command_application(&mut applications, command, &application_key);
+            }
+        }
+    }
+    applications.into_values().collect()
+}
+
+#[cfg(target_os = "windows")]
+fn add_windows_command_application(
+    applications: &mut BTreeMap<String, TextEditorApplication>,
+    command: String,
+    fallback_name: &str,
+) {
+    let Some(program) = extract_windows_launch_program(&command) else {
+        return;
+    };
+    if !program.is_file() {
+        return;
+    }
+
+    let id = format!("windows:{}", program.to_string_lossy().to_ascii_lowercase());
+    let name = program
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(fallback_name)
+        .to_string();
+    applications
+        .entry(id.clone())
+        .or_insert(TextEditorApplication {
+            dto: TextEditorApplicationDto { id, name },
+            launch: TextEditorLaunch::Windows { program },
+        });
+}
+
+#[cfg(target_os = "windows")]
+fn extract_windows_launch_program(command: &str) -> Option<PathBuf> {
+    let expanded = expand_windows_environment_variables(command.trim());
+    let candidate = if let Some(quoted) = expanded.strip_prefix('"') {
+        quoted.split_once('"')?.0
+    } else {
+        let end = expanded.to_ascii_lowercase().find(".exe")? + ".exe".len();
+        &expanded[..end]
+    };
+    let program = PathBuf::from(candidate.trim());
+    program.is_absolute().then_some(program)
+}
+
+#[cfg(target_os = "windows")]
+fn expand_windows_environment_variables(value: &str) -> String {
+    let mut expanded = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(start) = remaining.find('%') {
+        expanded.push_str(&remaining[..start]);
+        let after_start = &remaining[start + 1..];
+        let Some(end) = after_start.find('%') else {
+            expanded.push('%');
+            expanded.push_str(after_start);
+            return expanded;
+        };
+        let variable = &after_start[..end];
+        if variable.is_empty() {
+            expanded.push('%');
+        } else if let Some(replacement) = std::env::var_os(variable) {
+            expanded.push_str(&replacement.to_string_lossy());
+        } else {
+            expanded.push('%');
+            expanded.push_str(variable);
+            expanded.push('%');
+        }
+        remaining = &after_start[end + 1..];
+    }
+    expanded.push_str(remaining);
+    expanded
+}
+
+#[cfg(target_os = "macos")]
+fn detect_macos_text_editor_applications() -> Vec<TextEditorApplication> {
+    use plist::Value;
+
+    let mut bundle_paths = Vec::new();
+    for root in [
+        PathBuf::from("/Applications"),
+        PathBuf::from("/System/Applications"),
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("Applications"))
+            .unwrap_or_default(),
+    ] {
+        collect_macos_application_bundles(&root, 2, &mut bundle_paths);
+    }
+
+    let mut applications = BTreeMap::new();
+    for bundle_path in bundle_paths {
+        let info_path = bundle_path.join("Contents/Info.plist");
+        let Ok(info) = Value::from_file(info_path) else {
+            continue;
+        };
+        let Some(dictionary) = info.as_dictionary() else {
+            continue;
+        };
+        let supports_text = dictionary
+            .get("CFBundleDocumentTypes")
+            .and_then(Value::as_array)
+            .is_some_and(|document_types| {
+                document_types.iter().any(|document_type| {
+                    let Some(document_type) = document_type.as_dictionary() else {
+                        return false;
+                    };
+                    [
+                        "CFBundleTypeMIMETypes",
+                        "LSItemContentTypes",
+                        "CFBundleTypeExtensions",
+                    ]
+                    .iter()
+                    .any(|key| {
+                        document_type
+                            .get(*key)
+                            .and_then(Value::as_array)
+                            .is_some_and(|values| {
+                                values
+                                    .iter()
+                                    .filter_map(Value::as_string)
+                                    .any(is_text_document_type)
+                            })
+                    })
+                })
+            });
+        if !supports_text {
+            continue;
+        }
+
+        let bundle_path = bundle_path.canonicalize().unwrap_or(bundle_path);
+        let id = format!("macos:{}", bundle_path.to_string_lossy());
+        let name = ["CFBundleDisplayName", "CFBundleName"]
+            .iter()
+            .find_map(|key| dictionary.get(*key).and_then(Value::as_string))
+            .filter(|name| !name.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                bundle_path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| "Application".to_string());
+        applications
+            .entry(id.clone())
+            .or_insert(TextEditorApplication {
+                dto: TextEditorApplicationDto { id, name },
+                launch: TextEditorLaunch::Macos { bundle_path },
+            });
+    }
+    applications.into_values().collect()
+}
+
+#[cfg(target_os = "macos")]
+fn collect_macos_application_bundles(directory: &Path, depth: usize, bundles: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("app"))
+        {
+            bundles.push(path);
+        } else if depth > 0 && path.is_dir() {
+            collect_macos_application_bundles(&path, depth - 1, bundles);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_text_editor_applications() -> Vec<TextEditorApplication> {
+    let mut desktop_files = Vec::new();
+    for root in linux_application_directories() {
+        collect_linux_desktop_files(&root, 2, &mut desktop_files);
+    }
+
+    let mut applications = BTreeMap::new();
+    for desktop_file in desktop_files {
+        let Some((name, program, args)) = parse_linux_text_editor_desktop_file(&desktop_file)
+        else {
+            continue;
+        };
+        let desktop_file = desktop_file.canonicalize().unwrap_or(desktop_file);
+        let id = format!("linux:{}", desktop_file.to_string_lossy());
+        applications
+            .entry(id.clone())
+            .or_insert(TextEditorApplication {
+                dto: TextEditorApplicationDto { id, name },
+                launch: TextEditorLaunch::Linux {
+                    desktop_file,
+                    program,
+                    args,
+                },
+            });
+    }
+    applications.into_values().collect()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_application_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
+        directories.push(PathBuf::from(data_home).join("applications"));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        directories.push(PathBuf::from(home).join(".local/share/applications"));
+    }
+
+    let data_dirs =
+        std::env::var_os("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    directories
+        .extend(std::env::split_paths(&data_dirs).map(|directory| directory.join("applications")));
+    directories
+}
+
+#[cfg(target_os = "linux")]
+fn collect_linux_desktop_files(directory: &Path, depth: usize, desktop_files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == std::ffi::OsStr::new("desktop"))
+        {
+            desktop_files.push(path);
+        } else if depth > 0 && path.is_dir() {
+            collect_linux_desktop_files(&path, depth - 1, desktop_files);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_text_editor_desktop_file(path: &Path) -> Option<(String, OsString, Vec<OsString>)> {
+    let raw = fs::read_to_string(path).ok()?;
+    let mut in_desktop_entry = false;
+    let mut name = None;
+    let mut exec = None;
+    let mut is_application = false;
+    let mut supports_text = false;
+    let mut hidden = false;
+    let mut terminal = false;
+
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_desktop_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_desktop_entry || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "Type" => is_application = value == "Application",
+            "Name" => name = Some(value.to_string()),
+            "Exec" => exec = Some(value.to_string()),
+            "MimeType" => {
+                supports_text = value.split(';').any(is_text_document_type);
+            }
+            "Hidden" => hidden = value.eq_ignore_ascii_case("true"),
+            "Terminal" => terminal = value.eq_ignore_ascii_case("true"),
+            _ => {}
+        }
+    }
+
+    if !is_application || !supports_text || hidden || terminal {
+        return None;
+    }
+    let name = name.filter(|value| !value.trim().is_empty())?;
+    let (program, args) = parse_linux_desktop_exec(&exec?)?;
+    Some((name, program, args))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_desktop_exec(value: &str) -> Option<(OsString, Vec<OsString>)> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+
+    for character in value.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+        } else if character == '\\' && quoted {
+            escaped = true;
+        } else if character == '"' {
+            quoted = !quoted;
+        } else if character.is_whitespace() && !quoted {
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(character);
+        }
+    }
+    if escaped || quoted {
+        return None;
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    let program = OsString::from(parts.first()?.as_str());
+    let args = parts
+        .into_iter()
+        .skip(1)
+        .filter_map(|part| {
+            let part = ["%F", "%f", "%U", "%u", "%i", "%c", "%k"]
+                .iter()
+                .fold(part, |value, field_code| value.replace(*field_code, ""));
+            (!part.is_empty()).then_some(OsString::from(part))
+        })
+        .collect();
+    Some((program, args))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RevealCommandPlan {
     program: OsString,
@@ -301,6 +903,18 @@ fn reveal_path_impl(path: PathBuf) -> anyhow::Result<()> {
 fn open_path_with_default_app_impl(path: PathBuf) -> anyhow::Result<()> {
     if !path.exists() {
         anyhow::bail!("path does not exist: {}", path.display());
+    }
+
+    let selected_editor_id = AppConfig::load_or_create()?
+        .general
+        .default_file_open_target;
+    if let Some(selected_editor_id) = selected_editor_id {
+        if let Some(application) = detect_text_editor_applications()
+            .iter()
+            .find(|application| application.dto.id == selected_editor_id)
+        {
+            return launch_text_editor(application, &path);
+        }
     }
 
     let platform = reveal_platform();
@@ -674,9 +1288,11 @@ fn err_to_string(error: impl std::fmt::Display) -> String {
 mod tests {
     use std::{fs, path::PathBuf};
 
+    #[cfg(target_os = "windows")]
+    use super::extract_windows_launch_program;
     use super::{
-        build_open_command_plan, build_reveal_command_plan, resolve_target_path_for_repo_lookup,
-        RevealPlatform,
+        build_open_command_plan, build_reveal_command_plan, is_text_document_type,
+        resolve_target_path_for_repo_lookup, RevealPlatform,
     };
     use uuid::Uuid;
 
@@ -692,6 +1308,30 @@ mod tests {
         let result = f(dir.clone(), file.clone());
         let _ = fs::remove_dir_all(&root);
         result
+    }
+
+    #[test]
+    fn identifies_registered_plain_text_document_types() {
+        assert!(is_text_document_type(".txt"));
+        assert!(is_text_document_type("text/plain"));
+        assert!(is_text_document_type("text/markdown"));
+        assert!(is_text_document_type("public.source-code"));
+        assert!(!is_text_document_type("image/png"));
+        assert!(!is_text_document_type("application/pdf"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn extracts_the_executable_from_a_registered_windows_open_command() {
+        let program = extract_windows_launch_program(
+            r#""C:\\Program Files\\Example Editor\\editor.exe" --reuse-window "%1""#,
+        )
+        .expect("registered command should contain an executable");
+
+        assert_eq!(
+            program,
+            PathBuf::from(r#"C:\\Program Files\\Example Editor\\editor.exe"#)
+        );
     }
 
     #[test]

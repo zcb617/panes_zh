@@ -12393,6 +12393,41 @@ button.chat-context-section:hover {
   overflow: hidden;
 }
 
+.confirm-dialog-btn-primary {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--on-accent);
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.confirm-dialog-btn-primary:hover {
+  filter: brightness(1.08);
+}
+
+.confirm-dialog-btn-primary:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 2px;
+}
+
+.usp-section-header-action {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.usp-section-header-action > div {
+  min-width: 0;
+}
+
 .usp-row {
   width: 100%;
   min-height: 64px;

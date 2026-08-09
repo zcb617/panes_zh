@@ -12,6 +12,7 @@ interface Props {
   onConfirm: () => void;
   onCancel: () => void;
   onDismiss?: () => void;
+  confirmVariant?: "danger" | "primary";
 }
 
 export function ConfirmDialog({
@@ -23,6 +24,7 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
   onDismiss,
+  confirmVariant = "danger",
 }: Props) {
   const { t } = useTranslation("common");
   const confirmRef = useRef<HTMLButtonElement>(null);
@@ -73,7 +75,9 @@ export function ConfirmDialog({
           <button
             ref={confirmRef}
             type="button"
-            className="confirm-dialog-btn-danger"
+            className={confirmVariant === "primary"
+              ? "confirm-dialog-btn-primary"
+              : "confirm-dialog-btn-danger"}
             onClick={onConfirm}
           >
             {resolvedConfirmLabel}

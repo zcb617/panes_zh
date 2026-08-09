@@ -753,6 +753,12 @@ function buildPermissionHandler({
       return permission;
     }
 
+    // Panes 自己的电脑操作代理会在每次真实 CUA 调用时弹出独立授权窗口；
+    // 这里直接放行到代理，避免 Claude 的通用工具审批再弹一次。
+    if (toolName.startsWith("mcp__panes-computer-control__")) {
+      return { behavior: "allow" };
+    }
+
     if (toolName === "Write" || toolName === "Edit") {
       if (sandboxMode === "read-only") {
         const permission = {
@@ -1364,6 +1370,27 @@ async function handleQuery(req) {
     ...(allowNetwork ? ["WebFetch"] : []),
   ];
 
+  let panesComputerControlServer = null;
+  const panesComputerControlConfigPath =
+    process.env.PANES_COMPUTER_CONTROL_CONFIG?.trim();
+  if (panesComputerControlConfigPath) {
+    try {
+      const panesComputerControlConfig = JSON.parse(
+        await readFile(panesComputerControlConfigPath, "utf8"),
+      );
+      if (
+        panesComputerControlConfig?.enabled === true &&
+        panesComputerControlConfig?.server &&
+        typeof panesComputerControlConfig.server.command === "string"
+      ) {
+        panesComputerControlServer = panesComputerControlConfig.server;
+        toolList.push("mcp__panes-computer-control__*");
+      }
+    } catch {
+      // Computer control is optional. A missing or invalid Panes-owned file fails closed.
+    }
+  }
+
   const sessionCwd = cwd || process.cwd();
   let actualSessionId = null;
   try {
@@ -1379,6 +1406,13 @@ async function handleQuery(req) {
       ),
       permissionMode: planMode ? "plan" : "default",
       allowedTools: toolList,
+      ...(panesComputerControlServer
+        ? {
+            mcpServers: {
+              "panes-computer-control": panesComputerControlServer,
+            },
+          }
+        : {}),
       canUseTool: buildPermissionHandler({
         context,
         cwd: sessionCwd,

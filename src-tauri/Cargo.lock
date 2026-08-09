@@ -19,6 +19,7 @@ dependencies = [
  "libc",
  "log",
  "notify",
+ "plist",
  "portable-pty",
  "reqwest 0.12.28",
  "rusqlite",
@@ -43,6 +44,7 @@ dependencies = [
  "webview2-com",
  "which",
  "windows",
+ "winreg 0.55.0",
 ]
 
 [[package]]

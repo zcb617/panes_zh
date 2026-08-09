@@ -5,6 +5,8 @@ import type { AddressInfo } from "node:net";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 
 type SidecarEvent = Record<string, unknown>;
 
@@ -384,6 +386,105 @@ describe("claude-agent-sdk-server sidecar", () => {
         disableBypassPermissionsMode: "disable",
       },
     });
+  });
+
+  it("injects the Panes-managed computer control server into new Claude queries", async () => {
+    const tempDirectory = await mkdtemp(path.join(tmpdir(), "panes-computer-control-"));
+    const configPath = path.join(tempDirectory, "claude-runtime.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        enabled: true,
+        server: {
+          command: "C:\\Tools\\cua-driver.exe",
+          args: ["mcp"],
+          env: {
+            CUA_DRIVER_PERMISSION_MODE: "bounded",
+            CUA_DRIVER_SESSION_POLICY_APPROVED: "1",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    try {
+      const harness = await spawnHarness(
+        {
+          steps: [],
+          emitObservationResult: true,
+          emitQueryOptions: true,
+          sessionId: "session-computer-control",
+        },
+        { PANES_COMPUTER_CONTROL_CONFIG: configPath },
+      );
+
+      harness.send({
+        id: "query-computer-control",
+        method: "query",
+        params: {
+          prompt: "inspect computer control options",
+          cwd: repoRoot,
+        },
+      });
+
+      await harness.waitFor(
+        (event) =>
+          event.id === "query-computer-control" && event.type === "turn_completed",
+      );
+
+      const observations = parseObservationResults(harness, "query-computer-control");
+      expect(observations).toHaveLength(1);
+      expect(observations[0]?.result.allowedTools).toContain(
+        "mcp__panes-computer-control__*",
+      );
+      expect(observations[0]?.result.mcpServers).toEqual({
+        "panes-computer-control": {
+          command: "C:\\Tools\\cua-driver.exe",
+          args: ["mcp"],
+          env: {
+            CUA_DRIVER_PERMISSION_MODE: "bounded",
+            CUA_DRIVER_SESSION_POLICY_APPROVED: "1",
+          },
+        },
+      });
+    } finally {
+      await rm(tempDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("delegates computer control approval to the Panes runtime broker", async () => {
+    const harness = await spawnHarness({
+      steps: [
+        {
+          type: "permission",
+          toolName: "mcp__panes-computer-control__click",
+          input: { pid: 1234, x: 10, y: 20 },
+        },
+      ],
+      emitObservationResult: true,
+    });
+
+    harness.send({
+      id: "query-computer-control-permission",
+      method: "query",
+      params: {
+        prompt: "use computer control",
+        cwd: repoRoot,
+        approvalPolicy: "on-request",
+      },
+    });
+
+    await harness.waitFor(
+      (event) =>
+        event.id === "query-computer-control-permission" && event.type === "turn_completed",
+    );
+
+    const observations = parseObservationResults(
+      harness,
+      "query-computer-control-permission",
+    );
+    expect(observations).toHaveLength(1);
+    expect(observations[0]?.result.behavior).toBe("allow");
   });
 
   it("rejects danger-full-access explicitly for Claude", async () => {

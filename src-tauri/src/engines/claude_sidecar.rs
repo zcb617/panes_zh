@@ -292,6 +292,12 @@ impl ClaudeTransport {
         } else {
             log::info!("claude sidecar: system Claude Code not found, using bundled runtime");
         }
+        command.env(
+            "PANES_COMPUTER_CONTROL_CONFIG",
+            runtime_env::app_data_dir()
+                .join("computer-control")
+                .join("claude-runtime.json"),
+        );
         let mut child = command
             .arg(&sidecar_path)
             .current_dir(&sidecar_dir)

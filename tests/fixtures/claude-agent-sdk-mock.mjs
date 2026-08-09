@@ -53,6 +53,8 @@ export function query({ options }) {
         result: clone({
           permissionMode: options?.permissionMode,
           settings: options?.settings,
+          allowedTools: options?.allowedTools,
+          mcpServers: options?.mcpServers,
         }),
       });
     }

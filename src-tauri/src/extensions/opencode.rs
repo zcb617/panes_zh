@@ -171,6 +171,9 @@ fn parse_config(value: &Value) -> Vec<ExtensionItemDto> {
 
     if let Some(servers) = value.get("mcp").and_then(Value::as_object) {
         for (name, config) in servers {
+            if name == "panes-computer-control" {
+                continue;
+            }
             let enabled = config
                 .get("enabled")
                 .and_then(Value::as_bool)
@@ -186,6 +189,9 @@ fn merge_runtime_mcp(
     runtime: OpenCodeRuntimeCatalogDto,
 ) {
     for server in runtime.mcp_servers {
+        if server.name == "panes-computer-control" {
+            continue;
+        }
         let key = format!("mcp:{}", server.name);
         let health = normalize_runtime_health(&server.status);
         if let Some(item) = items.get_mut(&key) {
@@ -313,9 +319,13 @@ mod tests {
     fn local_config_is_not_promoted_to_official_catalog() {
         let items = parse_config(&json!({
             "plugin": ["example@1.0.0"],
-            "mcp": {"local": {}}
+            "mcp": {
+                "local": {},
+                "panes-computer-control": {"type": "local"}
+            }
         }));
         assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.id != "panes-computer-control"));
         assert!(items.iter().all(|item| !item.officially_available));
     }
 

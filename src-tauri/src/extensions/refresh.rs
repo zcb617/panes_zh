@@ -581,6 +581,9 @@ mod tests {
             file_tree_cache: Arc::new(FileTreeCache::new()),
             extension_catalog_refreshes: Arc::new(ExtensionCatalogRefreshManager::default()),
             scheduled_tasks: Arc::new(crate::scheduled_tasks::ScheduledTaskManager::new()),
+            computer_control_approvals: Arc::new(
+                crate::commands::computer_control::ComputerControlApprovalManager::default(),
+            ),
         }
     }
 

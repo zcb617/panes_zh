@@ -27,6 +27,7 @@ pub struct AppConfig {
     pub ui: UiConfig,
     pub debug: DebugConfig,
     pub power: PowerConfig,
+    pub computer_control: ComputerControlConfig,
     #[serde(skip_serializing_if = "HarnessesConfig::is_empty")]
     pub harnesses: HarnessesConfig,
 }
@@ -53,6 +54,10 @@ pub struct GeneralConfig {
     /// (`read-only` | `ask` | `auto` | `full`); `None` follows repo trust.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_autonomy_preset: Option<String>,
+    /// Stable ID of a system-discovered text editor used for external file
+    /// opening. `None` keeps the operating system's default application.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_file_open_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +91,13 @@ pub struct PowerConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ComputerControlConfig {
+    pub enabled: bool,
+    pub allowed_applications: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HarnessesConfig {
     /// Extra CLI flags appended to a harness command when it is launched into
     /// a terminal, keyed by harness id (e.g. `codex = "--yolo"`).
@@ -112,6 +124,7 @@ impl Default for GeneralConfig {
             terminal_notifications: None,
             notification_sound: None,
             default_autonomy_preset: None,
+            default_file_open_target: None,
         }
     }
 }
@@ -181,6 +194,7 @@ impl Default for AppConfig {
             ui: UiConfig::default(),
             debug: DebugConfig::default(),
             power: PowerConfig::default(),
+            computer_control: ComputerControlConfig::default(),
             harnesses: HarnessesConfig::default(),
         }
     }
@@ -404,6 +418,8 @@ max_action_output_chars = 20000
         assert_eq!(config.power.battery_threshold, None);
         assert_eq!(config.power.session_duration_secs, None);
         assert!(!config.power.prevent_closed_display_sleep);
+        assert!(!config.computer_control.enabled);
+        assert!(config.computer_control.allowed_applications.is_empty());
     }
 
     #[test]
@@ -416,6 +432,7 @@ max_action_output_chars = 20000
         assert!(!raw.contains("terminal_accelerated_rendering"));
         assert!(!raw.contains("terminal_notifications"));
         assert!(!raw.contains("terminal_font_size"));
+        assert!(!raw.contains("default_file_open_target"));
         assert!(!raw.contains("harnesses"));
     }
 

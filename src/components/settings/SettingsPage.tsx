@@ -70,6 +70,8 @@ import { PanesMark, PanesWordmark } from "../shared/PanesBrand";
 import { WorkspaceSettingsPage } from "../workspace/WorkspaceSettingsPage";
 import { UsageLimitsSettings } from "./UsageLimitsSettings";
 import type {
+  ComputerControlStatus,
+  DefaultFileOpenTarget,
   PowerSettingsInput,
   TerminalNotificationIntegrationId,
   TerminalNotificationIntegrationStatus,
@@ -234,6 +236,12 @@ export function SettingsPage() {
   const [powerDraft, setPowerDraft] = useState<PowerSettingsInput | null>(null);
   const [customHours, setCustomHours] = useState("");
   const [customMinutes, setCustomMinutes] = useState("");
+  const [computerControlStatus, setComputerControlStatus] = useState<ComputerControlStatus | null>(null);
+  const [computerControlLoading, setComputerControlLoading] = useState(false);
+  const [computerControlUpdating, setComputerControlUpdating] = useState(false);
+  const [fileOpenTarget, setFileOpenTarget] = useState<DefaultFileOpenTarget | null>(null);
+  const [fileOpenTargetLoading, setFileOpenTargetLoading] = useState(false);
+  const [fileOpenTargetUpdating, setFileOpenTargetUpdating] = useState(false);
 
   const activeLocale = normalizeAppLocale(i18n.language);
   const selectedWorkspace =
@@ -261,6 +269,25 @@ export function SettingsPage() {
   }, [loadNotifications, notificationLoaded, notificationLoading]);
 
   useEffect(() => {
+    if (section !== "overview") return;
+    let cancelled = false;
+    setFileOpenTargetLoading(true);
+    void ipc.getDefaultFileOpenTarget()
+      .then((target) => {
+        if (!cancelled) setFileOpenTarget(target);
+      })
+      .catch(() => {
+        if (!cancelled) toast.error(t("app:settingsPage.overview.fileOpenLoadFailed"));
+      })
+      .finally(() => {
+        if (!cancelled) setFileOpenTargetLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [section, t]);
+
+  useEffect(() => {
     if (section !== "power" || powerSettingsLoaded || powerSettingsLoading) return;
     void loadPowerSettings();
   }, [loadPowerSettings, powerSettingsLoaded, powerSettingsLoading, section]);
@@ -283,6 +310,29 @@ export function SettingsPage() {
       void loadHelperStatus();
     }
   }, [helperLoading, helperStatus, isMacOS, loadHelperStatus, section]);
+
+  useEffect(() => {
+    // 不能把加载状态和检测结果作为这个 effect 的触发条件：开始加载后会立刻执行清理，
+    // 导致当前请求被标记为已取消，页面永久停留在“检测中”。
+    // 原条件：section !== "computer-control" || computerControlStatus || computerControlLoading
+    if (section !== "computer-control") return;
+    let cancelled = false;
+    setComputerControlLoading(true);
+    void ipc.getComputerControlStatus()
+      .then((status) => {
+        if (!cancelled) setComputerControlStatus(status);
+      })
+      .catch(() => {
+        if (!cancelled) toast.error(t("app:settingsPage.computerControl.loadFailed"));
+      })
+      .finally(() => {
+        if (!cancelled) setComputerControlLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // 原依赖：[computerControlLoading, computerControlStatus, section, t]
+  }, [section, t]);
 
   useEffect(() => {
     let cancelled = false;
@@ -327,6 +377,7 @@ export function SettingsPage() {
       { id: "terminal" as const, icon: <TerminalSquare size={15} />, label: t("app:settingsPage.nav.terminal") },
       { id: "notifications" as const, icon: <BellRing size={15} />, label: t("app:settingsPage.nav.notifications") },
       { id: "usage" as const, icon: <Gauge size={15} />, label: t("app:settingsPage.nav.usage") },
+      { id: "computer-control" as const, icon: <MousePointer2 size={15} />, label: t("app:settingsPage.nav.computer-control") },
       { id: "power" as const, icon: <Zap size={15} />, label: t("app:settingsPage.nav.power") },
       { id: "about" as const, icon: <BadgeInfo size={15} />, label: t("app:settingsPage.nav.about") },
       { id: "workspace-general" as const, icon: <FolderGit2 size={15} />, label: t("workspace:nav.general") },
@@ -501,6 +552,50 @@ export function SettingsPage() {
     await savePowerSettings(powerDraft);
   }
 
+  async function saveComputerControl(enabled: boolean, allowedApplications: string[]) {
+    if (computerControlUpdating) return;
+    setComputerControlUpdating(true);
+    try {
+      const status = await ipc.setComputerControl(enabled, allowedApplications);
+      setComputerControlStatus(status);
+      if (status.warnings.length > 0) {
+        toast.warning(status.warnings.join("\n"));
+      } else {
+        toast.success(t(enabled
+          ? "app:settingsPage.computerControl.enabledToast"
+          : "app:settingsPage.computerControl.savedToast"));
+      }
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setComputerControlUpdating(false);
+    }
+  }
+
+  async function changeDefaultFileOpenTarget(value: string) {
+    if (fileOpenTargetUpdating) return;
+    setFileOpenTargetUpdating(true);
+    try {
+      const selectedEditorId = await ipc.setDefaultFileOpenTarget(
+        value === "system-default" ? null : value,
+      );
+      setFileOpenTarget((current) => current
+        ? { ...current, selectedEditorId }
+        : current);
+      toast.success(t("app:settingsPage.overview.fileOpenSaved"));
+    } catch {
+      toast.error(t("app:settingsPage.overview.fileOpenSaveFailed"));
+      try {
+        const target = await ipc.getDefaultFileOpenTarget();
+        setFileOpenTarget(target);
+      } catch {
+        // 保留当前选择，避免二次请求失败时把用户刚才看到的状态清空。
+      }
+    } finally {
+      setFileOpenTargetUpdating(false);
+    }
+  }
+
   function renderIntegration(
     id: TerminalNotificationIntegrationId,
     status: TerminalNotificationIntegrationStatus | undefined,
@@ -650,6 +745,44 @@ export function SettingsPage() {
                   </button>
                 </div>
               ) : null}
+
+              <section className="usp-section">
+                <div className="usp-section-header">
+                  <h2>{t("app:settingsPage.overview.fileOpen")}</h2>
+                  <p>{t("app:settingsPage.overview.fileOpenDescription")}</p>
+                </div>
+                <div className="usp-group">
+                  <SettingsRow
+                    icon={<SquareCode size={17} />}
+                    title={t("app:settingsPage.overview.defaultFileOpenTarget")}
+                    description={fileOpenTarget?.applications.length === 0
+                      ? t("app:settingsPage.overview.fileOpenNoApplications")
+                      : t("app:settingsPage.overview.defaultFileOpenTargetDescription")}
+                  >
+                    <Dropdown
+                      value={fileOpenTarget?.selectedEditorId ?? "system-default"}
+                      options={[
+                        {
+                          value: "system-default",
+                          label: t("app:settingsPage.overview.systemDefaultApplication"),
+                          icon: <Monitor size={13} />,
+                        },
+                        ...(fileOpenTarget?.applications.map((application) => ({
+                          value: application.id,
+                          label: application.name,
+                          icon: <SquareCode size={13} />,
+                        })) ?? []),
+                      ]}
+                      onChange={(value) => void changeDefaultFileOpenTarget(value)}
+                      disabled={fileOpenTargetLoading || fileOpenTargetUpdating}
+                      selectedLabel={fileOpenTargetLoading
+                        ? t("app:settingsPage.overview.fileOpenDetecting")
+                        : undefined}
+                      triggerStyle={{ minWidth: 220, height: 32 }}
+                    />
+                  </SettingsRow>
+                </div>
+              </section>
 
               <section className="usp-section">
                 <div className="usp-section-header">
@@ -967,6 +1100,193 @@ export function SettingsPage() {
           ) : null}
 
           {section === "usage" ? <UsageLimitsSettings /> : null}
+
+          {section === "computer-control" ? (
+            <>
+              <section className="usp-section usp-section-first">
+                <div className="usp-section-header">
+                  <h2>{t("app:settingsPage.computerControl.controlTitle")}</h2>
+                  <p>{t("app:settingsPage.computerControl.controlDescription")}</p>
+                </div>
+                <div className="usp-group">
+                  <SettingsRow
+                    icon={<MousePointer2 size={17} />}
+                    title={t("app:settingsPage.computerControl.switchTitle")}
+                    description={t("app:settingsPage.computerControl.switchDescription")}
+                  >
+                    <Toggle
+                      checked={computerControlStatus?.enabled ?? false}
+                      disabled={
+                        computerControlLoading
+                        || computerControlUpdating
+                        || computerControlStatus?.supported === false
+                        || (!computerControlStatus?.enabled && !computerControlStatus?.driver.installed)
+                      }
+                      label={t("app:settingsPage.computerControl.switchTitle")}
+                      onChange={(enabled) => {
+                        /*
+                        旧实现要求先添加至少一个 .exe；运行时授权模式不再使用静态列表。
+                        if (enabled && (computerControlStatus?.allowedApplications.length ?? 0) === 0) {
+                          toast.warning(t("app:settingsPage.computerControl.selectFirst"));
+                          return;
+                        }
+                        void saveComputerControl(enabled, computerControlStatus?.allowedApplications ?? []);
+                        */
+                        void saveComputerControl(enabled, []);
+                      }}
+                    />
+                  </SettingsRow>
+                  <SettingsRow
+                    icon={computerControlStatus?.driver.installed
+                      ? <CheckCircle2 size={17} />
+                      : <AlertCircle size={17} />}
+                    title={t("app:settingsPage.computerControl.driverTitle")}
+                    description={computerControlStatus?.driver.installed
+                      ? t("app:settingsPage.computerControl.driverReady", {
+                          version: computerControlStatus.driver.version ?? t("app:settingsPage.computerControl.unknownVersion"),
+                        })
+                      : t("app:settingsPage.computerControl.driverMissing")}
+                  >
+                    <span className={`usp-status${computerControlStatus?.driver.installed ? " usp-status-ready" : ""}`}>
+                      {computerControlLoading
+                        ? t("app:settingsPage.computerControl.detecting")
+                        : computerControlStatus?.driver.installed
+                          ? t("app:settingsPage.computerControl.ready")
+                          : t("app:settingsPage.computerControl.unavailable")}
+                    </span>
+                  </SettingsRow>
+                </div>
+              </section>
+
+              {/*
+              旧的预选 .exe 白名单界面保留为历史参考，不再渲染。目标应用改为在智能体
+              真正调用电脑操作时，由 Panes 根据工具参数和目标进程动态识别并申请授权。
+              <section className="usp-section">
+                <div className="usp-section-header usp-section-header-action">
+                  <div>
+                    <h2>{t("app:settingsPage.computerControl.applicationsTitle")}</h2>
+                    <p>{t("app:settingsPage.computerControl.applicationsDescription")}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="usp-button"
+                    disabled={computerControlLoading || computerControlUpdating}
+                    onClick={() => {
+                      void import("@tauri-apps/plugin-dialog").then(async ({ open }) => {
+                        const selected = await open({
+                          multiple: true,
+                          directory: false,
+                          filters: [{ name: t("app:settingsPage.computerControl.applicationFilter"), extensions: ["exe"] }],
+                        });
+                        const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+                        if (paths.length === 0) return;
+                        const existing = computerControlStatus?.allowedApplications ?? [];
+                        const next = [...existing];
+                        for (const path of paths) {
+                          if (!next.some((current) => current.toLocaleLowerCase() === path.toLocaleLowerCase())) {
+                            next.push(path);
+                          }
+                        }
+                        await saveComputerControl(computerControlStatus?.enabled ?? false, next);
+                      }).catch((error) => toast.error(String(error)));
+                    }}
+                  >
+                    <Plus size={13} />
+                    {t("app:settingsPage.computerControl.addApplication")}
+                  </button>
+                </div>
+                <div className="usp-group">
+                  {(computerControlStatus?.allowedApplications.length ?? 0) > 0 ? (
+                    computerControlStatus?.allowedApplications.map((path) => (
+                      <SettingsRow
+                        key={path}
+                        icon={<SquareCode size={17} />}
+                        title={path.split(/[\\/]/).pop() || path}
+                        description={path}
+                      >
+                        <button
+                          type="button"
+                          className="usp-icon-button"
+                          disabled={
+                            computerControlUpdating
+                            || (computerControlStatus.enabled && computerControlStatus.allowedApplications.length === 1)
+                          }
+                          title={t(
+                            computerControlStatus.enabled && computerControlStatus.allowedApplications.length === 1
+                              ? "app:settingsPage.computerControl.keepOneWhileEnabled"
+                              : "app:settingsPage.computerControl.removeApplication",
+                          )}
+                          aria-label={t("app:settingsPage.computerControl.removeApplication")}
+                          onClick={() => void saveComputerControl(
+                            computerControlStatus.enabled,
+                            computerControlStatus.allowedApplications.filter((current) => current !== path),
+                          )}
+                        >
+                          <Minus size={13} />
+                        </button>
+                      </SettingsRow>
+                    ))
+                  ) : (
+                    <SettingsRow
+                      icon={<LockKeyhole size={17} />}
+                      title={t("app:settingsPage.computerControl.noApplicationsTitle")}
+                      description={t("app:settingsPage.computerControl.noApplicationsDescription")}
+                    />
+                  )}
+                </div>
+              </section>
+              */}
+
+              <section className="usp-section">
+                <div className="usp-section-header">
+                  <h2>{t("app:settingsPage.computerControl.applicationsTitle")}</h2>
+                  <p>{t("app:settingsPage.computerControl.applicationsDescription")}</p>
+                </div>
+                <div className="usp-group">
+                  <SettingsRow
+                    icon={<LockKeyhole size={17} />}
+                    title={t("app:settingsPage.computerControl.noApplicationsTitle")}
+                    description={t("app:settingsPage.computerControl.noApplicationsDescription")}
+                  />
+                </div>
+              </section>
+
+              <section className="usp-section">
+                <div className="usp-section-header">
+                  <h2>{t("app:settingsPage.computerControl.agentsTitle")}</h2>
+                  <p>{t("app:settingsPage.computerControl.agentsDescription")}</p>
+                </div>
+                <div className="usp-group">
+                  {(computerControlStatus?.agents ?? []).map((agent) => (
+                    <SettingsRow
+                      key={agent.id}
+                      icon={getHarnessIcon(agent.id === "claude" ? "claude-code" : agent.id, 16)}
+                      title={agent.name}
+                      description={agent.installed
+                        ? t("app:settingsPage.computerControl.agentInstalled")
+                        : t("app:settingsPage.computerControl.agentMissing")}
+                    >
+                      <span className={`usp-status${agent.configured ? " usp-status-ready" : ""}`}>
+                        {agent.configured
+                          ? t("app:settingsPage.computerControl.agentReady")
+                          : agent.installed
+                            ? t("app:settingsPage.computerControl.agentNotEnabled")
+                            : t("app:settingsPage.computerControl.unavailable")}
+                      </span>
+                    </SettingsRow>
+                  ))}
+                </div>
+              </section>
+
+              <div className="usp-notice">
+                <LockKeyhole size={17} />
+                <div>
+                  <strong>{t("app:settingsPage.computerControl.securityTitle")}</strong>
+                  <span>{t("app:settingsPage.computerControl.securityDescription")}</span>
+                </div>
+              </div>
+            </>
+          ) : null}
 
           {section === "power" ? (
             <>

@@ -168,6 +168,45 @@ export interface Thread {
   lastActivityAt: string;
 }
 
+export interface ComputerControlDriverStatus {
+  installed: boolean;
+  path?: string | null;
+  version?: string | null;
+}
+
+export interface ComputerControlAgentStatus {
+  id: "codex" | "claude" | "opencode";
+  name: string;
+  installed: boolean;
+  configured: boolean;
+}
+
+export interface ComputerControlStatus {
+  supported: boolean;
+  enabled: boolean;
+  allowedApplications: string[];
+  driver: ComputerControlDriverStatus;
+  agents: ComputerControlAgentStatus[];
+  warnings: string[];
+}
+
+export interface TextEditorApplication {
+  id: string;
+  name: string;
+}
+
+export interface DefaultFileOpenTarget {
+  selectedEditorId: string | null;
+  applications: TextEditorApplication[];
+}
+
+export interface ComputerControlApprovalRequest {
+  requestId: string;
+  agent: "codex" | "claude" | "opencode" | string;
+  tool: string;
+  application: string;
+}
+
 export type ScheduledTaskTargetType = "existing_thread" | "new_thread";
 export type ScheduledTaskScheduleType = "interval" | "daily" | "weekly";
 export type ScheduledTaskRunStatus =

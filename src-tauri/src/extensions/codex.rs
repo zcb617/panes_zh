@@ -581,6 +581,9 @@ fn parse_mcp_servers(
         .flatten()
         .filter_map(|server| {
             let name = string_field(server, "name")?;
+            if name == "panes-computer-control" {
+                return None;
+            }
             let enabled = bool_field(server, "enabled").unwrap_or(true);
             let auth_status = string_field(server, "auth_status")
                 .or_else(|| string_field(server, "authStatus"))
@@ -754,7 +757,23 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{collect_remote_installed_plugins, parse_plugins, remote_plugin_skills};
+    use super::{
+        collect_remote_installed_plugins, parse_mcp_servers, parse_plugins, remote_plugin_skills,
+    };
+
+    #[test]
+    fn panes_computer_control_is_hidden_from_the_extension_catalog() {
+        let items = parse_mcp_servers(
+            &json!([
+                { "name": "panes-computer-control", "enabled": true },
+                { "name": "user-server", "enabled": true }
+            ]),
+            None,
+        );
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "user-server");
+    }
 
     #[test]
     fn official_available_and_all_installed_plugins_are_preserved() {

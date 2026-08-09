@@ -14,6 +14,8 @@ import type {
   ChatEngineId,
   ChatInputItem,
   ChatProviderUsage,
+  ComputerControlStatus,
+  ComputerControlApprovalRequest,
   CodexApprovalsReviewer,
   CodexReviewDelivery,
   CodexReviewTarget,
@@ -41,6 +43,7 @@ import type {
   ExtensionItem,
   ExtensionKind,
   ExtensionProviderId,
+  DefaultFileOpenTarget,
   FileTreeEntry,
   FileTreePage,
   GitDiffPreview,
@@ -97,6 +100,12 @@ export const ipc = {
   setAppLocale: (locale: AppLocale) => invoke<AppLocale>("set_app_locale", { locale }),
   getAppTheme: () => invoke<ThemePreference>("get_app_theme"),
   setAppTheme: (theme: ThemePreference) => invoke<ThemePreference>("set_app_theme", { theme }),
+  getComputerControlStatus: () =>
+    invoke<ComputerControlStatus>("get_computer_control_status"),
+  setComputerControl: (enabled: boolean, allowedApplications: string[]) =>
+    invoke<ComputerControlStatus>("set_computer_control", { enabled, allowedApplications }),
+  respondComputerControlApproval: (requestId: string, allowed: boolean) =>
+    invoke<void>("respond_computer_control_approval", { requestId, allowed }),
   getKeepAwakeState: () => invoke<KeepAwakeState>("get_keep_awake_state"),
   setKeepAwakeEnabled: (enabled: boolean) =>
     invoke<KeepAwakeState>("set_keep_awake_enabled", { enabled }),
@@ -562,6 +571,10 @@ export const ipc = {
   revealPath: (path: string) => invoke<void>("reveal_path", { path }),
   openPathWithDefaultApp: (path: string) =>
     invoke<void>("open_path_with_default_app", { path }),
+  getDefaultFileOpenTarget: () =>
+    invoke<DefaultFileOpenTarget>("get_default_file_open_target"),
+  setDefaultFileOpenTarget: (editorId: string | null) =>
+    invoke<string | null>("set_default_file_open_target", { editorId }),
   discardFiles: (repoPath: string, files: string[]) =>
     invoke<void>("discard_files", { repoPath, files }),
   commit: (repoPath: string, message: string) => invoke<string>("commit", { repoPath, message }),
@@ -849,6 +862,15 @@ export async function listenChatApprovalRequested(
   return listen<ChatApprovalRequestedEvent>(
     "chat-approval-requested",
     ({ payload }) => onEvent(payload)
+  );
+}
+
+export async function listenComputerControlApprovalRequested(
+  onEvent: (event: ComputerControlApprovalRequest) => void,
+): Promise<UnlistenFn> {
+  return listen<ComputerControlApprovalRequest>(
+    "computer-control-approval-requested",
+    ({ payload }) => onEvent(payload),
   );
 }
 

@@ -56,6 +56,9 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use terminal::TerminalManager;
 
 pub fn maybe_handle_cli_subcommand() -> anyhow::Result<bool> {
+    if commands::computer_control::maybe_handle_cli_subcommand()? {
+        return Ok(true);
+    }
     terminal_notifications::maybe_handle_cli_subcommand()
 }
 
@@ -109,6 +112,9 @@ pub fn run() {
         file_tree_cache: Arc::new(FileTreeCache::new()),
         extension_catalog_refreshes: Arc::new(ExtensionCatalogRefreshManager::default()),
         scheduled_tasks: Arc::new(ScheduledTaskManager::new()),
+        computer_control_approvals: Arc::new(
+            commands::computer_control::ComputerControlApprovalManager::default(),
+        ),
     };
 
     let app = tauri::Builder::default()
@@ -161,6 +167,14 @@ pub fn run() {
             {
                 log::warn!("failed to start terminal notification ingress: {error}");
             }
+            if let Err(error) =
+                tauri::async_runtime::block_on(commands::computer_control::start_approval_broker(
+                    handle.clone(),
+                    state.computer_control_approvals.clone(),
+                ))
+            {
+                log::warn!("failed to start computer control approval broker: {error}");
+            }
             state.engines.set_resource_dir(resource_dir);
             tauri::async_runtime::spawn(run_codex_runtime_bridge(handle.clone(), state.clone()));
             spawn_catalog_refresh_scheduler(handle.clone(), state.clone());
@@ -187,6 +201,9 @@ pub fn run() {
             commands::app::set_app_locale,
             commands::app::get_app_theme,
             commands::app::set_app_theme,
+            commands::computer_control::get_computer_control_status,
+            commands::computer_control::set_computer_control,
+            commands::computer_control::respond_computer_control_approval,
             commands::power::get_keep_awake_state,
             commands::power::set_keep_awake_enabled,
             commands::power::get_power_settings,
@@ -301,6 +318,8 @@ pub fn run() {
             commands::files::delete_path,
             commands::files::reveal_path,
             commands::files::open_path_with_default_app,
+            commands::files::get_default_file_open_target,
+            commands::files::set_default_file_open_target,
             commands::git::watch_git_repo,
             commands::engines::list_engines,
             commands::engines::get_chat_provider_usage,
