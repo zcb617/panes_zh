@@ -19,9 +19,12 @@ export function getGitPanelLayoutState({
   activeWorkspaceId,
   showGitPanel,
 }: GitPanelLayoutInput): GitPanelLayoutState {
-  const settingsActive = activeView === "settings" || activeView === "scheduled";
-  const workspaceLayoutIntegrated = activeView === "chat" && activeWorkspaceId !== null;
-  const gitPanelDocked = showGitPanel && !settingsActive;
+  // The right-side Git/browser tools belong to the conversation workspace only.
+  // Standalone pages such as agents and extensions must not inherit a panel that
+  // was left open while viewing a conversation.
+  const toolPanelSupported = activeView === "chat";
+  const workspaceLayoutIntegrated = toolPanelSupported && activeWorkspaceId !== null;
+  const gitPanelDocked = showGitPanel && toolPanelSupported;
   const gitPanelDockedInWorkspace = gitPanelDocked && workspaceLayoutIntegrated;
 
   return {
@@ -29,6 +32,6 @@ export function getGitPanelLayoutState({
     gitPanelDocked,
     gitPanelDockedInWorkspace,
     showWorkspaceHeaderToggle: workspaceLayoutIntegrated,
-    showEdgeReveal: !showGitPanel && !settingsActive && !workspaceLayoutIntegrated,
+    showEdgeReveal: !showGitPanel && toolPanelSupported && !workspaceLayoutIntegrated,
   };
 }

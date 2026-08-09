@@ -75,4 +75,23 @@ describe("getGitPanelLayoutState", () => {
       showEdgeReveal: false,
     });
   });
+
+  it.each(["harnesses", "extensions"] as const)(
+    "does not render conversation tools on %s",
+    (activeView) => {
+      expect(
+        getGitPanelLayoutState({
+          activeView,
+          activeWorkspaceId: "workspace-1",
+          showGitPanel: true,
+        }),
+      ).toEqual({
+        workspaceLayoutIntegrated: false,
+        gitPanelDocked: false,
+        gitPanelDockedInWorkspace: false,
+        showWorkspaceHeaderToggle: false,
+        showEdgeReveal: false,
+      });
+    },
+  );
 });
