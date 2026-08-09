@@ -60,4 +60,19 @@ describe("getGitPanelLayoutState", () => {
       showEdgeReveal: false,
     });
   });
+
+  it("does not render Git controls on scheduled tasks", () => {
+    expect(
+      getGitPanelLayoutState({
+        activeView: "scheduled",
+        activeWorkspaceId: "workspace-1",
+        showGitPanel: true,
+      }),
+    ).toMatchObject({
+      workspaceLayoutIntegrated: false,
+      gitPanelDocked: false,
+      showWorkspaceHeaderToggle: false,
+      showEdgeReveal: false,
+    });
+  });
 });

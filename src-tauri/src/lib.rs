@@ -14,6 +14,7 @@ mod path_utils;
 mod power;
 mod process_utils;
 mod runtime_env;
+mod scheduled_tasks;
 mod state;
 mod terminal;
 mod terminal_notifications;
@@ -32,13 +33,19 @@ use git::repo::FileTreeCache;
 use git::watcher::GitWatcherManager;
 #[cfg(target_os = "macos")]
 use locale::native_strings;
-use locale::resolve_app_locale;
+use locale::{resolve_app_locale, tray_menu_strings};
 use models::{EngineRuntimeUpdatedDto, ThreadDto, ThreadStatusDto};
 use power::KeepAwakeManager;
+use scheduled_tasks::ScheduledTaskManager;
 use state::{AppState, TurnManager};
 #[cfg(target_os = "macos")]
-use tauri::menu::{AboutMetadata, MenuItem, PredefinedMenuItem, SubmenuBuilder};
-use tauri::{image::Image, menu::Menu, Emitter, Manager, RunEvent, WebviewWindowBuilder};
+use tauri::menu::{AboutMetadata, PredefinedMenuItem, SubmenuBuilder};
+use tauri::{
+    image::Image,
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, RunEvent, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
 use terminal::TerminalManager;
 
 pub fn maybe_handle_cli_subcommand() -> anyhow::Result<bool> {
@@ -94,6 +101,7 @@ pub fn run() {
         turns: Arc::new(TurnManager::default()),
         file_tree_cache: Arc::new(FileTreeCache::new()),
         extension_catalog_refreshes: Arc::new(ExtensionCatalogRefreshManager::default()),
+        scheduled_tasks: Arc::new(ScheduledTaskManager::new()),
     };
 
     let app = tauri::Builder::default()
@@ -106,28 +114,11 @@ pub fn run() {
         .manage(app_state)
         .menu(move |handle| build_app_menu(handle, app_locale))
         .setup(|app| {
-            let main_window_config = app
-                .config()
-                .app
-                .windows
-                .iter()
-                .find(|window| window.label == "main")
-                .or_else(|| app.config().app.windows.first())
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("main window config not found"))?;
-
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            let main_window_config = {
-                let mut main_window_config = main_window_config;
-                main_window_config.decorations = false;
-                main_window_config
-            };
-
-            let main_window = WebviewWindowBuilder::from_config(app.handle(), &main_window_config)?
-                .enable_clipboard_access()
-                .build()?;
+            let main_window = create_main_window(app.handle())?;
             #[cfg(not(target_os = "linux"))]
             let _ = &main_window;
+
+            build_system_tray(app, app_locale, main_window.clone())?;
 
             #[cfg(target_os = "linux")]
             {
@@ -166,6 +157,10 @@ pub fn run() {
             state.engines.set_resource_dir(resource_dir);
             tauri::async_runtime::spawn(run_codex_runtime_bridge(handle.clone(), state.clone()));
             spawn_catalog_refresh_scheduler(handle.clone(), state.clone());
+            state
+                .scheduled_tasks
+                .clone()
+                .start(handle.clone(), state.clone());
             app.on_menu_event(move |_app, event| {
                 let id = event.id().as_ref();
                 match id {
@@ -209,6 +204,12 @@ pub fn run() {
             commands::chat::start_codex_review,
             commands::chat::steer_message,
             commands::chat::cancel_turn,
+            commands::scheduled_tasks::list_scheduled_tasks,
+            commands::scheduled_tasks::create_scheduled_task,
+            commands::scheduled_tasks::update_scheduled_task,
+            commands::scheduled_tasks::set_scheduled_task_enabled,
+            commands::scheduled_tasks::acknowledge_scheduled_task,
+            commands::scheduled_tasks::delete_scheduled_task,
             commands::chat::respond_to_approval,
             commands::chat::get_thread_messages,
             commands::chat::get_thread_messages_window,
@@ -366,6 +367,96 @@ pub fn run() {
         }
         _ => {}
     });
+}
+
+fn create_main_window(app: &tauri::AppHandle) -> anyhow::Result<WebviewWindow> {
+    let main_window_config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .or_else(|| app.config().app.windows.first())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("main window config not found"))?;
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let main_window_config = {
+        let mut main_window_config = main_window_config;
+        main_window_config.decorations = false;
+        main_window_config
+    };
+
+    let main_window = WebviewWindowBuilder::from_config(app, &main_window_config)?
+        .enable_clipboard_access()
+        .build()?;
+
+    let close_window = main_window.clone();
+    main_window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            if let Err(error) = close_window.hide() {
+                log::warn!("failed to hide main window on close: {error}");
+            }
+        }
+    });
+
+    Ok(main_window)
+}
+
+fn build_system_tray(
+    app: &tauri::App,
+    locale: &str,
+    main_window: WebviewWindow,
+) -> tauri::Result<()> {
+    let (open_label, quit_label) = tray_menu_strings(locale);
+    let open_item = MenuItem::with_id(app, "tray-open", open_label, true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "tray-quit", quit_label, true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+    let menu_window = main_window.clone();
+    let tray_click_window = main_window;
+
+    let mut builder = TrayIconBuilder::new()
+        .tooltip("Panes")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(move |app, event| match event.id().as_ref() {
+            "tray-open" => show_main_window(&menu_window),
+            "tray-quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(move |_tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }
+            | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => {
+                show_main_window(&tray_click_window);
+            }
+            _ => {}
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
+}
+
+fn show_main_window(window: &WebviewWindow) {
+    if let Err(error) = window.show() {
+        log::error!("failed to show main window from tray: {error}");
+        return;
+    }
+    if let Err(error) = window.unminimize() {
+        log::warn!("failed to restore main window from tray: {error}");
+    }
+    if let Err(error) = window.set_focus() {
+        log::warn!("failed to focus main window from tray: {error}");
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

@@ -79,8 +79,20 @@ import type {
   WorkspaceGitSelectionStatus,
   Workspace
 } from "../types";
+import type { ScheduledTask, ScheduledTaskInput } from "../types";
 
 export const ipc = {
+  listScheduledTasks: () => invoke<ScheduledTask[]>("list_scheduled_tasks"),
+  createScheduledTask: (input: ScheduledTaskInput) =>
+    invoke<ScheduledTask>("create_scheduled_task", { input }),
+  updateScheduledTask: (taskId: string, input: ScheduledTaskInput) =>
+    invoke<ScheduledTask>("update_scheduled_task", { taskId, input }),
+  setScheduledTaskEnabled: (taskId: string, enabled: boolean) =>
+    invoke<ScheduledTask>("set_scheduled_task_enabled", { taskId, enabled }),
+  acknowledgeScheduledTask: (taskId: string) =>
+    invoke<ScheduledTask>("acknowledge_scheduled_task", { taskId }),
+  deleteScheduledTask: (taskId: string) =>
+    invoke<void>("delete_scheduled_task", { taskId }),
   getAppLocale: () => invoke<AppLocale>("get_app_locale"),
   setAppLocale: (locale: AppLocale) => invoke<AppLocale>("set_app_locale", { locale }),
   getAppTheme: () => invoke<ThemePreference>("get_app_theme"),
@@ -779,6 +791,28 @@ export async function listenExtensionCatalogUpdated(
 ): Promise<UnlistenFn> {
   return listen<ExtensionCatalogUpdatedEvent>(
     "extension-catalog-updated",
+    ({ payload }) => onEvent(payload),
+  );
+}
+
+export interface ScheduledTaskChangedEvent {
+  taskId: string;
+}
+
+export async function listenScheduledTaskUpdated(
+  onEvent: (event: ScheduledTaskChangedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<ScheduledTaskChangedEvent>(
+    "scheduled-task-updated",
+    ({ payload }) => onEvent(payload),
+  );
+}
+
+export async function listenScheduledTaskDeleted(
+  onEvent: (event: ScheduledTaskChangedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<ScheduledTaskChangedEvent>(
+    "scheduled-task-deleted",
     ({ payload }) => onEvent(payload),
   );
 }

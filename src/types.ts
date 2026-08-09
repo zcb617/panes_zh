@@ -168,6 +168,95 @@ export interface Thread {
   lastActivityAt: string;
 }
 
+export type ScheduledTaskTargetType = "existing_thread" | "new_thread";
+export type ScheduledTaskScheduleType = "interval" | "daily" | "weekly";
+export type ScheduledTaskRunStatus =
+  | "queued"
+  | "running"
+  | "needs_confirmation"
+  | "completed"
+  | "error"
+  | "interrupted"
+  | "skipped";
+
+export interface ScheduledRuntimeConfig {
+  engineId: string;
+  modelId: string;
+  repoId?: string | null;
+  reasoningEffort?: string | null;
+  serviceTier?: string | null;
+}
+
+export interface IntervalScheduleConfig {
+  every: number;
+  unit: "minutes" | "hours" | "days";
+}
+
+export interface DailyScheduleConfig {
+  time: string;
+}
+
+export interface WeeklyScheduleConfig {
+  everyWeeks: number;
+  weekdays: number[];
+  time: string;
+  anchorDate: string;
+}
+
+export type ScheduledTaskSchedule =
+  | IntervalScheduleConfig
+  | DailyScheduleConfig
+  | WeeklyScheduleConfig;
+
+export interface ScheduledTaskRun {
+  id: string;
+  taskId: string;
+  scheduledFor: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  threadId: string | null;
+  assistantMessageId: string | null;
+  status: ScheduledTaskRunStatus;
+  errorMessage: string | null;
+  resultPreview: string | null;
+  acknowledgedAt: string | null;
+  createdAt: string;
+}
+
+export interface ScheduledTask {
+  id: string;
+  description: string;
+  enabled: boolean;
+  executionDeviceId: string;
+  targetType: ScheduledTaskTargetType;
+  workspaceId: string;
+  threadId: string | null;
+  runtimeConfig: ScheduledRuntimeConfig | null;
+  scheduleType: ScheduledTaskScheduleType;
+  schedule: ScheduledTaskSchedule;
+  timezone: string;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  latestRun: ScheduledTaskRun | null;
+  needsConfirmation: boolean;
+  targetValid: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduledTaskInput {
+  description: string;
+  enabled: boolean;
+  executionDeviceId: "local";
+  targetType: ScheduledTaskTargetType;
+  workspaceId: string;
+  threadId: string | null;
+  runtimeConfig: ScheduledRuntimeConfig | null;
+  scheduleType: ScheduledTaskScheduleType;
+  schedule: ScheduledTaskSchedule;
+  timezone: string;
+}
+
 export interface CodexRemoteThread {
   engineThreadId: string;
   title?: string | null;

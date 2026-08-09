@@ -22,6 +22,7 @@ import {
   RefreshCw,
   Gauge,
   Boxes,
+  CalendarClock,
 } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import { useThreadStore } from "../../stores/threadStore";
@@ -545,6 +546,16 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
             <Search size={16} strokeWidth={1.5} style={{ flexShrink: 0 }} />
             {t("app:sidebar.search")}
             <span className="sb-nav-item-shortcut">⌘⇧F</span>
+          </button>
+
+          {/* Scheduled tasks */}
+          <button
+            type="button"
+            className={`sb-nav-item${activeView === "scheduled" ? " sb-nav-item-active" : ""}`}
+            onClick={() => setActiveView(activeView === "scheduled" ? "chat" : "scheduled")}
+          >
+            <CalendarClock size={16} strokeWidth={1.5} style={{ flexShrink: 0 }} />
+            {t("app:sidebar.scheduled")}
           </button>
 
           {/* Agents */}

@@ -373,7 +373,7 @@ pub async fn attach_opencode_remote_session(
     .await
 }
 
-async fn validate_model_for_engine(
+pub(crate) async fn validate_model_for_engine(
     state: &AppState,
     engine_id: &str,
     requested_model_id: &str,
@@ -758,6 +758,30 @@ pub async fn create_thread(
     reasoning_effort: Option<String>,
     service_tier: Option<String>,
 ) -> Result<ThreadDto, String> {
+    create_thread_with_defaults(
+        state.inner(),
+        workspace_id,
+        repo_id,
+        engine_id,
+        model_id,
+        title,
+        reasoning_effort,
+        service_tier,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_thread_with_defaults(
+    state: &AppState,
+    workspace_id: String,
+    repo_id: Option<String>,
+    engine_id: String,
+    model_id: String,
+    title: String,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+) -> Result<ThreadDto, String> {
     let default_autonomy_preset = tokio::task::spawn_blocking(|| {
         AppConfig::load_or_create()
             .map(|config| config.default_autonomy_preset().map(ToOwned::to_owned))
@@ -767,7 +791,7 @@ pub async fn create_thread(
     .map_err(err_to_string)??;
 
     create_thread_inner(
-        state.inner(),
+        state,
         workspace_id,
         repo_id,
         engine_id,
@@ -1878,7 +1902,7 @@ async fn set_thread_opencode_config_inner(
     .ok_or_else(|| format!("thread not found after OpenCode config update: {thread_id}"))
 }
 
-async fn validate_reasoning_effort(
+pub(crate) async fn validate_reasoning_effort(
     state: &AppState,
     engine_id: &str,
     model_id: &str,
@@ -3089,6 +3113,7 @@ mod tests {
             extension_catalog_refreshes: Arc::new(
                 crate::extensions::refresh::ExtensionCatalogRefreshManager::default(),
             ),
+            scheduled_tasks: Arc::new(crate::scheduled_tasks::ScheduledTaskManager::new()),
         }
     }
 

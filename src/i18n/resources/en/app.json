@@ -34,6 +34,7 @@
     "agents": "Agents",
     "extensions": "Extensions",
     "search": "Search",
+    "scheduled": "Scheduled",
     "pinnedWorkspaces": "Pinned",
     "pinWorkspace": "Pin workspace",
     "unpinWorkspace": "Unpin workspace",

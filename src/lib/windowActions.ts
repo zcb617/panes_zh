@@ -60,12 +60,12 @@ export function shouldHandleAppShortcutWhileTerminalFocused(key: string, shiftKe
 export async function closeCurrentWindow(): Promise<void> {
   const currentWindow = getCurrentWindow();
   try {
-    await currentWindow.close();
+    await currentWindow.hide();
   } catch (error) {
     if (import.meta.env.DEV) {
-      console.warn("[windowActions] Failed to close current window, forcing destroy", error);
+      console.warn("[windowActions] Failed to hide current window, requesting close", error);
     }
-    await currentWindow.destroy();
+    await currentWindow.close();
   }
 }
 

@@ -6,6 +6,14 @@ pub const DEFAULT_APP_LOCALE: &str = "en";
 pub const PT_BR_APP_LOCALE: &str = "pt-BR";
 pub const ZH_CN_APP_LOCALE: &str = "zh-CN";
 
+pub fn tray_menu_strings(locale: &str) -> (&'static str, &'static str) {
+    match normalize_app_locale(locale).unwrap_or(DEFAULT_APP_LOCALE) {
+        PT_BR_APP_LOCALE => ("Abrir Panes", "Sair do Panes"),
+        ZH_CN_APP_LOCALE => ("打开 Panes", "退出 Panes"),
+        _ => ("Open Panes", "Quit Panes"),
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy)]
 pub struct NativeStrings {
@@ -160,8 +168,8 @@ pub fn native_strings(locale: &str) -> NativeStrings {
 #[cfg(test)]
 mod tests {
     use super::{
-        native_strings, normalize_app_locale, resolve_app_locale_with_system, DEFAULT_APP_LOCALE,
-        PT_BR_APP_LOCALE, ZH_CN_APP_LOCALE,
+        native_strings, normalize_app_locale, resolve_app_locale_with_system, tray_menu_strings,
+        DEFAULT_APP_LOCALE, PT_BR_APP_LOCALE, ZH_CN_APP_LOCALE,
     };
 
     #[test]
@@ -223,5 +231,12 @@ mod tests {
 
         assert_eq!(strings.edit_menu, "编辑");
         assert_eq!(strings.close, "关闭");
+    }
+
+    #[test]
+    fn returns_localized_tray_menu_strings() {
+        assert_eq!(tray_menu_strings("en"), ("Open Panes", "Quit Panes"));
+        assert_eq!(tray_menu_strings("pt-BR"), ("Abrir Panes", "Sair do Panes"));
+        assert_eq!(tray_menu_strings("zh-CN"), ("打开 Panes", "退出 Panes"));
     }
 }

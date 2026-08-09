@@ -34,6 +34,7 @@
     "agents": "智能体",
     "extensions": "扩展",
     "search": "搜索",
+    "scheduled": "计划任务",
     "pinnedWorkspaces": "置顶",
     "pinWorkspace": "置顶工作区",
     "unpinWorkspace": "取消置顶工作区",

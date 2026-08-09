@@ -7,6 +7,7 @@ import setupEn from "./resources/en/setup.json";
 import gitEn from "./resources/en/git.json";
 import nativeEn from "./resources/en/native.json";
 import extensionsEn from "./resources/en/extensions.json";
+import scheduledEn from "./resources/en/scheduled.json";
 import commonPtBr from "./resources/pt-BR/common.json";
 import appPtBr from "./resources/pt-BR/app.json";
 import chatPtBr from "./resources/pt-BR/chat.json";
@@ -15,6 +16,7 @@ import setupPtBr from "./resources/pt-BR/setup.json";
 import gitPtBr from "./resources/pt-BR/git.json";
 import nativePtBr from "./resources/pt-BR/native.json";
 import extensionsPtBr from "./resources/pt-BR/extensions.json";
+import scheduledPtBr from "./resources/pt-BR/scheduled.json";
 import commonZhCn from "./resources/zh-CN/common.json";
 import appZhCn from "./resources/zh-CN/app.json";
 import chatZhCn from "./resources/zh-CN/chat.json";
@@ -23,6 +25,7 @@ import setupZhCn from "./resources/zh-CN/setup.json";
 import gitZhCn from "./resources/zh-CN/git.json";
 import nativeZhCn from "./resources/zh-CN/native.json";
 import extensionsZhCn from "./resources/zh-CN/extensions.json";
+import scheduledZhCn from "./resources/zh-CN/scheduled.json";
 
 function flattenKeys(value: unknown, prefix = ""): string[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -62,6 +65,7 @@ describe("i18n resources", () => {
       ...flattenKeys(gitEn, "git"),
       ...flattenKeys(nativeEn, "native"),
       ...flattenKeys(extensionsEn, "extensions"),
+      ...flattenKeys(scheduledEn, "scheduled"),
     ].sort();
     const ptBrKeys = [
       ...flattenKeys(commonPtBr, "common"),
@@ -72,6 +76,7 @@ describe("i18n resources", () => {
       ...flattenKeys(gitPtBr, "git"),
       ...flattenKeys(nativePtBr, "native"),
       ...flattenKeys(extensionsPtBr, "extensions"),
+      ...flattenKeys(scheduledPtBr, "scheduled"),
     ].sort();
 
     expect(ptBrKeys).toEqual(enKeys);
@@ -87,6 +92,7 @@ describe("i18n resources", () => {
       ...flattenKeys(gitEn, "git"),
       ...flattenKeys(nativeEn, "native"),
       ...flattenKeys(extensionsEn, "extensions"),
+      ...flattenKeys(scheduledEn, "scheduled"),
     ].sort();
     const zhCnKeys = [
       ...flattenKeys(commonZhCn, "common"),
@@ -97,6 +103,7 @@ describe("i18n resources", () => {
       ...flattenKeys(gitZhCn, "git"),
       ...flattenKeys(nativeZhCn, "native"),
       ...flattenKeys(extensionsZhCn, "extensions"),
+      ...flattenKeys(scheduledZhCn, "scheduled"),
     ].sort();
 
     expect(zhCnKeys).toEqual(enKeys);

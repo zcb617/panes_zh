@@ -453,6 +453,36 @@ pub async fn send_message(
     plan_mode: Option<bool>,
     client_turn_id: Option<String>,
 ) -> Result<String, String> {
+    send_message_inner(
+        app,
+        state.inner(),
+        thread_id,
+        message,
+        model_id,
+        reasoning_effort,
+        attachments,
+        input_items,
+        plan_mode,
+        client_turn_id,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_message_inner(
+    app: tauri::AppHandle,
+    state: &AppState,
+    thread_id: String,
+    message: String,
+    model_id: Option<String>,
+    reasoning_effort: Option<String>,
+    attachments: Option<Vec<ChatAttachmentPayload>>,
+    input_items: Option<Vec<ChatInputItemPayload>>,
+    plan_mode: Option<bool>,
+    client_turn_id: Option<String>,
+    scheduled_run_id: Option<String>,
+) -> Result<String, String> {
     let already_running = state.turns.get(&thread_id).await.is_some();
     if already_running {
         return Err(
@@ -468,7 +498,7 @@ pub async fn send_message(
     })
     .await?
     .ok_or_else(|| format!("thread not found: {thread_id}"))?;
-    migrate_legacy_codex_on_failure_thread_metadata(state.inner(), &mut thread).await;
+    migrate_legacy_codex_on_failure_thread_metadata(state, &mut thread).await;
     let requested_model_id = model_id
         .as_deref()
         .map(str::trim)
@@ -692,7 +722,7 @@ pub async fn send_message(
                 .unwrap_or_else(|| allow_network_for_trust_level(&trust_level))
         };
     let personality = if thread.engine_id == "codex"
-        && model_supports_personality(state.inner(), &thread.engine_id, &effective_model_id).await
+        && model_supports_personality(state, &thread.engine_id, &effective_model_id).await
     {
         thread_personality(thread.engine_metadata.as_ref())
     } else {
@@ -764,6 +794,7 @@ pub async fn send_message(
         let engine_id = thread.engine_id.clone();
         let model_id = effective_model_id.clone();
         let reasoning_effort = reasoning_effort.clone();
+        let scheduled_run_id = scheduled_run_id.clone();
         move |db| {
             let user_blocks = build_user_blocks(
                 &message,
@@ -792,6 +823,14 @@ pub async fn send_message(
             let streaming_thread = db::threads::get_thread(db, &thread_id)?.ok_or_else(|| {
                 anyhow::anyhow!("thread not found after marking it streaming: {thread_id}")
             })?;
+            if let Some(run_id) = scheduled_run_id.as_deref() {
+                db::scheduled_tasks::mark_run_started(
+                    db,
+                    run_id,
+                    &thread_id,
+                    &assistant_message.id,
+                )?;
+            }
             Ok((assistant_message, streaming_thread))
         }
     })
@@ -813,7 +852,7 @@ pub async fn send_message(
         },
     );
 
-    let state_cloned = state.inner().clone();
+    let state_cloned = state.clone();
     let app_handle = app.clone();
     let assistant_message_id = assistant_message.id.clone();
     let turn_input_for_task = turn_input.clone();
@@ -2299,6 +2338,14 @@ async fn run_turn(
 
     let (thread_updated_event, final_thread) = build_final_thread_event(latest_thread, &thread);
     let _ = app.emit("thread-updated", thread_updated_event);
+    finish_scheduled_task_run(
+        &app,
+        &state,
+        &assistant_message_id,
+        &message_status,
+        &blocks,
+    )
+    .await;
     if let Some(final_thread) = final_thread.as_ref() {
         emit_chat_turn_finished(&app, final_thread, &message_status, &blocks);
     }
@@ -2886,6 +2933,14 @@ async fn run_codex_review_turn(
     let (thread_updated_event, final_review_thread) =
         build_final_thread_event(latest_review_thread, &review_thread);
     let _ = app.emit("thread-updated", thread_updated_event);
+    finish_scheduled_task_run(
+        &app,
+        &state,
+        &assistant_message_id,
+        &message_status,
+        &blocks,
+    )
+    .await;
     if let Some(final_review_thread) = final_review_thread.as_ref() {
         emit_chat_turn_finished(&app, final_review_thread, &message_status, &blocks);
     }
@@ -3050,6 +3105,25 @@ async fn process_stream_event(
                 summary: summary.clone(),
             },
         );
+        match run_db(state.db.clone(), {
+            let assistant_message_id = assistant_message_id.to_string();
+            move |db| {
+                db::scheduled_tasks::mark_run_needs_confirmation_by_message(
+                    db,
+                    &assistant_message_id,
+                )
+            }
+        })
+        .await
+        {
+            Ok(Some(task_id)) => {
+                crate::scheduled_tasks::manager::emit_task_updated(app, &task_id);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!("failed to mark scheduled task as needing confirmation: {error}");
+            }
+        }
     }
 
     if state.config.debug.persist_engine_event_logs {
@@ -3582,6 +3656,45 @@ fn chat_notification_preview(blocks: &[ContentBlock]) -> Option<String> {
     }
 
     None
+}
+
+async fn finish_scheduled_task_run(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    assistant_message_id: &str,
+    status: &MessageStatusDto,
+    blocks: &[ContentBlock],
+) {
+    let run_status = match status {
+        MessageStatusDto::Completed | MessageStatusDto::Streaming => "completed",
+        MessageStatusDto::Interrupted => "interrupted",
+        MessageStatusDto::Error => "error",
+    };
+    let preview = chat_notification_preview(blocks);
+    let error_message = matches!(status, MessageStatusDto::Error)
+        .then_some("The scheduled task turn ended with an error.");
+    match run_db(state.db.clone(), {
+        let assistant_message_id = assistant_message_id.to_string();
+        let preview = preview.clone();
+        move |db| {
+            db::scheduled_tasks::finish_run_by_message(
+                db,
+                &assistant_message_id,
+                run_status,
+                preview.as_deref(),
+                error_message,
+            )
+        }
+    })
+    .await
+    {
+        Ok(Some(task_id)) => {
+            crate::scheduled_tasks::manager::emit_task_updated(app, &task_id);
+            state.scheduled_tasks.wake();
+        }
+        Ok(None) => {}
+        Err(error) => log::warn!("failed to finish scheduled task run: {error}"),
+    }
 }
 
 fn emit_chat_turn_finished(
@@ -4638,6 +4751,7 @@ mod tests {
             extension_catalog_refreshes: Arc::new(
                 crate::extensions::refresh::ExtensionCatalogRefreshManager::default(),
             ),
+            scheduled_tasks: Arc::new(crate::scheduled_tasks::ScheduledTaskManager::new()),
         }
     }
 

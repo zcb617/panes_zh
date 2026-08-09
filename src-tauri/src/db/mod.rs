@@ -16,6 +16,7 @@ pub mod actions;
 pub mod extensions;
 pub mod messages;
 pub mod repos;
+pub mod scheduled_tasks;
 pub mod threads;
 pub mod workspaces;
 
@@ -128,6 +129,8 @@ impl Database {
             "migrations/002_extension_catalog_snapshots.sql"
         ))
         .context("failed to apply extension catalog snapshot migrations")?;
+        conn.execute_batch(include_str!("migrations/003_scheduled_tasks.sql"))
+            .context("failed to apply scheduled task migrations")?;
         ensure_archived_columns(&conn)?;
         ensure_workspace_git_columns(&conn)?;
         ensure_repo_columns(&conn)?;

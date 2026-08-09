@@ -9,6 +9,7 @@ import setupEn from "./resources/en/setup.json";
 import gitEn from "./resources/en/git.json";
 import nativeEn from "./resources/en/native.json";
 import extensionsEn from "./resources/en/extensions.json";
+import scheduledEn from "./resources/en/scheduled.json";
 import commonPtBr from "./resources/pt-BR/common.json";
 import appPtBr from "./resources/pt-BR/app.json";
 import chatPtBr from "./resources/pt-BR/chat.json";
@@ -17,6 +18,7 @@ import setupPtBr from "./resources/pt-BR/setup.json";
 import gitPtBr from "./resources/pt-BR/git.json";
 import nativePtBr from "./resources/pt-BR/native.json";
 import extensionsPtBr from "./resources/pt-BR/extensions.json";
+import scheduledPtBr from "./resources/pt-BR/scheduled.json";
 import commonZhCn from "./resources/zh-CN/common.json";
 import appZhCn from "./resources/zh-CN/app.json";
 import chatZhCn from "./resources/zh-CN/chat.json";
@@ -25,6 +27,7 @@ import setupZhCn from "./resources/zh-CN/setup.json";
 import gitZhCn from "./resources/zh-CN/git.json";
 import nativeZhCn from "./resources/zh-CN/native.json";
 import extensionsZhCn from "./resources/zh-CN/extensions.json";
+import scheduledZhCn from "./resources/zh-CN/scheduled.json";
 
 const resources = {
   en: {
@@ -36,6 +39,7 @@ const resources = {
     git: gitEn,
     native: nativeEn,
     extensions: extensionsEn,
+    scheduled: scheduledEn,
   },
   "pt-BR": {
     common: commonPtBr,
@@ -46,6 +50,7 @@ const resources = {
     git: gitPtBr,
     native: nativePtBr,
     extensions: extensionsPtBr,
+    scheduled: scheduledPtBr,
   },
   "zh-CN": {
     common: commonZhCn,
@@ -56,6 +61,7 @@ const resources = {
     git: gitZhCn,
     native: nativeZhCn,
     extensions: extensionsZhCn,
+    scheduled: scheduledZhCn,
   },
 } as const;
 
@@ -70,7 +76,7 @@ export async function initializeI18n(locale?: string | null) {
       lng: language,
       fallbackLng: "en",
       defaultNS: "common",
-      ns: ["common", "app", "chat", "workspace", "setup", "git", "native", "extensions"],
+      ns: ["common", "app", "chat", "workspace", "setup", "git", "native", "extensions", "scheduled"],
       interpolation: {
         escapeValue: false,
       },

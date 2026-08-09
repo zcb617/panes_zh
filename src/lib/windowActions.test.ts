@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockClose = vi.hoisted(() => vi.fn());
+const mockHide = vi.hoisted(() => vi.fn());
+const mockDestroy = vi.hoisted(() => vi.fn());
 const mockMinimize = vi.hoisted(() => vi.fn());
 const mockToggleMaximize = vi.hoisted(() => vi.fn());
 const mockRequestCloseTab = vi.hoisted(() => vi.fn());
@@ -30,6 +32,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     close: mockClose,
+    hide: mockHide,
+    destroy: mockDestroy,
     minimize: mockMinimize,
     toggleMaximize: mockToggleMaximize,
   }),
@@ -78,6 +82,8 @@ describe("windowActions", () => {
     };
     mockFileState.activeTabId = "tab-1";
     mockClose.mockResolvedValue(undefined);
+    mockHide.mockResolvedValue(undefined);
+    mockDestroy.mockResolvedValue(undefined);
     mockMinimize.mockResolvedValue(undefined);
     mockToggleMaximize.mockResolvedValue(undefined);
   });
@@ -181,11 +187,22 @@ describe("windowActions", () => {
     expect(mockClose).not.toHaveBeenCalled();
   });
 
-  it("closes the native window for explicit window actions", async () => {
+  it("hides the native window for explicit window actions", async () => {
+    await closeCurrentWindow();
+
+    expect(mockHide).toHaveBeenCalledTimes(1);
+    expect(mockClose).not.toHaveBeenCalled();
+    expect(mockDestroy).not.toHaveBeenCalled();
+    expect(mockRequestCloseTab).not.toHaveBeenCalled();
+  });
+
+  it("requests close without destroying the window when hiding fails", async () => {
+    mockHide.mockRejectedValueOnce(new Error("hide failed"));
+
     await closeCurrentWindow();
 
     expect(mockClose).toHaveBeenCalledTimes(1);
-    expect(mockRequestCloseTab).not.toHaveBeenCalled();
+    expect(mockDestroy).not.toHaveBeenCalled();
   });
 
   it("minimizes the native window", async () => {
@@ -200,12 +217,13 @@ describe("windowActions", () => {
     expect(mockToggleMaximize).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to closing the native window when no editor tab is active", async () => {
+  it("hides the native window when no editor tab is active", async () => {
     mockFileState.activeTabId = null;
 
     await requestWindowClose();
 
-    expect(mockClose).toHaveBeenCalledTimes(1);
+    expect(mockHide).toHaveBeenCalledTimes(1);
+    expect(mockClose).not.toHaveBeenCalled();
     expect(mockRequestCloseTab).not.toHaveBeenCalled();
   });
 });

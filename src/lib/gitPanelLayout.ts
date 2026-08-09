@@ -19,7 +19,7 @@ export function getGitPanelLayoutState({
   activeWorkspaceId,
   showGitPanel,
 }: GitPanelLayoutInput): GitPanelLayoutState {
-  const settingsActive = activeView === "settings";
+  const settingsActive = activeView === "settings" || activeView === "scheduled";
   const workspaceLayoutIntegrated = activeView === "chat" && activeWorkspaceId !== null;
   const gitPanelDocked = showGitPanel && !settingsActive;
   const gitPanelDockedInWorkspace = gitPanelDocked && workspaceLayoutIntegrated;

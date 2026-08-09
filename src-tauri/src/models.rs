@@ -76,6 +76,46 @@ pub struct ThreadDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ScheduledTaskRunDto {
+    pub id: String,
+    pub task_id: String,
+    pub scheduled_for: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub thread_id: Option<String>,
+    pub assistant_message_id: Option<String>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub result_preview: Option<String>,
+    pub acknowledged_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledTaskDto {
+    pub id: String,
+    pub description: String,
+    pub enabled: bool,
+    pub execution_device_id: String,
+    pub target_type: String,
+    pub workspace_id: String,
+    pub thread_id: Option<String>,
+    pub runtime_config: Option<Value>,
+    pub schedule_type: String,
+    pub schedule: Value,
+    pub timezone: String,
+    pub next_run_at: Option<String>,
+    pub last_run_at: Option<String>,
+    pub latest_run: Option<ScheduledTaskRunDto>,
+    pub needs_confirmation: bool,
+    pub target_valid: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexRemoteThreadDto {
     pub engine_thread_id: String,
     pub title: Option<String>,

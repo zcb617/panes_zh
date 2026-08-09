@@ -7,6 +7,7 @@ import { ActiveWorkspacePaneShell } from "../workspace/WorkspacePaneShell";
 import { HarnessPanel } from "../onboarding/HarnessPanel";
 import { SettingsPage } from "../settings/SettingsPage";
 import { ExtensionManagerPage } from "../extensions/ExtensionManagerPage";
+import { ScheduledTasksPage } from "../scheduled/ScheduledTasksPage";
 import { RightToolPanel } from "./RightToolPanel";
 import { usesCustomWindowFrame } from "../../lib/windowActions";
 import { useUiStore } from "../../stores/uiStore";
@@ -123,6 +124,8 @@ export function ThreeColumnLayout() {
       <HarnessPanel />
     ) : activeView === "extensions" ? (
       <ExtensionManagerPage />
+    ) : activeView === "scheduled" ? (
+      <ScheduledTasksPage />
     ) : activeView === "settings" ? (
       <SettingsPage />
     ) : (
