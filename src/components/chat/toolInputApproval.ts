@@ -98,20 +98,26 @@ export function defaultAdvancedApprovalPayload(
   }
 
   if (isMcpElicitationApproval(details)) {
-    const content = defaultMcpElicitationContent(details);
-    if (content && Object.keys(content).length > 0) {
-      return {
-        action: "accept",
-        content,
-      } satisfies McpServerElicitationResponse;
-    }
-
-    return {
-      action: "accept",
-    } satisfies McpServerElicitationResponse;
+    return buildMcpElicitationApprovalResponse(details, "accept");
   }
 
   return { decision: "accept" };
+}
+
+export function buildMcpElicitationApprovalResponse(
+  details: Record<string, unknown> | undefined,
+  action: McpServerElicitationResponse["action"],
+): McpServerElicitationResponse {
+  if (action !== "accept") {
+    return { action };
+  }
+
+  const content = defaultMcpElicitationContent(details);
+  if (content && Object.keys(content).length > 0) {
+    return { action, content };
+  }
+
+  return { action };
 }
 
 function readDetailsValue(

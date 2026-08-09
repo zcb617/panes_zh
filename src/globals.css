@@ -5227,6 +5227,7 @@ button, input, textarea, select {
 
 .acard-advanced-footer {
   display: flex;
+  gap: 6px;
   justify-content: flex-end;
 }
 

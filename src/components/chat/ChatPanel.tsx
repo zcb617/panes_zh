@@ -107,8 +107,10 @@ import { resolveUsageStatusKey } from "./usageStatus";
 import { formatWorkingDuration } from "./workingDuration";
 import { ToolInputQuestionnaire } from "./ToolInputQuestionnaire";
 import {
+  buildMcpElicitationApprovalResponse,
   buildPermissionsApprovalResponse,
   buildPermissionsDeclineResponse,
+  isMcpElicitationApproval,
   isPermissionsRequestApproval,
   isRequestUserInputApproval,
   isSupportedClaudeToolInputApproval,
@@ -6031,6 +6033,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                   const details = approval.details ?? {};
                   const isPermissionsRequest = isPermissionsRequestApproval(details);
                   const isToolInputRequest = isRequestUserInputApproval(details);
+                  const isMcpElicitationRequest = isMcpElicitationApproval(details);
                   const requiresCustomPayload = requiresCustomApprovalPayload(details);
                   const canUseDecisionActions = canUseApprovalDecisionActions(
                     activeThread?.engineId,
@@ -6123,7 +6126,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                             <span className="approval-row-hint">
                               {showToolInputComposerHint
                                 ? t("panel.respondInCard")
-                                : t("panel.respondInCustomCard")}
+                                : isMcpElicitationRequest
+                                  ? t("panel.respondToMcpElicitation")
+                                  : t("panel.respondInCustomCard")}
                             </span>
                             {canSelectToolInputComposer && (
                               <button
@@ -6137,6 +6142,33 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                               >
                                 {t("panel.approvalActions.answerBelow")}
                               </button>
+                            )}
+                            {isMcpElicitationRequest && (
+                              <>
+                                <button
+                                  type="button"
+                                  className="approval-btn approval-btn-deny"
+                                  onClick={() =>
+                                    void respondApproval(approval.approvalId, {
+                                      action: "decline",
+                                    })
+                                  }
+                                >
+                                  {t("panel.approvalActions.deny")}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="approval-btn approval-btn-allow"
+                                  onClick={() =>
+                                    void respondApproval(
+                                      approval.approvalId,
+                                      buildMcpElicitationApprovalResponse(details, "accept"),
+                                    )
+                                  }
+                                >
+                                  {t("panel.approvalActions.approve")}
+                                </button>
+                              </>
                             )}
                           </>
                         ) : (

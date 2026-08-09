@@ -46,6 +46,7 @@ import type {
   ThinkingBlock,
 } from "../../types";
 import {
+  buildMcpElicitationApprovalResponse,
   buildDynamicToolCallResponse,
   defaultAdvancedApprovalPayload,
   isDynamicToolCallApproval,
@@ -1214,6 +1215,7 @@ function ApprovalCard({
   const [advancedJsonPayload, setAdvancedJsonPayload] = useState(defaultAdvancedPayload);
   const [advancedJsonError, setAdvancedJsonError] = useState<string | null>(null);
   const [showRemainingDetails, setShowRemainingDetails] = useState(false);
+  const [showAdvancedMcpElicitation, setShowAdvancedMcpElicitation] = useState(false);
   const [dynamicToolSuccess, setDynamicToolSuccess] = useState(true);
   const [dynamicToolText, setDynamicToolText] = useState("");
   const [dynamicToolImageUrl, setDynamicToolImageUrl] = useState("");
@@ -1226,6 +1228,10 @@ function ApprovalCard({
     setDynamicToolSuccess(true);
     setDynamicToolText("");
     setDynamicToolImageUrl("");
+  }, [block.approvalId]);
+
+  useEffect(() => {
+    setShowAdvancedMcpElicitation(false);
   }, [block.approvalId]);
 
   let decisionLabel = t("messageBlocks.approval.decision.answered");
@@ -1283,6 +1289,15 @@ function ApprovalCard({
     onApproval(
       block.approvalId,
       buildDynamicToolCallResponse(dynamicToolText, dynamicToolSuccess, dynamicToolImageUrl),
+    );
+  }
+
+  function respondMcpElicitation(
+    action: "accept" | "decline",
+  ) {
+    onApproval(
+      block.approvalId,
+      buildMcpElicitationApprovalResponse(details, action),
     );
   }
 
@@ -1446,7 +1461,40 @@ function ApprovalCard({
         </div>
       )}
 
-      {isPending && !isClaudeThread && requiresAdvancedJsonFallback && (
+      {isPending && !isClaudeThread && isMcpElicitation && (
+        <div className="acard-section">
+          <p className="acard-reason">
+            {t("messageBlocks.approval.mcpElicitationPrompt")}
+          </p>
+          <div className="acard-advanced-footer">
+            <button
+              type="button"
+              className="approval-btn approval-btn-deny"
+              onClick={() => respondMcpElicitation("decline")}
+            >
+              {t("panel.approvalActions.deny")}
+            </button>
+            <button
+              type="button"
+              className="approval-btn approval-btn-allow"
+              onClick={() => respondMcpElicitation("accept")}
+            >
+              {t("panel.approvalActions.approve")}
+            </button>
+          </div>
+          <button
+            type="button"
+            className="acard-toggle"
+            onClick={() => setShowAdvancedMcpElicitation((value) => !value)}
+          >
+            {showAdvancedMcpElicitation
+              ? t("messageBlocks.approval.hideAdvancedJson")
+              : t("messageBlocks.approval.showAdvancedJson")}
+          </button>
+        </div>
+      )}
+
+      {isPending && !isClaudeThread && requiresAdvancedJsonFallback && !isMcpElicitation && (
         <div className="acard-section">
           <p className="acard-reason">
             {t("messageBlocks.approval.customPayloadHint")}
@@ -1457,7 +1505,10 @@ function ApprovalCard({
       {/* Standard approval — no inline buttons; the approval banner handles it */}
 
       {/* Advanced JSON — for custom payload requests and malformed tool-input fallbacks */}
-      {isPending && !isClaudeThread && requiresAdvancedJsonFallback && (
+      {isPending &&
+        !isClaudeThread &&
+        requiresAdvancedJsonFallback &&
+        (!isMcpElicitation || showAdvancedMcpElicitation) && (
         <div className="acard-section">
           <div className="acard-advanced">
             <textarea
