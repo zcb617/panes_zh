@@ -9,6 +9,7 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 18080
+      ATTACHMENT_DIR: /data/attachments
       NODE_ENV: production
     ports:
       - "127.0.0.1:18080:18080"
@@ -20,3 +21,8 @@ services:
       start_period: 5s
     security_opt:
       - no-new-privileges:true
+    volumes:
+      - panes-tunnel-attachments:/data/attachments
+
+volumes:
+  panes-tunnel-attachments:

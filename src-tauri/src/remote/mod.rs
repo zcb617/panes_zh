@@ -2,16 +2,19 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::{SinkExt, StreamExt};
 use qrcode::{render::svg, QrCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Listener};
+use tauri::{AppHandle, Emitter, Listener, Url};
 use tokio::{
     fs as tokio_fs,
     sync::{Mutex, RwLock},
@@ -35,6 +38,10 @@ use crate::{
 };
 
 const REMOTE_PROTOCOL_VERSION: u32 = 1;
+/// 未提交批次的最长空闲时间；超时后只清理暂存文件，不影响已提交附件。
+const REMOTE_BATCH_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// 远程附件单文件上限，与既有聊天附件限制保持一致。
+const REMOTE_ATTACHMENT_MAX_BYTES: usize = 10 * 1024 * 1024;
 // 历史分页窗口限制已停用：手机进入会话时一次读取完整消息。
 // const MESSAGE_WINDOW_DEFAULT_LIMIT: usize = 50;
 // const MESSAGE_WINDOW_MAX_LIMIT: usize = 100;
@@ -95,6 +102,8 @@ pub struct RemoteTunnelManager {
     /// 当前隧道内已经完成 `device.identify` 的在线设备集合。
     online_devices: RwLock<HashSet<String>>,
     uploads: Mutex<HashMap<String, RemoteUploadState>>,
+    /// 按已鉴别设备和批次保存尚未提交的附件路径，路径值是精确归属校验依据。
+    batches: Mutex<HashMap<String, RemoteBatchState>>,
     cancellation: Mutex<Option<CancellationToken>>,
 }
 
@@ -109,12 +118,58 @@ struct RemoteRequest {
     payload: Value,
 }
 
+/// `message.send` 中的附件引用；新客户端只填写 attachment_key，旧客户端可继续填写 file_path。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteAttachmentInput {
+    /// Relay HTTPS 暂存附件键。
+    #[serde(default, alias = "attachment_key")]
+    attachment_key: Option<String>,
+    /// 客户端展示文件名；Relay 响应头是最终可信文件名。
+    #[serde(default, alias = "file_name")]
+    file_name: Option<String>,
+    /// 旧客户端本机附件路径。
+    #[serde(default, alias = "file_path")]
+    file_path: Option<String>,
+    /// 客户端声明的文件大小。
+    #[serde(default, alias = "size_bytes")]
+    size_bytes: Option<u64>,
+    /// 客户端声明的 MIME 类型。
+    #[serde(default, alias = "mime_type")]
+    mime_type: Option<String>,
+    /// 旧客户端浏览器标注元数据，Relay 新路径不使用。
+    #[serde(default, alias = "browser_annotation")]
+    browser_annotation: Option<Value>,
+}
+
 struct RemoteUploadState {
+    /// 已鉴别远程连接对应的设备 ID，不读取手机 payload 中的 device_id。
+    device_id: String,
+    /// 手机一次发送生成的批次 ID；旧客户端路径为空字符串。
+    batch_id: String,
+    /// 原始文件名。
     file_name: String,
+    /// 上传声明的 MIME 类型。
     mime_type: String,
+    /// 该上传的分块总数。
     chunk_count: u32,
+    /// 下一个期望接收的分块序号。
     next_chunk: u32,
+    /// 已接收但尚未落盘的 Base64 数据。
     data_base64: String,
+    /// 最近一次收到分块的时间，用于清理中止的旧客户端上传。
+    last_activity: Instant,
+}
+
+struct RemoteBatchState {
+    /// 已鉴别远程连接对应的设备 ID。
+    device_id: String,
+    /// 手机一次发送生成的批次 ID。
+    batch_id: String,
+    /// 批次内已落盘附件，键为必须精确匹配的 file_path。
+    files: HashMap<String, ChatAttachmentPayload>,
+    /// 最近一次上传或校验活动的时间。
+    last_activity: Instant,
 }
 
 fn device_name_from_payload(payload: &Value) -> String {
@@ -125,6 +180,537 @@ fn device_name_from_payload(payload: &Value) -> String {
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(80).collect())
         .unwrap_or_else(|| "Panes Mobile".to_string())
+}
+
+/// 解析可选批次 ID；字段缺失表示旧客户端，字段存在但非法则拒绝请求。
+fn parse_optional_batch_id(payload: &Value) -> Result<Option<String>, String> {
+    let Some(value) = payload.get("batch_id") else {
+        return Ok(None);
+    };
+    let batch_id = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| "batch_id is invalid".to_string())?;
+    if batch_id.chars().any(char::is_control) {
+        return Err("batch_id is invalid".to_string());
+    }
+    Ok(Some(batch_id.to_string()))
+}
+
+/// 设备 ID 和批次 ID 都来自服务端已鉴别状态，使用长度前缀避免字符串拼接碰撞。
+fn remote_batch_key(device_id: &str, batch_id: &str) -> String {
+    format!("{}:{}:{}", device_id.len(), device_id, batch_id)
+}
+
+/// 上传 ID 也纳入设备和批次命名空间，避免不同设备或批次互相覆盖。
+fn remote_upload_key(device_id: &str, batch_id: &str, upload_id: &str) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        device_id.len(),
+        device_id,
+        batch_id.len(),
+        batch_id,
+        upload_id
+    )
+}
+
+/// 将字符串编码为安全的目录名，避免批次 ID 进入路径时产生目录穿越。
+fn remote_storage_component(value: &str) -> String {
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+    {
+        value.to_string()
+    } else {
+        URL_SAFE_NO_PAD.encode(value.as_bytes())
+    }
+}
+
+/// 批次暂存目录按设备隔离，再按批次隔离；已提交文件仍留在该目录供模型读取。
+fn remote_batch_storage_dir(device_id: &str, batch_id: &str) -> std::path::PathBuf {
+    crate::runtime_env::app_data_dir()
+        .join("attachments")
+        .join("mobile-batches")
+        .join(remote_storage_component(device_id))
+        .join(remote_storage_component(batch_id))
+}
+
+/// 处理手机端可能携带的 data URL，再以标准 Base64 解码上传内容。
+fn decode_remote_attachment_data(data_base64: &str) -> Result<Vec<u8>, String> {
+    let encoded = data_base64
+        .trim()
+        .split_once(',')
+        .filter(|(prefix, _)| prefix.starts_with("data:") && prefix.contains(";base64"))
+        .map(|(_, data)| data)
+        .unwrap_or_else(|| data_base64.trim());
+    BASE64
+        .decode(encoded)
+        .map_err(|_| "attachment data is not valid base64".to_string())
+}
+
+/// 根据请求认证凭据解析服务端保存的设备身份，不接受手机传入的 device_id。
+async fn authenticated_device_id(manager: &RemoteTunnelManager, auth: &str) -> Option<String> {
+    let runtime = manager.runtime.read().await;
+    runtime
+        .config
+        .devices
+        .iter()
+        .find(|device| device.credential == auth)
+        .map(|device| device.id.clone())
+        .or_else(|| {
+            (runtime.config.device_credential == auth).then(|| "legacy".to_string())
+        })
+}
+
+/// 解析可选的顶层 device_id；新客户端必须让它与认证凭据映射结果一致。
+fn parse_optional_device_id(payload: &Value) -> Result<Option<String>, String> {
+    let Some(value) = payload.get("device_id") else {
+        return Ok(None);
+    };
+    let device_id = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| "device_id is invalid".to_string())?;
+    if device_id.chars().any(char::is_control) {
+        return Err("device_id is invalid".to_string());
+    }
+    Ok(Some(device_id.to_string()))
+}
+
+/// 读取 `message.send.attachments`，兼容新 attachment_key 和旧 file_path 字段。
+fn parse_remote_attachment_inputs(
+    payload: &Value,
+) -> Result<Option<Vec<RemoteAttachmentInput>>, String> {
+    let Some(value) = payload.get("attachments") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    if !value.is_array() {
+        return Err("attachments must be an array".to_string());
+    }
+    serde_json::from_value::<Vec<RemoteAttachmentInput>>(value.clone())
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+/// 将旧客户端附件引用还原成现有 ChatAttachmentPayload，不影响旧路径协议。
+fn legacy_attachment_payloads(
+    inputs: &[RemoteAttachmentInput],
+) -> Result<Vec<ChatAttachmentPayload>, String> {
+    inputs
+        .iter()
+        .map(|input| {
+            serde_json::to_value(input)
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<ChatAttachmentPayload>(value)
+                        .map_err(|error| error.to_string())
+                })
+        })
+        .collect()
+}
+
+/// 将桌面端 WSS 隧道地址转换为同源 Relay HTTPS/HTTP 附件地址。
+fn relay_attachment_url(
+    endpoint: &str,
+    tunnel_id: &str,
+    attachment_key: &str,
+) -> Result<Url, String> {
+    let mut url = Url::parse(endpoint).map_err(|error| format!("invalid remote endpoint: {error}"))?;
+    match url.scheme() {
+        "wss" => url
+            .set_scheme("https")
+            .map_err(|_| "failed to convert remote endpoint scheme".to_string())?,
+        "ws" => url
+            .set_scheme("http")
+            .map_err(|_| "failed to convert remote endpoint scheme".to_string())?,
+        "https" | "http" => {}
+        _ => return Err("remote endpoint must use ws, wss, http, or https".to_string()),
+    }
+    url.set_path("/");
+    url.set_query(None);
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "remote endpoint cannot be used for attachment fetch".to_string())?;
+        segments.clear();
+        segments
+            .push("api")
+            .push("mobile")
+            .push("attachments")
+            .push(attachment_key);
+    }
+    url.query_pairs_mut().append_pair("tunnel_id", tunnel_id);
+    Ok(url)
+}
+
+/// 严格解码 Relay URL 编码响应头，非法百分号或非 UTF-8 一律拒绝。
+fn decode_relay_header_value(value: &str) -> Result<String, String> {
+    let source = value.as_bytes();
+    let mut decoded = Vec::with_capacity(source.len());
+    let mut index = 0;
+    while index < source.len() {
+        match source[index] {
+            b'%' => {
+                if index + 2 >= source.len() {
+                    return Err("relay attachment header has invalid URL encoding".to_string());
+                }
+                let high = char::from(source[index + 1])
+                    .to_digit(16)
+                    .ok_or_else(|| "relay attachment header has invalid URL encoding".to_string())?;
+                let low = char::from(source[index + 2])
+                    .to_digit(16)
+                    .ok_or_else(|| "relay attachment header has invalid URL encoding".to_string())?;
+                decoded.push((high * 16 + low) as u8);
+                index += 3;
+            }
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded)
+        .map_err(|_| "relay attachment file name is not valid UTF-8".to_string())
+}
+
+/// 从 Relay 响应头读取必需字段，并校验文件名不是路径穿越。
+fn relay_required_header(
+    response: &reqwest::Response,
+    name: &str,
+    decode_url: bool,
+) -> Result<String, String> {
+    let value = response
+        .headers()
+        .get(name)
+        .ok_or_else(|| format!("relay attachment response is missing {name}"))?
+        .to_str()
+        .map_err(|_| format!("relay attachment response has invalid {name}"))?;
+    let value = if decode_url {
+        decode_relay_header_value(value)?
+    } else {
+        value.to_string()
+    };
+    if value.trim().is_empty() || value.len() > 255 || value.chars().any(char::is_control) {
+        return Err(format!("relay attachment response has invalid {name}"));
+    }
+    Ok(value)
+}
+
+/// 通过 Relay 下载单个附件，校验设备、批次、响应头和 10 MiB 上限后落盘。
+async fn fetch_relay_attachment(
+    client: &reqwest::Client,
+    endpoint: &str,
+    tunnel_id: &str,
+    relay_credential: &str,
+    device_id: &str,
+    batch_id: &str,
+    input: &RemoteAttachmentInput,
+) -> Result<ChatAttachmentPayload, String> {
+    let attachment_key = input
+        .attachment_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control))
+        .ok_or_else(|| "attachment_key is invalid".to_string())?;
+    let declared_size = input
+        .size_bytes
+        .ok_or_else(|| "attachment size_bytes is required".to_string())?;
+    if declared_size > REMOTE_ATTACHMENT_MAX_BYTES as u64 {
+        return Err("attachment exceeds the 10 MB limit".to_string());
+    }
+    if input
+        .file_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+        || input
+            .mime_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        return Err("attachment file_name and mime_type are required".to_string());
+    }
+    let url = relay_attachment_url(endpoint, tunnel_id, attachment_key)?;
+    let response = client
+        .get(url)
+        .header("x-panes-relay-credential", relay_credential)
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch relay attachment: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "relay attachment fetch failed with status {}",
+            response.status()
+        ));
+    }
+    let response_device_id = relay_required_header(&response, "x-panes-device-id", false)?;
+    let response_batch_id = relay_required_header(&response, "x-panes-batch-id", false)?;
+    let response_file_name = relay_required_header(&response, "x-panes-file-name", true)?;
+    let response_mime_type = relay_required_header(&response, "content-type", false)?;
+    if response_device_id != device_id {
+        return Err("relay attachment device does not match authenticated device".to_string());
+    }
+    if response_batch_id != batch_id {
+        return Err("relay attachment batch does not match message batch".to_string());
+    }
+    if response_file_name.contains('/') || response_file_name.contains('\\') {
+        return Err("relay attachment file name cannot contain path separators".to_string());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("failed to read relay attachment: {error}"))?;
+    if bytes.is_empty() {
+        return Err("relay attachment is empty".to_string());
+    }
+    if bytes.len() > REMOTE_ATTACHMENT_MAX_BYTES {
+        return Err("attachment exceeds the 10 MB limit".to_string());
+    }
+    let extension = Path::new(&response_file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 24
+                && value
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+        })
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    let attachment_dir = remote_batch_storage_dir(device_id, batch_id);
+    tokio_fs::create_dir_all(&attachment_dir)
+        .await
+        .map_err(|error| format!("failed to create mobile batch directory: {error}"))?;
+    let file_path = attachment_dir.join(format!(
+        "mobile-file-{}{}",
+        Uuid::new_v4().simple(),
+        extension
+    ));
+    if let Err(error) = tokio_fs::write(&file_path, &bytes).await {
+        let _ = tokio_fs::remove_file(&file_path).await;
+        return Err(format!("failed to save mobile attachment: {error}"));
+    }
+    Ok(ChatAttachmentPayload {
+        file_name: response_file_name,
+        file_path: file_path.display().to_string(),
+        size_bytes: bytes.len() as u64,
+        mime_type: Some(response_mime_type),
+        browser_annotation: None,
+    })
+}
+
+/// 拉取并登记一个批次内的全部 Relay 附件；任何失败由调用方清理本机暂存文件。
+async fn fetch_relay_attachments(
+    manager: &RemoteTunnelManager,
+    endpoint: &str,
+    tunnel_id: &str,
+    relay_credential: &str,
+    device_id: &str,
+    batch_id: &str,
+    inputs: &[RemoteAttachmentInput],
+) -> Result<Vec<ChatAttachmentPayload>, String> {
+    if inputs.len() > 10 {
+        return Err("at most 10 attachments are allowed".to_string());
+    }
+    let client = reqwest::Client::new();
+    let mut seen_keys = HashSet::new();
+    let mut attachments = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let key = input
+            .attachment_key
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default();
+        if !seen_keys.insert(key.to_string()) {
+            return Err("duplicate attachment_key is not allowed".to_string());
+        }
+        let attachment = fetch_relay_attachment(
+            &client,
+            endpoint,
+            tunnel_id,
+            relay_credential,
+            device_id,
+            batch_id,
+            input,
+        )
+        .await?;
+        attachments.push(attachment);
+    }
+    let batch_key = remote_batch_key(device_id, batch_id);
+    let mut batches = manager.batches.lock().await;
+    let batch = batches.entry(batch_key).or_insert_with(|| RemoteBatchState {
+        device_id: device_id.to_string(),
+        batch_id: batch_id.to_string(),
+        files: HashMap::new(),
+        last_activity: Instant::now(),
+    });
+    for attachment in &attachments {
+        batch
+            .files
+            .insert(attachment.file_path.clone(), attachment.clone());
+    }
+    batch.last_activity = Instant::now();
+    Ok(attachments)
+}
+
+/// 发送成功后尽力删除 Relay 暂存键；删除失败不回滚已创建的本机消息。
+async fn delete_relay_attachment(
+    client: &reqwest::Client,
+    endpoint: &str,
+    tunnel_id: &str,
+    relay_credential: &str,
+    attachment_key: &str,
+) -> Result<(), String> {
+    let url = relay_attachment_url(endpoint, tunnel_id, attachment_key)?;
+    let response = client
+        .delete(url)
+        .header("x-panes-relay-credential", relay_credential)
+        .send()
+        .await
+        .map_err(|error| format!("failed to delete relay attachment: {error}"))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "relay attachment delete failed with status {}",
+            response.status()
+        ))
+    }
+}
+
+/// 处理带 batch_id 的分块上传，并把完成文件登记到设备批次映射中。
+async fn process_batched_attachment_upload(
+    manager: &RemoteTunnelManager,
+    device_id: String,
+    batch_id: String,
+    upload_id: String,
+    file_name: String,
+    mime_type: String,
+    chunk_index: u32,
+    chunk_count: u32,
+    data_base64: String,
+) -> Result<Value, String> {
+    if chunk_index >= chunk_count {
+        return Err("chunk_index is invalid".to_string());
+    }
+    let upload_key = remote_upload_key(&device_id, &batch_id, &upload_id);
+    let completed: Result<Option<RemoteUploadState>, String> = {
+        let mut uploads = manager.uploads.lock().await;
+        let now = Instant::now();
+        if chunk_index == 0 {
+            if uploads.contains_key(&upload_key) {
+                return Err("attachment upload is already in progress".to_string());
+            }
+            uploads.insert(
+                upload_key.clone(),
+                RemoteUploadState {
+                    device_id: device_id.clone(),
+                    batch_id: batch_id.clone(),
+                    file_name: file_name.clone(),
+                    mime_type: mime_type.clone(),
+                    chunk_count,
+                    next_chunk: 0,
+                    data_base64: String::new(),
+                    last_activity: now,
+                },
+            );
+        }
+        let upload = uploads
+            .get_mut(&upload_key)
+            .ok_or_else(|| "attachment upload was not initialized".to_string())?;
+        if upload.file_name != file_name
+            || upload.mime_type != mime_type
+            || upload.chunk_count != chunk_count
+            || upload.next_chunk != chunk_index
+        {
+            uploads.remove(&upload_key);
+            return Err("attachment chunks are out of sequence".to_string());
+        }
+        upload.data_base64.push_str(&data_base64);
+        upload.last_activity = now;
+        if upload.data_base64.len() > 14_000_000 {
+            uploads.remove(&upload_key);
+            return Err("attachment exceeds the 10 MB limit".to_string());
+        }
+        upload.next_chunk += 1;
+        if upload.next_chunk == upload.chunk_count {
+            Ok(uploads.remove(&upload_key))
+        } else {
+            Ok(None)
+        }
+    };
+
+    let Some(upload) = completed? else {
+        return Ok(json!({ "complete": false }));
+    };
+    let bytes = decode_remote_attachment_data(&upload.data_base64)?;
+    if bytes.is_empty() {
+        return Err("attachment data is empty".to_string());
+    }
+    if bytes.len() > REMOTE_ATTACHMENT_MAX_BYTES {
+        return Err("attachment exceeds the 10 MB limit".to_string());
+    }
+    let extension = Path::new(&upload.file_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 24
+                && value
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric())
+        })
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    let attachment_dir = remote_batch_storage_dir(&upload.device_id, &upload.batch_id);
+    tokio_fs::create_dir_all(&attachment_dir)
+        .await
+        .map_err(|error| format!("failed to create mobile batch directory: {error}"))?;
+    let file_path = attachment_dir.join(format!(
+        "mobile-file-{}{}",
+        Uuid::new_v4().simple(),
+        extension
+    ));
+    if let Err(error) = tokio_fs::write(&file_path, &bytes).await {
+        let _ = tokio_fs::remove_file(&file_path).await;
+        return Err(format!("failed to save mobile attachment: {error}"));
+    }
+    let attachment = ChatAttachmentPayload {
+        file_name: upload.file_name,
+        file_path: file_path.display().to_string(),
+        size_bytes: bytes.len() as u64,
+        mime_type: Some(upload.mime_type),
+        browser_annotation: None,
+    };
+    let batch_key = remote_batch_key(&device_id, &batch_id);
+    manager
+        .batches
+        .lock()
+        .await
+        .entry(batch_key)
+        .or_insert_with(|| RemoteBatchState {
+            device_id,
+            batch_id,
+            files: HashMap::new(),
+            last_activity: Instant::now(),
+        })
+        .files
+        .insert(attachment.file_path.clone(), attachment.clone());
+    // 最后一块沿用既有 ChatAttachment 顶层字段，移动端可直接读取 filePath。
+    serde_json::to_value(attachment).map_err(|error| error.to_string())
 }
 
 /// 将聊天完成通知包装成移动端约定的远程事件。
@@ -156,6 +742,144 @@ fn build_completed_message_event(target_device_id: &str, payload: &Value) -> Opt
 }
 
 impl RemoteTunnelManager {
+    /// 删除超过空闲期限且尚未提交的批次及其暂存文件。
+    async fn cleanup_expired_batches(&self) {
+        let now = Instant::now();
+        let mut expired_keys = HashSet::new();
+        let mut files_to_remove = Vec::new();
+        {
+            let mut batches = self.batches.lock().await;
+            let keys = batches
+                .iter()
+                .filter(|(_, batch)| {
+                    now.duration_since(batch.last_activity) >= REMOTE_BATCH_IDLE_TIMEOUT
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for key in keys {
+                if let Some(batch) = batches.remove(&key) {
+                    expired_keys.insert(key);
+                    files_to_remove.extend(batch.files.into_keys());
+                }
+            }
+        }
+        if !expired_keys.is_empty() {
+            let mut uploads = self.uploads.lock().await;
+            uploads.retain(|_, upload| {
+                upload.batch_id.is_empty()
+                    || !expired_keys.contains(&remote_batch_key(
+                        &upload.device_id,
+                        &upload.batch_id,
+                    ))
+            });
+            uploads.retain(|_, upload| {
+                now.duration_since(upload.last_activity) < REMOTE_BATCH_IDLE_TIMEOUT
+            });
+        } else {
+            // 即使批次尚未完成首个文件，也必须按分块活动时间清理内存缓存。
+            self.uploads.lock().await.retain(|_, upload| {
+                now.duration_since(upload.last_activity) < REMOTE_BATCH_IDLE_TIMEOUT
+            });
+        }
+        for file_path in files_to_remove {
+            // 暂存文件属于未提交批次；删除失败不应阻塞其他批次清理。
+            let _ = tokio_fs::remove_file(file_path).await;
+        }
+    }
+
+    /// 取消当前设备的一个批次，只删除尚未提交的附件文件。
+    async fn abort_batch(&self, device_id: &str, batch_id: &str) {
+        let key = remote_batch_key(device_id, batch_id);
+        let batch = self.batches.lock().await.remove(&key);
+        {
+            let mut uploads = self.uploads.lock().await;
+            uploads.retain(|_, upload| {
+                upload.batch_id.is_empty()
+                    || remote_batch_key(&upload.device_id, &upload.batch_id) != key
+            });
+        }
+        if let Some(batch) = batch {
+            for file_path in batch.files.into_keys() {
+                // 只清理该设备、该批次状态中登记的精确路径。
+                let _ = tokio_fs::remove_file(file_path).await;
+            }
+        }
+    }
+
+    /// 隧道重载或关闭时清理内存中登记的全部未提交批次文件。
+    async fn cleanup_all_batches(&self) {
+        let files_to_remove = {
+            let mut batches = self.batches.lock().await;
+            batches
+                .drain()
+                .flat_map(|(_, batch)| batch.files.into_keys())
+                .collect::<Vec<_>>()
+        };
+        self.uploads.lock().await.clear();
+        for file_path in files_to_remove {
+            // 仅删除尚未提交批次登记的文件，不触碰历史消息附件。
+            let _ = tokio_fs::remove_file(file_path).await;
+        }
+    }
+
+    /// 提交成功后移除批次状态，但保留文件路径，供后续模型调用继续读取。
+    async fn commit_batch(&self, device_id: &str, batch_id: &str) {
+        let key = remote_batch_key(device_id, batch_id);
+        self.batches.lock().await.remove(&key);
+        let mut uploads = self.uploads.lock().await;
+        uploads.retain(|_, upload| {
+            upload.batch_id.is_empty()
+                || remote_batch_key(&upload.device_id, &upload.batch_id) != key
+        });
+    }
+
+    /// 校验批次附件路径必须精确属于当前认证设备和批次。
+    async fn validate_batch_attachments(
+        &self,
+        device_id: &str,
+        batch_id: &str,
+        attachments: &[ChatAttachmentPayload],
+    ) -> Result<(), String> {
+        if attachments.len() > 10 {
+            return Err("at most 10 attachments are allowed".to_string());
+        }
+        let key = remote_batch_key(device_id, batch_id);
+        let mut batches = self.batches.lock().await;
+        let Some(batch) = batches.get_mut(&key) else {
+            if attachments.is_empty() {
+                return Ok(());
+            }
+            return Err("attachment batch is missing or does not belong to this device".to_string());
+        };
+        if batch.device_id != device_id || batch.batch_id != batch_id {
+            return Err("attachment batch is not owned by this device".to_string());
+        }
+        let unique_paths = attachments
+            .iter()
+            .map(|attachment| attachment.file_path.as_str())
+            .collect::<HashSet<_>>();
+        if unique_paths.len() != attachments.len() {
+            return Err("duplicate attachment file_path is not allowed".to_string());
+        }
+        if attachments.len() != batch.files.len() {
+            return Err("attachment list must exactly match the uploaded batch".to_string());
+        }
+        for attachment in attachments {
+            if !batch.files.contains_key(&attachment.file_path) {
+                return Err(
+                    "attachment file_path does not belong to this device and batch".to_string(),
+                );
+            }
+        }
+        if unique_paths.len() != batch.files.keys().collect::<HashSet<_>>().len()
+            || !batch.files.keys().all(|path| unique_paths.contains(path.as_str()))
+        {
+            return Err("attachment list must exactly match the uploaded batch".to_string());
+        }
+        batch.last_activity = Instant::now();
+        Ok(())
+    }
+
     pub async fn status(&self) -> RemoteAccessStatusDto {
         let runtime = self.runtime.read().await;
         let pairing_token = runtime.pairing_token.as_ref().filter(|_| {
@@ -253,7 +977,7 @@ impl RemoteTunnelManager {
             cancellation.cancel();
         }
         self.online_devices.write().await.clear();
-        self.uploads.lock().await.clear();
+        self.cleanup_all_batches().await;
 
         let generation = {
             let mut runtime = self.runtime.write().await;
@@ -353,6 +1077,9 @@ impl RemoteTunnelManager {
                     let _ = completed_message_tx.send(payload);
                 });
                 let mut disconnected_error: Option<String> = None;
+                let mut batch_cleanup_interval = tokio::time::interval(Duration::from_secs(60));
+                batch_cleanup_interval
+                    .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                 loop {
                     tokio::select! {
@@ -481,17 +1208,9 @@ impl RemoteTunnelManager {
                                         continue;
                                     }
 
-                                    /*
-                                    // 旧版按请求即时推导 deviceId，仅供 thread.subscribe 使用；
-                                    // 现在设备在线集合只在 device.identify 成功后注册。
-                                    let device_id = {
-                                        let runtime = manager.runtime.read().await;
-                                        runtime.config.devices.iter()
-                                            .find(|device| device.credential == request.auth)
-                                            .map(|device| device.id.clone())
-                                            .unwrap_or_else(|| "legacy".to_string())
-                                    };
-                                    */
+                                    // 设备归属只由本次请求已验证的认证凭据解析，绝不采用手机 payload 的 device_id。
+                                    let request_device_id =
+                                        authenticated_device_id(&manager, &request.auth).await;
 
                                     let result: Result<Value, String> = match request.method.as_str() {
                                         "device.pair" => {
@@ -813,6 +1532,10 @@ impl RemoteTunnelManager {
                                             }
                                         }
                                         "attachment.upload" => {
+                                            /*
+                                            // 旧版 Base64 分块上传协议已停用，代码保留以便兼容审计；
+                                            // 新客户端必须通过 Relay HTTPS 上传并在 message.send 提交 attachment_key。
+                                            let batch_id = parse_optional_batch_id(&request.payload);
                                             let upload_id = request.payload.get("upload_id")
                                                 .and_then(Value::as_str)
                                                 .map(str::trim)
@@ -850,17 +1573,48 @@ impl RemoteTunnelManager {
                                                 .filter(|value| !value.is_empty() && value.len() <= 300_000)
                                                 .map(str::to_string)
                                                 .ok_or_else(|| "attachment chunk is invalid".to_string());
-                                            match (upload_id, file_name, mime_type, chunk_index, chunk_count, data_base64) {
-                                                (Ok(upload_id), Ok(file_name), Ok(mime_type), Ok(chunk_index), Ok(chunk_count), Ok(data_base64)) => {
+                                            match (batch_id, upload_id, file_name, mime_type, chunk_index, chunk_count, data_base64) {
+                                                (Err(error), _, _, _, _, _, _)
+                                                | (_, Err(error), _, _, _, _, _)
+                                                | (_, _, Err(error), _, _, _, _)
+                                                | (_, _, _, Err(error), _, _, _)
+                                                | (_, _, _, _, Err(error), _, _)
+                                                | (_, _, _, _, _, Err(error), _)
+                                                | (_, _, _, _, _, _, Err(error)) => Err(error),
+                                                (Ok(Some(batch_id)), Ok(upload_id), Ok(file_name), Ok(mime_type), Ok(chunk_index), Ok(chunk_count), Ok(data_base64)) => {
+                                                    match request_device_id.clone() {
+                                                        Some(device_id) => process_batched_attachment_upload(
+                                                            &manager,
+                                                            device_id,
+                                                            batch_id,
+                                                            upload_id,
+                                                            file_name,
+                                                            mime_type,
+                                                            chunk_index,
+                                                            chunk_count,
+                                                            data_base64,
+                                                        )
+                                                        .await,
+                                                        None => Err("authenticated device identity is required".to_string()),
+                                                    }
+                                                }
+                                                (Ok(None), Ok(upload_id), Ok(file_name), Ok(mime_type), Ok(chunk_index), Ok(chunk_count), Ok(data_base64)) => {
+                                                    // 旧客户端缺失 batch_id 时继续使用原有上传路径。
                                                     let mut uploads = manager.uploads.lock().await;
                                                     let completed = (|| -> Result<Option<RemoteUploadState>, String> {
+                                                        if chunk_index >= chunk_count {
+                                                            return Err("chunk_index is invalid".to_string());
+                                                        }
                                                         if chunk_index == 0 {
                                                             uploads.insert(upload_id.clone(), RemoteUploadState {
+                                                                device_id: request_device_id.clone().unwrap_or_else(|| "legacy".to_string()),
+                                                                batch_id: String::new(),
                                                                 file_name: file_name.clone(),
                                                                 mime_type: mime_type.clone(),
                                                                 chunk_count,
                                                                 next_chunk: 0,
                                                                 data_base64: String::new(),
+                                                                last_activity: Instant::now(),
                                                             });
                                                         }
                                                         let upload = uploads.get_mut(&upload_id)
@@ -870,9 +1624,11 @@ impl RemoteTunnelManager {
                                                             || upload.chunk_count != chunk_count
                                                             || upload.next_chunk != chunk_index
                                                         {
+                                                            uploads.remove(&upload_id);
                                                             return Err("attachment chunks are out of sequence".to_string());
                                                         }
                                                         upload.data_base64.push_str(&data_base64);
+                                                        upload.last_activity = Instant::now();
                                                         if upload.data_base64.len() > 14_000_000 {
                                                             uploads.remove(&upload_id);
                                                             return Err("attachment exceeds the 10 MB limit".to_string());
@@ -905,7 +1661,7 @@ impl RemoteTunnelManager {
                                                                     .map_err(|_| "attachment data is not valid base64".to_string());
                                                                 match decoded {
                                                                     Ok(bytes) if bytes.is_empty() => Err("attachment data is empty".to_string()),
-                                                                    Ok(bytes) if bytes.len() > 10 * 1024 * 1024 => Err("attachment exceeds the 10 MB limit".to_string()),
+                                                                    Ok(bytes) if bytes.len() > REMOTE_ATTACHMENT_MAX_BYTES => Err("attachment exceeds the 10 MB limit".to_string()),
                                                                     Ok(bytes) => {
                                                                         let extension = Path::new(&original_file_name)
                                                                             .extension()
@@ -942,15 +1698,26 @@ impl RemoteTunnelManager {
                                                         Err(error) => Err(error),
                                                     }
                                                 }
-                                                (Err(error), _, _, _, _, _)
-                                                | (_, Err(error), _, _, _, _)
-                                                | (_, _, Err(error), _, _, _)
-                                                | (_, _, _, Err(error), _, _)
-                                                | (_, _, _, _, Err(error), _)
-                                                | (_, _, _, _, _, Err(error)) => Err(error),
+                                            }
+                                            */
+                                            Err("attachment.upload is deprecated; use Relay attachment_key".to_string())
+                                        }
+                                        "attachment.batch.abort" => {
+                                            match parse_optional_batch_id(&request.payload) {
+                                                Ok(Some(batch_id)) => match request_device_id.clone() {
+                                                    Some(device_id) => {
+                                                        manager.abort_batch(&device_id, &batch_id).await;
+                                                        Ok(json!({ "aborted": true }))
+                                                    }
+                                                    None => Err("authenticated device identity is required".to_string()),
+                                                },
+                                                Ok(None) => Err("batch_id is required".to_string()),
+                                                Err(error) => Err(error),
                                             }
                                         }
                                         "message.send" => {
+                                            let batch_id = parse_optional_batch_id(&request.payload);
+                                            let payload_device_id = parse_optional_device_id(&request.payload);
                                             let thread_id = request.payload.get("thread_id")
                                                 .and_then(Value::as_str)
                                                 .map(str::trim)
@@ -972,36 +1739,172 @@ impl RemoteTunnelManager {
                                                 .map(str::trim)
                                                 .filter(|value| !value.is_empty())
                                                 .map(str::to_string);
-                                            let attachments = request.payload.get("attachments")
-                                                .filter(|value| !value.is_null())
-                                                .cloned()
-                                                .map(serde_json::from_value::<Vec<ChatAttachmentPayload>>)
-                                                .transpose()
-                                                .map_err(|error| error.to_string());
-                                            match (thread_id, attachments) {
-                                                (Ok(thread_id), Ok(attachments))
-                                                    if message.len() <= 100_000
-                                                        && (!message.is_empty()
-                                                            || !attachments.as_ref().map(|items| items.is_empty()).unwrap_or(true)) => {
-                                                    send_message_inner(
-                                                        app.clone(),
-                                                        &state,
-                                                        thread_id,
-                                                        message,
-                                                        model_id,
-                                                        reasoning_effort,
-                                                        attachments,
-                                                        None,
-                                                        Some(false),
-                                                        Some(request.id.clone()),
-                                                        None,
-                                                    )
-                                                    .await
-                                                    .map(|assistant_message_id| json!({ "assistant_message_id": assistant_message_id }))
+                                            let attachment_inputs = parse_remote_attachment_inputs(&request.payload);
+                                            match (batch_id, payload_device_id, thread_id, attachment_inputs) {
+                                                (Ok(batch_id), Ok(payload_device_id), Ok(thread_id), Ok(attachment_inputs)) => {
+                                                    let had_attachments = attachment_inputs.is_some();
+                                                    let inputs = attachment_inputs.unwrap_or_default();
+                                                    let has_relay_key = inputs.iter().any(|input| {
+                                                        input
+                                                            .attachment_key
+                                                            .as_deref()
+                                                            .map(str::trim)
+                                                            .filter(|value| !value.is_empty())
+                                                            .is_some()
+                                                    });
+                                                    if message.len() > 100_000 {
+                                                        Err("message is too large".to_string())
+                                                    } else if message.is_empty() && inputs.is_empty() {
+                                                        Err("message or attachment is required".to_string())
+                                                    } else if has_relay_key {
+                                                        match (
+                                                            batch_id.as_deref(),
+                                                            payload_device_id.as_deref(),
+                                                            request_device_id.clone(),
+                                                        ) {
+                                                            (Some(batch_id), Some(payload_device_id), Some(device_id)) => {
+                                                                if payload_device_id != device_id {
+                                                                    Err("message device_id does not match authenticated device".to_string())
+                                                                } else if inputs.len() > 10
+                                                                    || inputs.iter().any(|input| {
+                                                                        input.attachment_key.is_none()
+                                                                            || input.file_path.is_some()
+                                                                    })
+                                                                {
+                                                                    Err("all mobile attachments must use attachment_key".to_string())
+                                                                } else {
+                                                                    let relay_config = {
+                                                                        let runtime = manager.runtime.read().await;
+                                                                        (
+                                                                            runtime.config.endpoint.clone(),
+                                                                            runtime.config.tunnel_id.clone(),
+                                                                            runtime.config.credential.clone(),
+                                                                        )
+                                                                    };
+                                                                    let attachment_keys = inputs
+                                                                        .iter()
+                                                                        .filter_map(|input| input.attachment_key.clone())
+                                                                        .collect::<Vec<_>>();
+                                                                    let fetched = fetch_relay_attachments(
+                                                                        &manager,
+                                                                        &relay_config.0,
+                                                                        &relay_config.1,
+                                                                        &relay_config.2,
+                                                                        &device_id,
+                                                                        batch_id,
+                                                                        &inputs,
+                                                                    )
+                                                                    .await;
+                                                                    match fetched {
+                                                                        Ok(attachments) => {
+                                                                            match manager
+                                                                                .validate_batch_attachments(
+                                                                                    &device_id,
+                                                                                    batch_id,
+                                                                                    &attachments,
+                                                                                )
+                                                                                .await
+                                                                            {
+                                                                                Ok(()) => {
+                                                                                    let send_result = send_message_inner(
+                                                                                        app.clone(),
+                                                                                        &state,
+                                                                                        thread_id,
+                                                                                        message,
+                                                                                        model_id,
+                                                                                        reasoning_effort,
+                                                                                        Some(attachments),
+                                                                                        None,
+                                                                                        Some(false),
+                                                                                        Some(request.id.clone()),
+                                                                                        None,
+                                                                                    )
+                                                                                    .await;
+                                                                                    match send_result {
+                                                                                        Ok(assistant_message_id) => {
+                                                                                            manager.commit_batch(&device_id, batch_id).await;
+                                                                                            let client = reqwest::Client::new();
+                                                                                            for attachment_key in attachment_keys {
+                                                                                                if let Err(error) = delete_relay_attachment(
+                                                                                                    &client,
+                                                                                                    &relay_config.0,
+                                                                                                    &relay_config.1,
+                                                                                                    &relay_config.2,
+                                                                                                    &attachment_key,
+                                                                                                )
+                                                                                                .await
+                                                                                                {
+                                                                                                    log::warn!("failed to delete relay attachment {attachment_key}: {error}");
+                                                                                                }
+                                                                                            }
+                                                                                            Ok(json!({ "assistant_message_id": assistant_message_id }))
+                                                                                        }
+                                                                                        Err(error) => {
+                                                                                            manager.abort_batch(&device_id, batch_id).await;
+                                                                                            Err(error)
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                                Err(error) => {
+                                                                                    manager.abort_batch(&device_id, batch_id).await;
+                                                                                    Err(error)
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        Err(error) => {
+                                                                            manager.abort_batch(&device_id, batch_id).await;
+                                                                            Err(error)
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            (None, _, _) => Err("batch_id is required for attachment_key".to_string()),
+                                                            (Some(_), None, _) => Err("device_id is required for attachment_key".to_string()),
+                                                            (Some(_), Some(_), None) => Err("authenticated device identity is required".to_string()),
+                                                        }
+                                                    } else {
+                                                        if batch_id.is_some() && payload_device_id.is_some() && !inputs.is_empty() {
+                                                            Err("mobile attachments must use attachment_key".to_string())
+                                                        } else {
+                                                            match legacy_attachment_payloads(&inputs) {
+                                                                Ok(attachments) => {
+                                                                    let attachments = if inputs.is_empty() && !had_attachments {
+                                                                        None
+                                                                    } else {
+                                                                        Some(attachments)
+                                                                    };
+                                                                    if message.is_empty()
+                                                                        && attachments.as_ref().map(|items| items.is_empty()).unwrap_or(true)
+                                                                    {
+                                                                        Err("message or attachment is required".to_string())
+                                                                    } else {
+                                                                        // 缺少 batch_id 或 attachment_key 的请求沿用旧 file_path 路径。
+                                                                        send_message_inner(
+                                                                            app.clone(),
+                                                                            &state,
+                                                                            thread_id,
+                                                                            message,
+                                                                            model_id,
+                                                                            reasoning_effort,
+                                                                            attachments,
+                                                                            None,
+                                                                            Some(false),
+                                                                            Some(request.id.clone()),
+                                                                            None,
+                                                                        )
+                                                                        .await
+                                                                        .map(|assistant_message_id| json!({ "assistant_message_id": assistant_message_id }))
+                                                                    }
+                                                                }
+                                                                Err(error) => Err(error),
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                                (Ok(_), Ok(_)) if message.len() > 100_000 => Err("message is too large".to_string()),
-                                                (Ok(_), Ok(_)) => Err("message or attachment is required".to_string()),
-                                                (Err(error), _) | (_, Err(error)) => Err(error),
+                                                (Err(error), _, _, _)
+                                                | (_, Err(error), _, _)
+                                                | (_, _, Err(error), _)
+                                                | (_, _, _, Err(error)) => Err(error),
                                             }
                                         }
                                         "turn.stop" => {
@@ -1165,6 +2068,9 @@ impl RemoteTunnelManager {
                             if disconnected_error.is_some() { break; }
                         }
                         */
+                        _ = batch_cleanup_interval.tick() => {
+                            manager.cleanup_expired_batches().await;
+                        }
                         Some(completed_payload) = completed_message_rx.recv() => {
                             let device_ids = manager.online_devices.read().await.clone();
                             if device_ids.is_empty() {
@@ -1255,14 +2161,23 @@ impl RemoteTunnelManager {
         if let Some(cancellation) = self.cancellation.lock().await.take() {
             cancellation.cancel();
         }
+        self.cleanup_all_batches().await;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_completed_message_event;
+    use std::collections::HashMap;
+
+    use super::{
+        build_completed_message_event, decode_relay_header_value, parse_optional_batch_id,
+        parse_remote_attachment_inputs, relay_attachment_url, remote_batch_key, RemoteBatchState,
+        RemoteTunnelManager,
+    };
     use crate::config::app_config::RemoteAccessConfig;
+    use crate::commands::chat::ChatAttachmentPayload;
     use serde_json::json;
+    use tokio::fs as tokio_fs;
 
     #[test]
     fn remote_identity_is_generated_and_rotates() {
@@ -1308,5 +2223,116 @@ mod tests {
             "message": { "id": "message-1" },
         });
         assert!(build_completed_message_event("mobile-1", &payload).is_none());
+    }
+
+    #[tokio::test]
+    async fn batch_attachment_validation_requires_exact_current_device_set() {
+        let manager = RemoteTunnelManager::default();
+        let device_id = "device-a";
+        let batch_id = "batch-a";
+        let attachment = ChatAttachmentPayload {
+            file_name: "a.txt".to_string(),
+            file_path: "C:/batch-a/a.txt".to_string(),
+            size_bytes: 1,
+            mime_type: Some("text/plain".to_string()),
+            browser_annotation: None,
+        };
+        manager.batches.lock().await.insert(
+            remote_batch_key(device_id, batch_id),
+            RemoteBatchState {
+                device_id: device_id.to_string(),
+                batch_id: batch_id.to_string(),
+                files: HashMap::from([(attachment.file_path.clone(), attachment.clone())]),
+                last_activity: std::time::Instant::now(),
+            },
+        );
+        assert!(manager
+            .validate_batch_attachments(device_id, batch_id, std::slice::from_ref(&attachment))
+            .await
+            .is_ok());
+        assert!(manager
+            .validate_batch_attachments("other-device", batch_id, std::slice::from_ref(&attachment))
+            .await
+            .is_err());
+        let duplicate = vec![attachment.clone(), attachment];
+        assert!(manager
+            .validate_batch_attachments(device_id, batch_id, &duplicate)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn abort_batch_removes_only_unsubmitted_batch_files() {
+        let manager = RemoteTunnelManager::default();
+        let device_id = "device-abort";
+        let batch_id = "batch-abort";
+        let file_path = std::env::temp_dir().join(format!("panes-remote-test-{}", uuid::Uuid::new_v4()));
+        tokio_fs::write(&file_path, b"temporary")
+            .await
+            .expect("create test temporary attachment");
+        let file_path_string = file_path.display().to_string();
+        manager.batches.lock().await.insert(
+            remote_batch_key(device_id, batch_id),
+            RemoteBatchState {
+                device_id: device_id.to_string(),
+                batch_id: batch_id.to_string(),
+                files: HashMap::from([(file_path_string, ChatAttachmentPayload {
+                    file_name: "temporary.txt".to_string(),
+                    file_path: file_path.display().to_string(),
+                    size_bytes: 9,
+                    mime_type: Some("text/plain".to_string()),
+                    browser_annotation: None,
+                })]),
+                last_activity: std::time::Instant::now(),
+            },
+        );
+        manager.abort_batch(device_id, batch_id).await;
+        assert!(!file_path.exists());
+        assert!(manager.batches.lock().await.is_empty());
+    }
+
+    #[test]
+    fn missing_batch_id_keeps_legacy_client_path_available() {
+        assert_eq!(parse_optional_batch_id(&json!({"message": "legacy"})), Ok(None));
+    }
+
+    #[test]
+    fn relay_attachment_url_converts_same_origin_and_encodes_query() {
+        let url = relay_attachment_url(
+            "wss://relay.example.test/ws/tunnel",
+            "tunnel id",
+            "key/with slash",
+        )
+        .expect("valid relay endpoint");
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.path(), "/api/mobile/attachments/key%2Fwith%20slash");
+        assert_eq!(url.query(), Some("tunnel_id=tunnel+id"));
+    }
+
+    #[test]
+    fn relay_file_name_header_requires_valid_percent_encoding() {
+        assert_eq!(
+            decode_relay_header_value("report%20%E6%B5%8B%E8%AF%95.txt").unwrap(),
+            "report 测试.txt"
+        );
+        assert!(decode_relay_header_value("broken%ZZ.txt").is_err());
+    }
+
+    #[test]
+    fn message_attachment_inputs_accept_mobile_snake_case_attachment_keys() {
+        let payload = json!({
+            "attachments": [{
+                "attachment_key": "K-1",
+                "file_name": "report.txt",
+                "size_bytes": 4,
+                "mime_type": "text/plain"
+            }]
+        });
+        let inputs = parse_remote_attachment_inputs(&payload)
+            .expect("valid attachment input")
+            .expect("attachment list");
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].attachment_key.as_deref(), Some("K-1"));
+        assert_eq!(inputs[0].size_bytes, Some(4));
     }
 }

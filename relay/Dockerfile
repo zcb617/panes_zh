@@ -6,6 +6,8 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
+RUN mkdir -p /data/attachments && chown -R 1000:1000 /data/attachments
+
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
