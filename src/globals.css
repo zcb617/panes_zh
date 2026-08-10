@@ -13039,6 +13039,120 @@ button.chat-context-section:hover {
   }
 }
 
+.remote-access-error {
+  display: block;
+  margin-top: 5px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.remote-access-mono,
+.remote-access-pairing-copy code {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.remote-access-pairing-card {
+  display: grid;
+  grid-template-columns: 284px minmax(0, 1fr);
+  gap: 28px;
+  padding: 24px;
+  border: 1px solid var(--divider);
+  border-radius: 14px;
+  background: var(--surface-raised);
+}
+
+.remote-access-qr-wrap {
+  display: grid;
+  place-items: center;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--divider) 72%, transparent);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.remote-access-qr {
+  display: block;
+  width: 256px;
+  height: 256px;
+}
+
+.remote-access-paired-state {
+  min-height: 286px;
+  align-content: center;
+  gap: 10px;
+  color: var(--success);
+  text-align: center;
+}
+
+.remote-access-paired-state strong {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.remote-access-paired-state span {
+  max-width: 220px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.remote-access-pairing-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 18px;
+}
+
+.remote-access-pairing-copy code {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.remote-access-pairing-copy p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.remote-access-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.remote-access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.remote-access-secure {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--success);
+  font-size: 11px;
+}
+
+@media (max-width: 760px) {
+  .remote-access-pairing-card {
+    grid-template-columns: 1fr;
+  }
+
+  .remote-access-qr-wrap {
+    justify-self: center;
+  }
+}
+
 @media (max-width: 620px) {
   .usp-root {
     grid-template-columns: 1fr;

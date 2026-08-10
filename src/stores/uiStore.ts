@@ -31,6 +31,7 @@ export type SettingsSection =
   | "notifications"
   | "usage"
   | "computer-control"
+  | "remote-access"
   | "power"
   | "about"
   | "workspace-general"

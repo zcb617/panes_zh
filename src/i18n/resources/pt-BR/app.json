@@ -551,6 +551,7 @@
       "notifications": "Notificações",
       "usage": "Limites de uso",
       "computer-control": "Controle do computador",
+      "remote-access": "Acesso remoto móvel",
       "power": "Energia e suspensão",
       "about": "Sobre e atualizações"
     },
@@ -582,6 +583,10 @@
       "computer-control": {
         "title": "Controle do computador",
         "description": "Permita que agentes no Panes operem o computador somente nos aplicativos aprovados."
+      },
+      "remote-access": {
+        "title": "Acesso remoto móvel",
+        "description": "Conecte com segurança um celular a este Panes por qualquer rede usando o relay WSS público."
       },
       "power": {
         "title": "Energia e suspensão",
@@ -735,6 +740,44 @@
       "durationDescription": "Pare automaticamente após uma duração predefinida ou personalizada.",
       "customDurationDescription": "Informe o número de horas e minutos.",
       "loading": "Carregando configurações de energia..."
+    },
+    "remoteAccess": {
+      "serviceTitle": "Serviço de acesso remoto",
+      "serviceDescription": "O Panes se conecta ao Tunnel Relay público; não é necessário IP residencial fixo nem configurar o roteador.",
+      "enableTitle": "Permitir acesso remoto móvel",
+      "enableDescription": "Quando ativado, o Panes mantém um túnel WSS em segundo plano com panes.jxrjkf.cn:443.",
+      "connectionTitle": "Status da conexão",
+      "relayTitle": "Endpoint do Tunnel Relay",
+      "loading": "Carregando o status do acesso remoto…",
+      "disabled": "O acesso remoto está desativado",
+      "connecting": "Conectando ao Tunnel Relay; novas tentativas são automáticas",
+      "waitingForPhone": "Desktop conectado; aguardando o celular",
+      "phoneOnline": "Desktop e celular estão conectados",
+      "connected": "Conectado",
+      "offline": "Offline",
+      "pairTitle": "Parear um celular",
+      "pairDescription": "Leia este QR code no Panes Mobile ou copie e cole os dados de pareamento no celular.",
+      "pairedTitle": "Um celular está pareado",
+      "pairedDescription": "A credencial do dispositivo foi salva. Atualize o QR code para parear outro celular.",
+      "qrAlt": "QR code de pareamento do Panes Mobile",
+      "deviceId": "ID do túnel do dispositivo",
+      "securityNote": "O QR code contém uma credencial revogável. Ao regenerá-lo, o código antigo deixa de funcionar e os celulares precisam parear novamente.",
+      "copyPairing": "Copiar dados de pareamento",
+      "refresh": "Atualizar QR de pareamento",
+      "revoke": "Revogar pareamento e redefinir identidade",
+      "rotate": "Regenerar QR code",
+      "expiresAt": "Este QR code expira às {{time}} e deixa de funcionar imediatamente após um uso.",
+      "tlsProtected": "O tráfego público usa criptografia TLS",
+      "enabledToast": "O acesso remoto móvel foi ativado.",
+      "disabledToast": "O acesso remoto móvel foi desativado.",
+      "copied": "Dados de pareamento copiados.",
+      "refreshed": "Um novo QR code de uso único, válido por cinco minutos, foi gerado.",
+      "rotated": "A identidade foi regenerada e o QR code antigo foi invalidado.",
+      "loadFailed": "Não foi possível carregar o acesso remoto: {{error}}",
+      "saveFailed": "Não foi possível salvar o acesso remoto: {{error}}",
+      "copyFailed": "Não foi possível copiar os dados de pareamento: {{error}}",
+      "refreshFailed": "Não foi possível atualizar o QR code: {{error}}",
+      "rotateFailed": "Não foi possível regenerar a identidade: {{error}}"
     },
     "about": {
       "application": "Aplicativo",

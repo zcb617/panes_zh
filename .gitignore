@@ -46,6 +46,9 @@ remotion/
 .flatpak-builder/
 build-flatpak/
 
+# Local uni-app Android build output
+uniapp_build/
+
 .tmp
 .pnpm-store
 .agents

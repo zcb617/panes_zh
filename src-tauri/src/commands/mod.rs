@@ -8,6 +8,7 @@ pub mod files;
 pub mod git;
 pub mod harness;
 pub mod power;
+pub mod remote;
 pub mod scheduled_tasks;
 pub mod setup;
 pub mod terminal;

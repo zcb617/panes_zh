@@ -1585,3 +1585,16 @@ export interface ContextUsage {
   windowOpusWeeklyResetsAt: string | null;
   windowSonnetWeeklyResetsAt: string | null;
 }
+
+export interface RemoteAccessStatus {
+  enabled: boolean;
+  endpoint: string;
+  tunnelId: string;
+  connected: boolean;
+  peerOnline: boolean;
+  lastError: string | null;
+  pairingPayload: string | null;
+  pairingQrSvg: string | null;
+  pairingExpiresAt: string | null;
+  paired: boolean;
+}

@@ -551,6 +551,7 @@
       "notifications": "Notifications",
       "usage": "Usage limits",
       "computer-control": "Computer control",
+      "remote-access": "Mobile remote access",
       "power": "Power and wake",
       "about": "About and updates"
     },
@@ -582,6 +583,10 @@
       "computer-control": {
         "title": "Computer control",
         "description": "Allow agents in Panes to operate the computer within applications you approve."
+      },
+      "remote-access": {
+        "title": "Mobile remote access",
+        "description": "Securely connect a phone to this Panes from any network through the public WSS relay."
       },
       "power": {
         "title": "Power and wake",
@@ -735,6 +740,44 @@
       "durationDescription": "Stop automatically after a preset or custom duration.",
       "customDurationDescription": "Enter the number of hours and minutes.",
       "loading": "Loading power settings..."
+    },
+    "remoteAccess": {
+      "serviceTitle": "Remote access service",
+      "serviceDescription": "Panes connects outbound to the public Tunnel Relay, so no fixed home IP or router configuration is required.",
+      "enableTitle": "Allow mobile remote access",
+      "enableDescription": "Panes keeps a background WSS tunnel to panes.jxrjkf.cn:443 while enabled.",
+      "connectionTitle": "Connection status",
+      "relayTitle": "Tunnel Relay endpoint",
+      "loading": "Loading remote access status…",
+      "disabled": "Remote access is disabled",
+      "connecting": "Connecting to Tunnel Relay; retries are automatic",
+      "waitingForPhone": "Desktop connected; waiting for a phone",
+      "phoneOnline": "Desktop and phone are connected",
+      "connected": "Connected",
+      "offline": "Offline",
+      "pairTitle": "Pair a phone",
+      "pairDescription": "Scan this QR code in Panes Mobile, or copy and paste the pairing payload on the phone.",
+      "pairedTitle": "A phone is paired",
+      "pairedDescription": "The device credential has been saved. Refresh the QR code when pairing another phone.",
+      "qrAlt": "Panes Mobile pairing QR code",
+      "deviceId": "Device tunnel ID",
+      "securityNote": "The QR code contains a revocable pairing credential. Regenerating it invalidates the old code and requires phones to pair again.",
+      "copyPairing": "Copy pairing payload",
+      "refresh": "Refresh pairing QR",
+      "revoke": "Revoke pairing and reset identity",
+      "rotate": "Regenerate QR code",
+      "expiresAt": "This QR code expires at {{time}} and becomes invalid immediately after one use.",
+      "tlsProtected": "Public traffic is encrypted with TLS",
+      "enabledToast": "Mobile remote access is enabled.",
+      "disabledToast": "Mobile remote access is disabled.",
+      "copied": "Pairing payload copied.",
+      "refreshed": "A new single-use pairing QR code valid for five minutes was generated.",
+      "rotated": "Pairing identity regenerated; the old QR code is now invalid.",
+      "loadFailed": "Unable to load remote access status: {{error}}",
+      "saveFailed": "Unable to save remote access settings: {{error}}",
+      "copyFailed": "Unable to copy the pairing payload: {{error}}",
+      "refreshFailed": "Unable to refresh the pairing QR code: {{error}}",
+      "rotateFailed": "Unable to regenerate the pairing identity: {{error}}"
     },
     "about": {
       "application": "Application",

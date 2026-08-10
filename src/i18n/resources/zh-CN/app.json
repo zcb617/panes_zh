@@ -550,6 +550,7 @@
       "notifications": "通知",
       "usage": "用量限制",
       "computer-control": "电脑操作",
+      "remote-access": "手机远程访问",
       "power": "电源与唤醒",
       "about": "关于与更新"
     },
@@ -581,6 +582,10 @@
       "computer-control": {
         "title": "电脑操作",
         "description": "允许 Panes 中的智能体在你限定的应用程序内操作电脑。"
+      },
+      "remote-access": {
+        "title": "手机远程访问",
+        "description": "通过公网 WSS 中继，让手机在任何网络下安全连接这台 Panes。"
       },
       "power": {
         "title": "电源与唤醒",
@@ -734,6 +739,44 @@
       "durationDescription": "在预设或自定义时长后自动停止。",
       "customDurationDescription": "输入小时数和分钟数。",
       "loading": "正在加载电源设置…"
+    },
+    "remoteAccess": {
+      "serviceTitle": "远程访问服务",
+      "serviceDescription": "Panes 主动连接公网 Tunnel Relay，不需要家庭宽带具备固定 IP，也不需要配置路由器。",
+      "enableTitle": "允许手机远程访问",
+      "enableDescription": "开启后，Panes 将连接 panes.jxrjkf.cn:443，并在后台保持 WSS 隧道。",
+      "connectionTitle": "连接状态",
+      "relayTitle": "Tunnel Relay 地址",
+      "loading": "正在读取远程访问状态…",
+      "disabled": "远程访问尚未开启",
+      "connecting": "正在连接 Tunnel Relay，将自动重试",
+      "waitingForPhone": "电脑已连接，等待手机上线",
+      "phoneOnline": "电脑和手机均已连接",
+      "connected": "已连接",
+      "offline": "未连接",
+      "pairTitle": "配对手机",
+      "pairDescription": "在 Panes Mobile 中扫描下方二维码；也可以复制配对内容后在手机中粘贴导入。",
+      "pairedTitle": "已有手机完成配对",
+      "pairedDescription": "正式设备凭据已经保存。需要配对另一台手机时，请刷新二维码。",
+      "qrAlt": "Panes Mobile 配对二维码",
+      "deviceId": "设备通道 ID",
+      "securityNote": "二维码包含可撤销的配对凭据。不要发送给不受信任的人；重新生成后，已配对手机需要再次扫码。",
+      "copyPairing": "复制配对内容",
+      "refresh": "刷新配对二维码",
+      "revoke": "撤销绑定并重置身份",
+      "rotate": "重新生成二维码",
+      "expiresAt": "此二维码将在 {{time}} 过期；使用一次后立即失效。",
+      "tlsProtected": "公网链路使用 TLS 加密",
+      "enabledToast": "手机远程访问已开启。",
+      "disabledToast": "手机远程访问已关闭。",
+      "copied": "配对内容已复制。",
+      "refreshed": "已生成新的 5 分钟一次性配对二维码。",
+      "rotated": "配对身份已重新生成，旧二维码立即失效。",
+      "loadFailed": "无法读取远程访问状态：{{error}}",
+      "saveFailed": "无法保存远程访问设置：{{error}}",
+      "copyFailed": "无法复制配对内容：{{error}}",
+      "refreshFailed": "无法刷新配对二维码：{{error}}",
+      "rotateFailed": "无法重新生成配对身份：{{error}}"
     },
     "about": {
       "application": "应用程序",

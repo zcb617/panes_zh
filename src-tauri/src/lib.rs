@@ -13,6 +13,7 @@ mod models;
 mod path_utils;
 mod power;
 mod process_utils;
+mod remote;
 mod runtime_env;
 mod scheduled_tasks;
 mod state;
@@ -42,6 +43,7 @@ use locale::{
 };
 use models::{EngineRuntimeUpdatedDto, ThreadDto, ThreadStatusDto};
 use power::KeepAwakeManager;
+use remote::RemoteTunnelManager;
 use scheduled_tasks::ScheduledTaskManager;
 use state::{AppState, TurnManager};
 #[cfg(target_os = "macos")]
@@ -82,7 +84,12 @@ pub fn run() {
             log::warn!("runtime recovery failed, continuing startup: {error}");
         }
     }
-    let app_config = AppConfig::load_or_create().expect("failed to load config");
+    let mut app_config = AppConfig::load_or_create().expect("failed to load config");
+    if app_config.remote_access.enabled && app_config.remote_access.ensure_identity() {
+        app_config
+            .save()
+            .expect("failed to persist remote access identity");
+    }
     let app_locale = resolve_app_locale(app_config.general.locale.as_deref());
     let keep_awake = Arc::new(KeepAwakeManager::new());
     if let Err(error) = keep_awake.reclaim_stale_helpers() {
@@ -115,6 +122,7 @@ pub fn run() {
         computer_control_approvals: Arc::new(
             commands::computer_control::ComputerControlApprovalManager::default(),
         ),
+        remote_access: Arc::new(RemoteTunnelManager::default()),
     };
 
     let app = tauri::Builder::default()
@@ -182,6 +190,15 @@ pub fn run() {
                 .scheduled_tasks
                 .clone()
                 .start(handle.clone(), state.clone());
+            let remote_config = state.config.remote_access.clone();
+            let remote_manager = state.remote_access.clone();
+            let remote_state = state.clone();
+            let remote_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                remote_manager
+                    .configure(remote_handle, remote_state, remote_config)
+                    .await;
+            });
             app.on_menu_event(move |_app, event| {
                 let id = event.id().as_ref();
                 match id {
@@ -210,6 +227,10 @@ pub fn run() {
             commands::power::set_power_settings,
             commands::power::get_helper_status,
             commands::power::register_keep_awake_helper,
+            commands::remote::get_remote_access_status,
+            commands::remote::set_remote_access_enabled,
+            commands::remote::regenerate_remote_access_identity,
+            commands::remote::refresh_remote_pairing_token,
             commands::browser::browser_show,
             commands::browser::browser_set_bounds,
             commands::browser::browser_hide,
@@ -388,11 +409,13 @@ pub fn run() {
         RunEvent::ExitRequested { .. } | RunEvent::Exit => {
             let terminals = app_handle.state::<AppState>().terminals.clone();
             let keep_awake = app_handle.state::<AppState>().keep_awake.clone();
+            let remote_access = app_handle.state::<AppState>().remote_access.clone();
             tauri::async_runtime::block_on(async move {
                 if let Err(error) = keep_awake.shutdown().await {
                     log::warn!("failed to release keep awake on shutdown: {error}");
                 }
                 terminals.shutdown().await;
+                remote_access.shutdown().await;
             });
         }
         _ => {}

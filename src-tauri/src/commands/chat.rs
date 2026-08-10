@@ -1514,6 +1514,10 @@ fn attachment_modality_label(modality: &str) -> &'static str {
 
 #[tauri::command]
 pub async fn cancel_turn(state: State<'_, AppState>, thread_id: String) -> Result<(), String> {
+    cancel_turn_inner(state.inner(), thread_id).await
+}
+
+pub(crate) async fn cancel_turn_inner(state: &AppState, thread_id: String) -> Result<(), String> {
     state.turns.cancel(&thread_id).await;
 
     let db = state.db.clone();
@@ -4755,6 +4759,7 @@ mod tests {
             computer_control_approvals: Arc::new(
                 crate::commands::computer_control::ComputerControlApprovalManager::default(),
             ),
+            remote_access: Arc::new(crate::remote::RemoteTunnelManager::default()),
         }
     }
 

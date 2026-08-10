@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { configDefaults } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],
@@ -13,5 +14,14 @@ export default defineConfig({
       port: 1421
     }
   },
-  clearScreen: false
+  clearScreen: false,
+  test: {
+    exclude: [
+      ...configDefaults.exclude,
+      ".agents/**",
+      ".codex/**",
+      "mobile/**",
+      "relay/**"
+    ]
+  }
 });

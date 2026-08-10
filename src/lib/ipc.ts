@@ -55,6 +55,7 @@ import type {
   KeepAwakeState,
   PowerSettings,
   PowerSettingsInput,
+  RemoteAccessStatus,
   Message,
   MessageWindow,
   MessageWindowCursor,
@@ -85,6 +86,13 @@ import type {
 import type { ScheduledTask, ScheduledTaskInput } from "../types";
 
 export const ipc = {
+  getRemoteAccessStatus: () => invoke<RemoteAccessStatus>("get_remote_access_status"),
+  setRemoteAccessEnabled: (enabled: boolean) =>
+    invoke<RemoteAccessStatus>("set_remote_access_enabled", { enabled }),
+  regenerateRemoteAccessIdentity: () =>
+    invoke<RemoteAccessStatus>("regenerate_remote_access_identity"),
+  refreshRemotePairingToken: () =>
+    invoke<RemoteAccessStatus>("refresh_remote_pairing_token"),
   listScheduledTasks: () => invoke<ScheduledTask[]>("list_scheduled_tasks"),
   createScheduledTask: (input: ScheduledTaskInput) =>
     invoke<ScheduledTask>("create_scheduled_task", { input }),

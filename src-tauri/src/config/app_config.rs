@@ -28,6 +28,8 @@ pub struct AppConfig {
     pub debug: DebugConfig,
     pub power: PowerConfig,
     pub computer_control: ComputerControlConfig,
+    #[serde(skip_serializing_if = "RemoteAccessConfig::is_default")]
+    pub remote_access: RemoteAccessConfig,
     #[serde(skip_serializing_if = "HarnessesConfig::is_empty")]
     pub harnesses: HarnessesConfig,
 }
@@ -94,6 +96,52 @@ pub struct PowerConfig {
 pub struct ComputerControlConfig {
     pub enabled: bool,
     pub allowed_applications: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteAccessConfig {
+    pub enabled: bool,
+    pub endpoint: String,
+    pub tunnel_id: String,
+    pub credential: String,
+    pub device_credential: String,
+}
+
+impl RemoteAccessConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub fn ensure_identity(&mut self) -> bool {
+        if !self.tunnel_id.trim().is_empty() && self.credential.trim().len() >= 32 {
+            return false;
+        }
+        self.regenerate_identity();
+        true
+    }
+
+    pub fn regenerate_identity(&mut self) {
+        self.tunnel_id = format!("panes_{}", uuid::Uuid::new_v4().simple());
+        self.credential = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        self.device_credential.clear();
+    }
+}
+
+impl Default for RemoteAccessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "wss://panes.jxrjkf.cn/ws/tunnel".to_string(),
+            tunnel_id: String::new(),
+            credential: String::new(),
+            device_credential: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -195,6 +243,7 @@ impl Default for AppConfig {
             debug: DebugConfig::default(),
             power: PowerConfig::default(),
             computer_control: ComputerControlConfig::default(),
+            remote_access: RemoteAccessConfig::default(),
             harnesses: HarnessesConfig::default(),
         }
     }

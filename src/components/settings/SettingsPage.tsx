@@ -31,6 +31,7 @@ import {
   TerminalSquare,
   Clock3,
   SquareCode,
+  Smartphone,
   Volume2,
   Zap,
 } from "lucide-react";
@@ -69,6 +70,7 @@ import { Dropdown } from "../shared/Dropdown";
 import { PanesMark, PanesWordmark } from "../shared/PanesBrand";
 import { WorkspaceSettingsPage } from "../workspace/WorkspaceSettingsPage";
 import { UsageLimitsSettings } from "./UsageLimitsSettings";
+import { RemoteAccessSettings } from "./RemoteAccessSettings";
 import type {
   ComputerControlStatus,
   DefaultFileOpenTarget,
@@ -378,6 +380,7 @@ export function SettingsPage() {
       { id: "notifications" as const, icon: <BellRing size={15} />, label: t("app:settingsPage.nav.notifications") },
       { id: "usage" as const, icon: <Gauge size={15} />, label: t("app:settingsPage.nav.usage") },
       { id: "computer-control" as const, icon: <MousePointer2 size={15} />, label: t("app:settingsPage.nav.computer-control") },
+      { id: "remote-access" as const, icon: <Smartphone size={15} />, label: t("app:settingsPage.nav.remote-access") },
       { id: "power" as const, icon: <Zap size={15} />, label: t("app:settingsPage.nav.power") },
       { id: "about" as const, icon: <BadgeInfo size={15} />, label: t("app:settingsPage.nav.about") },
       { id: "workspace-general" as const, icon: <FolderGit2 size={15} />, label: t("workspace:nav.general") },
@@ -1481,6 +1484,8 @@ export function SettingsPage() {
               </div>
             </>
           ) : null}
+
+          {section === "remote-access" ? <RemoteAccessSettings /> : null}
 
           {section === "about" ? (
             <section className="usp-section usp-section-first">
