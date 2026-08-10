@@ -48,6 +48,7 @@ export class RemoteClient {
     this.disconnect();
     this.config = config;
     this.stopped = false;
+    this.retryIndex = 0;
     this.generation += 1;
     this.open(this.generation);
   }
@@ -58,12 +59,36 @@ export class RemoteClient {
     if (this.retryTimer !== null) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.socket?.close({ code: 1000, reason: "client disconnect" });
+    this.config = null;
     this.socket = null;
     this.socketOpen = false;
     this.peerOnline = false;
     this.pairingInProgress = false;
     this.rejectPending("连接已断开");
     this.onState({ relayConnected: false, peerOnline: false, lastError: null });
+  }
+
+  suspend() {
+    if (this.stopped || !this.config) return;
+    this.stopped = true;
+    this.generation += 1;
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.socket?.close({ code: 1000, reason: "app entered background" });
+    this.socket = null;
+    this.socketOpen = false;
+    this.peerOnline = false;
+    this.pairingInProgress = false;
+    this.rejectPending("应用已进入后台");
+    this.onState({ relayConnected: false, peerOnline: false, lastError: null });
+  }
+
+  resume() {
+    if (!this.stopped || !this.config) return;
+    this.stopped = false;
+    this.retryIndex = 0;
+    this.generation += 1;
+    this.open(this.generation);
   }
 
   request<T = unknown>(method: string, payload: Record<string, unknown> = {}): Promise<T> {
@@ -166,7 +191,7 @@ export class RemoteClient {
     });
 
     socket.onClose((event) => {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || this.socket !== socket) return;
       this.socket = null;
       this.socketOpen = false;
       this.peerOnline = false;
@@ -175,13 +200,20 @@ export class RemoteClient {
     });
 
     socket.onError((error) => {
-      if (generation !== this.generation) return;
-      this.onState({ relayConnected: false, peerOnline: false, lastError: error.errMsg || "无法连接 Tunnel Relay" });
+      if (generation !== this.generation || this.socket !== socket) return;
+      this.socket = null;
+      this.socketOpen = false;
+      this.peerOnline = false;
+      this.pairingInProgress = false;
+      this.rejectPending("连接异常，请稍后重试");
+      socket.close({ code: 1011, reason: "socket error" });
+      if (!this.stopped) this.scheduleReconnect(generation, error.errMsg || "无法连接 Tunnel Relay");
     });
   }
 
   private scheduleReconnect(generation: number, error: string) {
     if (this.stopped || generation !== this.generation) return;
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer);
     this.onState({ relayConnected: false, peerOnline: false, lastError: error });
     const delay = this.retryDelays[Math.min(this.retryIndex, this.retryDelays.length - 1)];
     this.retryIndex = Math.min(this.retryIndex + 1, this.retryDelays.length - 1);

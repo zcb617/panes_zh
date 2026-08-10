@@ -26,10 +26,20 @@ export interface Thread {
   workspaceId: string;
   engineId: string;
   modelId: string;
+  engineMetadata?: Record<string, unknown> | null;
   title: string;
   status: "idle" | "streaming" | "awaiting_approval" | "error" | "completed";
   messageCount: number;
   lastActivityAt: string;
+}
+
+export interface ChatAttachment {
+  id: string;
+  fileName: string;
+  filePath: string;
+  sizeBytes: number;
+  mimeType?: string;
+  uploading?: boolean;
 }
 
 export interface Message {

@@ -15,7 +15,13 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    commands::chat::{cancel_turn_inner, send_message_inner},
+    commands::{
+        chat::{
+            cancel_turn_inner, save_pasted_image_attachment, send_message_inner,
+            ChatAttachmentPayload,
+        },
+        threads::create_thread_with_defaults,
+    },
     config::app_config::{AppConfig, RemoteAccessConfig, RemoteDeviceConfig},
     models::MessageWindowCursorDto,
     state::AppState,
@@ -79,6 +85,7 @@ impl Default for RemoteRuntimeState {
 pub struct RemoteTunnelManager {
     runtime: RwLock<RemoteRuntimeState>,
     subscriptions: RwLock<HashSet<String>>,
+    uploads: Mutex<HashMap<String, RemoteUploadState>>,
     cancellation: Mutex<Option<CancellationToken>>,
 }
 
@@ -91,6 +98,14 @@ struct RemoteRequest {
     auth: String,
     #[serde(default)]
     payload: Value,
+}
+
+struct RemoteUploadState {
+    file_name: String,
+    mime_type: String,
+    chunk_count: u32,
+    next_chunk: u32,
+    data_base64: String,
 }
 
 fn device_name_from_payload(payload: &Value) -> String {
@@ -201,6 +216,7 @@ impl RemoteTunnelManager {
             cancellation.cancel();
         }
         self.subscriptions.write().await.clear();
+        self.uploads.lock().await.clear();
 
         let generation = {
             let mut runtime = self.runtime.write().await;
@@ -542,6 +558,51 @@ impl RemoteTunnelManager {
                                                 Err(error) => Err(error),
                                             }
                                         }
+                                        "thread.create" => {
+                                            let workspace_id = request.payload.get("workspace_id")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty())
+                                                .map(str::to_string)
+                                                .ok_or_else(|| "workspace_id is required".to_string());
+                                            let engine_id = request.payload.get("engine_id")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty())
+                                                .unwrap_or("codex")
+                                                .to_string();
+                                            let model_id = request.payload.get("model_id")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty())
+                                                .unwrap_or("gpt-5.4")
+                                                .to_string();
+                                            let reasoning_effort = request.payload.get("reasoning_effort")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty())
+                                                .map(str::to_string);
+                                            let service_tier = request.payload.get("service_tier")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty())
+                                                .map(str::to_string);
+                                            match workspace_id {
+                                                Ok(workspace_id) => create_thread_with_defaults(
+                                                    &state,
+                                                    workspace_id,
+                                                    None,
+                                                    engine_id,
+                                                    model_id,
+                                                    "新会话".to_string(),
+                                                    reasoning_effort,
+                                                    service_tier,
+                                                )
+                                                .await
+                                                .and_then(|thread| serde_json::to_value(thread).map_err(|error| error.to_string())),
+                                                Err(error) => Err(error),
+                                            }
+                                        }
                                         "message.list" => {
                                             let thread_id = request.payload.get("thread_id")
                                                 .and_then(Value::as_str)
@@ -579,6 +640,101 @@ impl RemoteTunnelManager {
                                                 Err(error) => Err(error),
                                             }
                                         }
+                                        "attachment.upload" => {
+                                            let upload_id = request.payload.get("upload_id")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty() && value.len() <= 128)
+                                                .map(str::to_string)
+                                                .ok_or_else(|| "upload_id is required".to_string());
+                                            let file_name = request.payload.get("file_name")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty() && value.len() <= 255)
+                                                .map(str::to_string)
+                                                .ok_or_else(|| "file_name is required".to_string());
+                                            let mime_type = request.payload.get("mime_type")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| value.starts_with("image/") && value.len() <= 128)
+                                                .map(str::to_string)
+                                                .ok_or_else(|| "image mime_type is required".to_string());
+                                            let chunk_index = request.payload.get("chunk_index")
+                                                .and_then(Value::as_u64)
+                                                .filter(|value| *value <= u32::MAX as u64)
+                                                .map(|value| value as u32)
+                                                .ok_or_else(|| "chunk_index is required".to_string());
+                                            let chunk_count = request.payload.get("chunk_count")
+                                                .and_then(Value::as_u64)
+                                                .filter(|value| *value > 0 && *value <= 64)
+                                                .map(|value| value as u32)
+                                                .ok_or_else(|| "chunk_count is invalid".to_string());
+                                            let data_base64 = request.payload.get("data_base64")
+                                                .and_then(Value::as_str)
+                                                .filter(|value| !value.is_empty() && value.len() <= 300_000)
+                                                .map(str::to_string)
+                                                .ok_or_else(|| "attachment chunk is invalid".to_string());
+                                            match (upload_id, file_name, mime_type, chunk_index, chunk_count, data_base64) {
+                                                (Ok(upload_id), Ok(file_name), Ok(mime_type), Ok(chunk_index), Ok(chunk_count), Ok(data_base64)) => {
+                                                    let mut uploads = manager.uploads.lock().await;
+                                                    let completed = (|| -> Result<Option<RemoteUploadState>, String> {
+                                                        if chunk_index == 0 {
+                                                            uploads.insert(upload_id.clone(), RemoteUploadState {
+                                                                file_name: file_name.clone(),
+                                                                mime_type: mime_type.clone(),
+                                                                chunk_count,
+                                                                next_chunk: 0,
+                                                                data_base64: String::new(),
+                                                            });
+                                                        }
+                                                        let upload = uploads.get_mut(&upload_id)
+                                                            .ok_or_else(|| "attachment upload was not initialized".to_string())?;
+                                                        if upload.file_name != file_name
+                                                            || upload.mime_type != mime_type
+                                                            || upload.chunk_count != chunk_count
+                                                            || upload.next_chunk != chunk_index
+                                                        {
+                                                            return Err("attachment chunks are out of sequence".to_string());
+                                                        }
+                                                        upload.data_base64.push_str(&data_base64);
+                                                        if upload.data_base64.len() > 14_000_000 {
+                                                            uploads.remove(&upload_id);
+                                                            return Err("attachment exceeds the 10 MB limit".to_string());
+                                                        }
+                                                        upload.next_chunk += 1;
+                                                        if upload.next_chunk == upload.chunk_count {
+                                                            Ok(uploads.remove(&upload_id))
+                                                        } else {
+                                                            Ok(None)
+                                                        }
+                                                    })();
+                                                    drop(uploads);
+                                                    match completed {
+                                                        Ok(Some(upload)) => {
+                                                            let original_file_name = upload.file_name.clone();
+                                                            save_pasted_image_attachment(
+                                                                upload.file_name,
+                                                                upload.mime_type,
+                                                                upload.data_base64,
+                                                            )
+                                                            .await
+                                                            .and_then(|mut attachment| {
+                                                                attachment.file_name = original_file_name;
+                                                                serde_json::to_value(attachment).map_err(|error| error.to_string())
+                                                            })
+                                                        }
+                                                        Ok(None) => Ok(json!({ "complete": false })),
+                                                        Err(error) => Err(error),
+                                                    }
+                                                }
+                                                (Err(error), _, _, _, _, _)
+                                                | (_, Err(error), _, _, _, _)
+                                                | (_, _, Err(error), _, _, _)
+                                                | (_, _, _, Err(error), _, _)
+                                                | (_, _, _, _, Err(error), _)
+                                                | (_, _, _, _, _, Err(error)) => Err(error),
+                                            }
+                                        }
                                         "message.send" => {
                                             let thread_id = request.payload.get("thread_id")
                                                 .and_then(Value::as_str)
@@ -589,11 +745,19 @@ impl RemoteTunnelManager {
                                             let message = request.payload.get("message")
                                                 .and_then(Value::as_str)
                                                 .map(str::trim)
-                                                .filter(|value| !value.is_empty())
-                                                .map(str::to_string)
-                                                .ok_or_else(|| "message is required".to_string());
-                                            match (thread_id, message) {
-                                                (Ok(thread_id), Ok(message)) if message.len() <= 100_000 => {
+                                                .unwrap_or_default()
+                                                .to_string();
+                                            let attachments = request.payload.get("attachments")
+                                                .filter(|value| !value.is_null())
+                                                .cloned()
+                                                .map(serde_json::from_value::<Vec<ChatAttachmentPayload>>)
+                                                .transpose()
+                                                .map_err(|error| error.to_string());
+                                            match (thread_id, attachments) {
+                                                (Ok(thread_id), Ok(attachments))
+                                                    if message.len() <= 100_000
+                                                        && (!message.is_empty()
+                                                            || !attachments.as_ref().map(|items| items.is_empty()).unwrap_or(true)) => {
                                                     send_message_inner(
                                                         app.clone(),
                                                         &state,
@@ -601,7 +765,7 @@ impl RemoteTunnelManager {
                                                         message,
                                                         None,
                                                         None,
-                                                        None,
+                                                        attachments,
                                                         None,
                                                         Some(false),
                                                         Some(request.id.clone()),
@@ -610,7 +774,8 @@ impl RemoteTunnelManager {
                                                     .await
                                                     .map(|assistant_message_id| json!({ "assistant_message_id": assistant_message_id }))
                                                 }
-                                                (Ok(_), Ok(_)) => Err("message is too large".to_string()),
+                                                (Ok(_), Ok(_)) if message.len() > 100_000 => Err("message is too large".to_string()),
+                                                (Ok(_), Ok(_)) => Err("message or attachment is required".to_string()),
                                                 (Err(error), _) | (_, Err(error)) => Err(error),
                                             }
                                         }
