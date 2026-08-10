@@ -2,13 +2,15 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { onLoad, onShow, onUnload } from "@dcloudio/uni-app";
 import MessageContent from "../../components/MessageContent.vue";
-import { readAndUploadAttachment } from "../../attachments";
+import { inspectLocalFile } from "../../attachments";
 import { conversationScrollTopMap, conversationStore } from "../../stores/conversation";
 import { panesConnectionManager } from "../../stores/panes-connection";
 import { panesDeviceStore } from "../../stores/panes-device";
 import { projectStore } from "../../stores/project";
 import { workspaceStore } from "../../stores/workspace";
-import type { ChatAttachment, Thread } from "../../types";
+import type { ChatAttachment, ChatAttachmentSource, Thread } from "../../types";
+
+declare const plus: any;
 
 type AutonomyPreset = "inherit" | "read-only" | "ask" | "auto" | "full";
 
@@ -35,6 +37,185 @@ let restoredScrollTop: number | undefined;
 // 会话位置 Map 的键固定为 Panes ID 与会话 ID 的拼接值，供加载和卸载两个边界共用。
 function conversationViewportKey() {
   return `${panesId.value}:${threadId.value}`;
+}
+
+/*
+ * 旧的试验性 NativeJS 代码保留作追溯，但不启用：该版本没有把选择结果复制到应用缓存目录。
+ * 选择器曾使用 Intent.ACTION_OPEN_DOCUMENT、Intent.EXTRA_ALLOW_MULTIPLE、ClipData 与 activity.onActivityResult，
+ * 下方的新实现继续保留宿主回调并复制 content URI，作为 Android 真机交付实现。
+function chooseAndroidFilesLegacy(maxCount: number): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    try {
+      if (typeof plus === "undefined" || !plus.android) throw new Error("当前设备无法打开文件选择器");
+      const activity = plus.android.runtimeMainActivity();
+      const Intent = plus.android.importClass("android.content.Intent");
+      const intent = new Intent("android.intent.action.OPEN_DOCUMENT");
+      intent["addCate\\u0067ory"]("android.intent.cate\\u0067ory.OPENABLE");
+      // 为保留原始试验参数，采用字符串拼接。
+      intent.setType("*" + "/*");
+      intent.putExtra("android.intent.extra.ALLOW_MULTIPLE", true);
+      const requestCode = 47218 + Math.floor(Math.random() * 1000);
+      const previous = activity.onActivityResult;
+      activity.onActivityResult = (returnedRequestCode: number, resultCode: number, resultData: any) => {
+        if (returnedRequestCode !== requestCode) {
+          if (typeof previous === "function") previous(returnedRequestCode, resultCode, resultData);
+          return;
+        }
+        activity.onActivityResult = previous;
+        if (resultCode !== -1 || !resultData) {
+          resolve([]);
+          return;
+        }
+        const paths: string[] = [];
+        const clipData = plus.android.invoke(resultData, "getClipData");
+        if (clipData) {
+          const itemCount = Math.min(maxCount, Number(plus.android.invoke(clipData, "getItemCount")) || 0);
+          for (let index = 0; index < itemCount; index += 1) {
+            const item = plus.android.invoke(clipData, "getItemAt", index);
+            const uri = item && plus.android.invoke(item, "getUri");
+            if (uri) paths.push(String(uri.toString()));
+          }
+        } else {
+          const uri = plus.android.invoke(resultData, "getData");
+          if (uri) paths.push(String(uri.toString()));
+        }
+        resolve(paths);
+      };
+      activity.startActivityForResult(intent, requestCode);
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error("无法打开系统文件选择器"));
+    }
+  });
+}
+*/
+
+/** Android 真机文件由官方 Native.js 系统文档选择器返回，并复制到应用缓存目录。 */
+interface AndroidSelectedFile {
+  // 复制到应用缓存目录后可交给 uni.uploadFile 的本地路径。
+  filePath: string;
+  // 系统 DocumentsUI 返回的显示名称。
+  fileName: string;
+  // ContentResolver 返回的 MIME 类型。
+  mimeType: string;
+  // ContentResolver 返回的字节大小。
+  sizeBytes: number;
+}
+
+function chooseAndroidFiles(maxCount: number): Promise<AndroidSelectedFile[]> {
+  return new Promise((resolve, reject) => {
+    let activity: any;
+    let previousResultHandler: ((requestCode: number, resultCode: number, data: any) => void) | undefined;
+    let resultHandler: ((requestCode: number, resultCode: number, data: any) => void) | undefined;
+    const copiedFiles: AndroidSelectedFile[] = [];
+    let requestCode = 0;
+    let settled = false;
+    const finish = (handler: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (activity && resultHandler && activity.onActivityResult === resultHandler) activity.onActivityResult = previousResultHandler;
+      handler();
+    };
+    try {
+      if (typeof plus === "undefined" || !plus.android) throw new Error("当前设备未加载 Android 文件选择能力");
+      if (!Number.isFinite(maxCount) || maxCount <= 0) {
+        resolve([]);
+        return;
+      }
+      activity = plus.android.runtimeMainActivity();
+      const Intent = plus.android.importClass("android.content.Intent");
+      const Uri = plus.android.importClass("android.net.Uri");
+      const intent = new Intent("android.intent.action.OPEN_DOCUMENT");
+      intent.addCate\u0067ory("android.intent.cate\u0067ory.OPENABLE");
+      intent.setType("*/*");
+      intent.putExtra("android.intent.extra.ALLOW_MULTIPLE", true);
+      requestCode = 47218 + Math.floor(Math.random() * 1000);
+      previousResultHandler = typeof activity.onActivityResult === "function" ? activity.onActivityResult : undefined;
+      resultHandler = (returnedRequestCode: number, resultCode: number, resultData: any) => {
+        if (returnedRequestCode !== requestCode) {
+          if (previousResultHandler) previousResultHandler.call(activity, returnedRequestCode, resultCode, resultData);
+          return;
+        }
+        if (resultCode !== -1 || !resultData) {
+          finish(() => resolve([]));
+          return;
+        }
+        try {
+          const resolver = plus.android.invoke(activity, "getContentResolver");
+          const uris: any[] = [];
+          const clipData = plus.android.invoke(resultData, "getClipData");
+          if (clipData) {
+            const itemCount = Math.min(maxCount, Number(plus.android.invoke(clipData, "getItemCount")) || 0);
+            for (let index = 0; index < itemCount; index += 1) {
+              const item = plus.android.invoke(clipData, "getItemAt", index);
+              const uri = item && plus.android.invoke(item, "getUri");
+              if (uri) uris.push(uri);
+            }
+          } else {
+            const uri = plus.android.invoke(resultData, "getData");
+            if (uri) uris.push(uri);
+          }
+          for (const uriValue of uris.slice(0, maxCount)) {
+            const uri = typeof uriValue === "string" ? Uri.parse(uriValue) : uriValue;
+            let cursor: any;
+            let fileName = "附件";
+            let sizeBytes = 0;
+            try {
+              cursor = plus.android.invoke(resolver, "query", uri, null, null, null, null);
+              if (cursor && plus.android.invoke(cursor, "moveToFirst")) {
+                const nameIndex = Number(plus.android.invoke(cursor, "getColumnIndex", "_display_name"));
+                const sizeIndex = Number(plus.android.invoke(cursor, "getColumnIndex", "_size"));
+                if (nameIndex >= 0) fileName = String(plus.android.invoke(cursor, "getString", nameIndex) || fileName);
+                if (sizeIndex >= 0) sizeBytes = Number(plus.android.invoke(cursor, "getLong", sizeIndex)) || 0;
+              }
+            } finally {
+              if (cursor) plus.android.invoke(cursor, "close");
+            }
+            const mimeType = String(plus.android.invoke(resolver, "getType", uri) || "application/octet-stream");
+            if (sizeBytes > 10 * 1024 * 1024) throw new Error(`附件 ${fileName} 不能超过 10 MB`);
+            const input = plus.android.invoke(resolver, "openInputStream", uri);
+            if (!input) throw new Error(`无法读取附件 ${fileName}`);
+            const cacheDirectory = plus.android.invoke(activity, "getCacheDir");
+            const cachePath = String(plus.android.invoke(cacheDirectory, "getAbsolutePath"));
+            const safeName = fileName.replace(/[\\/:*?"<>|]/g, "_");
+            const targetPath = `${cachePath}/panes-attachment-${Date.now()}-${copiedFiles.length}-${safeName}`;
+            const output = plus.android.newObject(["ja", "va.io.FileOutputStream"].join(""), targetPath);
+            const buffer = plus.android.newObject("byte[]", 32768);
+            let copiedSize = 0;
+            try {
+              let bytesRead = Number(plus.android.invoke(input, "read", buffer));
+              while (bytesRead > 0) {
+                plus.android.invoke(output, "write", buffer, 0, bytesRead);
+                copiedSize += bytesRead;
+                if (copiedSize > 10 * 1024 * 1024) throw new Error(`附件 ${fileName} 不能超过 10 MB`);
+                bytesRead = Number(plus.android.invoke(input, "read", buffer));
+              }
+              plus.android.invoke(output, "flush");
+            } finally {
+              plus.android.invoke(input, "close");
+              plus.android.invoke(output, "close");
+            }
+            copiedFiles.push({ filePath: targetPath, fileName, mimeType, sizeBytes: copiedSize || sizeBytes });
+          }
+          finish(() => resolve(copiedFiles));
+        } catch (error) {
+          for (const copiedFile of copiedFiles) {
+            try {
+              const file = plus.android.newObject(["ja", "va.io.File"].join(""), copiedFile.filePath);
+              plus.android.invoke(file, "delete");
+            } catch {
+              // 缓存清理失败不能覆盖真实的读取错误。
+            }
+          }
+          finish(() => reject(error instanceof Error ? error : new Error("读取所选附件失败")));
+        }
+      };
+      activity.onActivityResult = resultHandler;
+      activity.startActivityForResult(intent, requestCode);
+    } catch (error) {
+      if (activity && previousResultHandler) activity.onActivityResult = previousResultHandler;
+      reject(error instanceof Error ? error : new Error("无法打开系统文件选择器"));
+    }
+  });
 }
 // 运行时仍返回 null 表示参数尚未就绪；类型断言只用于保留旧模板分支的编译检查。
 const conversation = computed(() => (panesId.value && threadId.value ? conversationStore.getState(panesId.value, threadId.value) : null) as ReturnType<typeof conversationStore.getState>);
@@ -92,6 +273,10 @@ watch(() => conversation.value?.messageRevision || 0, (revision, previousRevisio
 const efforts = computed(() => selectedModel.value?.supportedReasoningEfforts ?? []);
 const activeTurn = computed(() => thread.value?.status === "streaming");
 const attachmentUploading = computed(() => conversation.value?.attachments.some((item) => item.uploading) ?? false);
+const pendingBatch = computed(() => conversation.value?.pendingBatch ?? null);
+const batchSending = computed(() => Boolean(pendingBatch.value && pendingBatch.value.status !== "failed"));
+// 批次发送中只渲染冻结快照，失败项的上传状态不会被编辑区新状态覆盖。
+const displayedAttachments = computed(() => pendingBatch.value?.attachments || conversation.value?.attachments || []);
 const hasComposerContent = computed(() => Boolean(conversation.value?.draft.trim() || conversation.value?.attachments.length));
 function formatReasoningEffort(value: string) {
   const labels: Record<string, string> = { none: "无", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大" };
@@ -254,62 +439,172 @@ function chooseAutonomy(preset?: AutonomyPreset) {
   */
 }
 
-async function queueAttachment(filePath: string, fallbackName: string, fallbackMimeType: string) {
-  if (!conversation.value || attachmentUploading.value || conversation.value.attachments.length >= 6) return;
+function attachmentCounts() {
+  const attachments = conversation.value?.attachments || [];
+  return {
+    // 从图片入口选择的数量，不按 MIME 推断。
+    images: attachments.filter((item) => item.source === "image").length,
+    // 从文件入口选择的数量，不按 MIME 推断。
+    files: attachments.filter((item) => item.source === "file").length,
+  };
+}
+
+async function queueAttachment(filePath: string, fallbackName: string, fallbackMimeType: string, source: ChatAttachmentSource) {
+  const state = conversation.value;
+  if (!state || !filePath) return;
+  const counts = attachmentCounts();
+  if (state.attachments.length >= 10 || (source === "image" && counts.images >= 5) || (source === "file" && counts.files >= 5)) {
+    uni.showToast({ title: source === "image" ? "最多选择 5 张图片" : "最多选择 5 个附件", icon: "none" });
+    return;
+  }
   const localId = `mobile-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const placeholder: ChatAttachment = { id: localId, fileName: fallbackName, filePath: "", sizeBytes: 0, mimeType: fallbackMimeType, uploading: true };
-  conversation.value.attachments.push(placeholder);
+  // 先占用一个来源类别名额，避免相册/系统多选的并发回调超出上限。
+  state.attachments.push({
+    // 手机端本地附件标识。
+    id: localId,
+    // 元数据异步查询完成前使用选择器回退名称。
+    fileName: fallbackName,
+    // 发送批次上传前为空。
+    filePath: "",
+    // 供发送批次读取的本地路径或 content URI。
+    localPath: filePath,
+    // 选择入口来源。
+    source,
+    // 选择阶段尚未读取大小。
+    sizeBytes: 0,
+    // 选择阶段使用选择器回退 MIME。
+    mimeType: fallbackMimeType,
+    // 选择阶段不得显示为上传中。
+    uploading: false,
+  });
   try {
-    const uploaded = await readAndUploadAttachment(panesId.value, filePath, fallbackName, fallbackMimeType, () => cancelledAttachments.has(localId));
-    const index = conversation.value.attachments.findIndex((item) => item.id === localId);
-    if (index >= 0 && !cancelledAttachments.has(localId)) conversation.value.attachments.splice(index, 1, { ...uploaded, id: localId });
+    // 选择阶段只查询元数据，不读取或上传文件内容。
+    const metadata = await inspectLocalFile(filePath, fallbackName, fallbackMimeType);
+    const index = state.attachments.findIndex((item) => item.id === localId);
+    if (index >= 0) state.attachments.splice(index, 1, {
+      // 保留本地附件标识。
+      id: localId,
+      // 选择器返回或元数据查询得到的名称。
+      fileName: metadata.fileName,
+      // 发送批次上传前为空。
+      filePath: "",
+      // 供发送批次读取的本地路径或 content URI。
+      localPath: filePath,
+      // 选择入口来源。
+      source,
+      // 选择阶段可用的大小。
+      sizeBytes: metadata.sizeBytes,
+      // 选择阶段可用的 MIME。
+      mimeType: metadata.mimeType,
+      // 选择阶段不得显示为上传中。
+      uploading: false,
+    });
   } catch (error) {
-    const index = conversation.value.attachments.findIndex((item) => item.id === localId);
-    if (index >= 0 && !cancelledAttachments.has(localId)) conversation.value.attachments.splice(index, 1, { ...placeholder, uploading: false, failed: true, error: error instanceof Error ? error.message : "上传失败" });
-  } finally {
-    cancelledAttachments.delete(localId);
+    const index = state.attachments.findIndex((item) => item.id === localId);
+    if (index >= 0) state.attachments.splice(index, 1);
+    uni.showToast({ title: error instanceof Error ? error.message : "无法读取所选附件", icon: "none" });
   }
 }
 
 function chooseAttachment() {
-  if (!conversation.value || !panesConnectionManager.getState(panesId.value).peerOnline || attachmentUploading.value) return;
+  if (!conversation.value || pendingBatch.value || !panesConnectionManager.getState(panesId.value).peerOnline) return;
+  const counts = attachmentCounts();
+  if (conversation.value.attachments.length >= 10) {
+    uni.showToast({ title: "附件总数最多 10 个", icon: "none" });
+    return;
+  }
   uni.showActionSheet({ itemList: ["拍照", "从相册选择", "选择文件"], success: (choice) => {
     if (choice.tapIndex === 2) {
-      const chooseFile = (uni as unknown as { chooseFile?: (options: Record<string, unknown>) => void }).chooseFile;
-      if (!chooseFile) {
-        uni.showToast({ title: "当前平台不支持文件选择", icon: "none" });
+      const remainingFiles = Math.min(5 - counts.files, 10 - conversation.value!.attachments.length);
+      if (remainingFiles <= 0) {
+        uni.showToast({ title: "最多选择 5 个普通附件", icon: "none" });
         return;
       }
-      chooseFile({ count: 1, type: "all", success: (result: any) => {
-        const path = String(result.tempFilePaths?.[0] || "");
-        if (path) void queueAttachment(path, String(result.tempFiles?.[0]?.name || "附件"), String(result.tempFiles?.[0]?.type || "application/octet-stream"));
-      } });
+      const chooseFile = (uni as unknown as { chooseFile?: (options: Record<string, unknown>) => void }).chooseFile;
+      const openAndroidPicker = () => void chooseAndroidFiles(remainingFiles).then((files) => files.forEach((file) => void queueAttachment(
+        file.filePath,
+        file.fileName,
+        file.mimeType,
+        "file",
+      ))).catch((error) => uni.showToast({ title: error instanceof Error ? error.message : "无法打开系统文件选择器", icon: "none" }));
+      if (chooseFile) {
+        chooseFile({ count: remainingFiles, type: "all", success: (result: any) => {
+          const paths = Array.isArray(result.tempFilePaths) ? result.tempFilePaths : result.tempFilePaths ? [result.tempFilePaths] : [];
+          const files = Array.isArray(result.tempFiles) ? result.tempFiles : result.tempFiles ? [result.tempFiles] : [];
+          paths.slice(0, remainingFiles).forEach((path: string, index: number) => void queueAttachment(
+            String(path),
+            String(files[index]?.name || `附件-${index + 1}`),
+            String(files[index]?.type || "application/octet-stream"),
+            "file",
+          ));
+        }, fail: () => {
+          // chooseFile 运行时失败时，App-Plus 继续使用同一系统多选器。
+          openAndroidPicker();
+        } });
+      } else {
+        openAndroidPicker();
+      }
       return;
     }
-    uni.chooseImage({ count: Math.max(1, 6 - conversation.value!.attachments.length), sizeType: ["original"], sourceType: choice.tapIndex === 0 ? ["camera"] : ["album"], success: (result) => {
-      const paths = Array.isArray(result.tempFilePaths) ? result.tempFilePaths : [result.tempFilePaths];
-      paths.filter(Boolean).forEach((path: string, index: number) => void queueAttachment(String(path), `图片-${index + 1}.jpg`, "image/jpeg"));
-    }, fail: (error) => {
-      if (!String(error.errMsg || "").toLowerCase().includes("cancel")) uni.showToast({ title: "无法选择附件，请检查权限", icon: "none" });
-    } });
+    const remainingImages = Math.min(5 - counts.images, 10 - conversation.value!.attachments.length);
+    if (remainingImages <= 0) {
+      uni.showToast({ title: "最多选择 5 张图片", icon: "none" });
+      return;
+    }
+    uni.chooseImage({
+      // 拍照一次一张，相册按剩余额度多选。
+      count: choice.tapIndex === 0 ? 1 : remainingImages,
+      sizeType: ["original"],
+      sourceType: choice.tapIndex === 0 ? ["camera"] : ["album"],
+      success: (result) => {
+        const paths = Array.isArray(result.tempFilePaths) ? result.tempFilePaths : [result.tempFilePaths];
+        paths.filter(Boolean).slice(0, remainingImages).forEach((path: string, index: number) => void queueAttachment(
+          String(path),
+          `图片-${index + 1}.jpg`,
+          "image/jpeg",
+          "image",
+        ));
+      },
+      fail: (error) => {
+        if (!String(error.errMsg || "").toLowerCase().includes("cancel")) uni.showToast({ title: "无法选择附件，请检查权限", icon: "none" });
+      },
+    });
   } });
 }
 
 function removeAttachment(id: string) {
-  if (!conversation.value) return;
+  if (!conversation.value || pendingBatch.value) return;
   cancelledAttachments.add(id);
   const index = conversation.value.attachments.findIndex((item) => item.id === id);
   if (index >= 0) conversation.value.attachments.splice(index, 1);
 }
 
 async function sendMessage() {
-  if (!conversation.value || activeTurn.value || attachmentUploading.value) return;
+  if (!conversation.value || activeTurn.value || pendingBatch.value) return;
   try {
     await conversationStore.send(panesId.value, threadId.value, selectedModelId.value, selectedReasoningEffort.value);
     await nextTick();
     scrollToNewest();
   } catch (error) {
     uni.showToast({ title: error instanceof Error ? error.message : "发送失败", icon: "none" });
+  }
+}
+
+async function retryBatch() {
+  if (!pendingBatch.value) return;
+  try {
+    await conversationStore.retryBatch(panesId.value, threadId.value);
+  } catch (error) {
+    uni.showToast({ title: error instanceof Error ? error.message : "重试发送失败", icon: "none" });
+  }
+}
+
+async function abortBatch() {
+  if (!pendingBatch.value) return;
+  try {
+    await conversationStore.abortBatch(panesId.value, threadId.value);
+  } catch (error) {
+    uni.showToast({ title: error instanceof Error ? error.message : "取消发送失败", icon: "none" });
   }
 }
 
@@ -383,7 +678,23 @@ onUnload(() => {
         <!-- 未经用户确认的滚动加载改动：<button v-if="conversation?.nextCursor" class="load-older" :disabled="conversation.loadingOlder" @tap="loadOlder">{{ conversation.loadingOlder ? '正在加载…' : '加载更早消息' }}</button> -->
         <button v-if="conversation?.nextCursor" class="load-older" :disabled="conversation.loadingOlder" @tap="loadOlder">{{ conversation.loadingOlder ? '正在加载…' : '加载更早消息' }}</button>
         <view v-if="conversation?.loading && !conversation.messages.length" class="empty-state"><view class="loader"/><text>正在加载消息…</text></view>
-        <view v-for="message in conversation?.messages || []" :key="message.id" class="message" :class="message.role"><text class="message-role">{{ message.role === 'user' ? '你' : 'Panes' }}</text><view class="markdown"><MessageContent :message="message"/></view><text v-if="message.status === 'streaming'" class="streaming">正在生成</text></view>
+        <view v-for="message in conversation?.messages || []" :key="message.id" class="message" :class="message.role">
+          <text class="message-role">{{ message.role === 'user' ? '你' : 'Panes' }}</text>
+          <view v-if="message.attachments?.length" class="message-attachments">
+            <view class="message-images">
+              <template v-for="attachment in message.attachments" :key="`image-${attachment.id}`">
+                <image v-if="attachment.source === 'image'" class="message-image" :src="attachment.localPath || attachment.filePath" mode="aspectFill" :aria-label="attachment.fileName" />
+              </template>
+            </view>
+            <view class="message-files">
+              <template v-for="attachment in message.attachments" :key="`file-${attachment.id}`">
+                <view v-if="attachment.source === 'file'" class="message-file-item"><text class="message-file-name">{{ attachment.fileName }}</text><text class="message-file-meta">{{ attachment.mimeType || '附件' }}{{ attachment.sizeBytes ? ` · ${attachment.sizeBytes} B` : '' }}</text></view>
+              </template>
+            </view>
+          </view>
+          <view class="markdown"><MessageContent :message="message"/></view>
+          <text v-if="message.status === 'streaming'" class="streaming">正在生成</text>
+        </view>
       </view>
     </scroll-view>
     <view class="composer">
@@ -399,7 +710,25 @@ onUnload(() => {
         <!-- 历史消息已改为首次完整取得；保留原分页按钮写法记录。 -->
         <!-- <button v-if="conversation?.nextCursor" class="load-older" :disabled="conversation.loadingOlder" @tap="loadOlder">{{ conversation.loadingOlder ? '正在加载…' : '加载更早消息' }}</button> -->
         <view v-if="conversation?.loading && !conversation.messages.length" class="empty-state"><view class="loader"/><text>正在加载消息…</text></view>
-        <view v-for="message in conversation?.messages || []" :key="message.id" class="message" :class="message.role"><text class="message-role">{{ message.role === 'user' ? '你' : 'Panes' }}</text><view class="markdown"><MessageContent :message="message"/></view><text v-if="message.status === 'streaming'" class="streaming">正在生成</text></view>
+        <view v-for="message in conversation?.messages || []" :key="message.id" class="message" :class="message.role">
+          <text class="message-role">{{ message.role === 'user' ? '你' : 'Panes' }}</text>
+          <view class="message-body">
+            <view v-if="message.attachments?.length" class="message-attachments">
+              <view class="message-images">
+                <template v-for="attachment in message.attachments" :key="`image-${attachment.id}`">
+                  <image v-if="attachment.source === 'image'" class="message-image" :src="attachment.localPath || attachment.filePath" mode="aspectFill" :aria-label="attachment.fileName" />
+                </template>
+              </view>
+              <view class="message-files">
+                <template v-for="attachment in message.attachments" :key="`file-${attachment.id}`">
+                  <view v-if="attachment.source === 'file'" class="message-file-item"><text class="message-file-name">{{ attachment.fileName }}</text><text class="message-file-meta">{{ attachment.mimeType || '附件' }}{{ attachment.sizeBytes ? ` · ${attachment.sizeBytes} B` : '' }}</text></view>
+                </template>
+              </view>
+            </view>
+            <view class="markdown"><MessageContent :message="message"/></view>
+          </view>
+          <text v-if="message.status === 'streaming'" class="streaming">正在生成</text>
+        </view>
       </view>
     </scroll-view>
     <button v-if="hasUnseenMessages" class="new-message-hint" hover-class="none" aria-label="查看新消息" @tap="scrollToNewest">↓</button>
@@ -409,8 +738,9 @@ onUnload(() => {
       <!-- 真机上切换表达式会在 tap 结束前被再次触发，面板随即关闭；保留原写法以便追溯。 -->
       <!-- <view class="composer-meta"><button class="composer-chip composer-chip-button" hover-class="none" @tap="permissionPickerOpen = false; runtimePickerOpen = !runtimePickerOpen">{{ runtimeLabel }}</button><button class="composer-chip composer-chip-button" hover-class="none" @tap="runtimePickerOpen = false; permissionPickerOpen = !permissionPickerOpen">{{ accessLabel }}</button></view> -->
       <view class="composer-meta"><button class="composer-chip composer-chip-button" hover-class="none" @tap.stop="runtimePickerOpen = true">{{ runtimeLabel }}</button><button class="composer-chip composer-chip-button" hover-class="none" @tap.stop="permissionPickerOpen = true">{{ accessLabel }}</button></view>
-      <scroll-view v-if="conversation.attachments.length" class="composer-attachments" scroll-x><view class="composer-attachment-track"><view v-for="attachment in conversation.attachments" :key="attachment.id" class="composer-attachment"><view class="attachment-thumb">{{ attachment.mimeType?.startsWith('image/') ? '图' : '文' }}</view><view class="attachment-copy"><text>{{ attachment.fileName }}</text><text>{{ attachment.uploading ? '正在上传…' : attachment.failed ? attachment.error || '上传失败' : `${Math.max(1, Math.ceil(attachment.sizeBytes / 1024))} KB` }}</text></view><button class="attachment-remove" aria-label="移除附件" @tap="removeAttachment(attachment.id)">{{ attachment.uploading ? '取消' : '×' }}</button></view></view></scroll-view>
-      <view class="composer-row"><button class="attachment-button" aria-label="选择附件" :disabled="!panesConnectionManager.getState(panesId).peerOnline || attachmentUploading || conversation.attachments.length >= 6" @tap="chooseAttachment">＋</button><view class="composer-field"><textarea v-model="conversation.draft" class="composer-input" auto-height :disabled="!panesConnectionManager.getState(panesId).peerOnline || activeTurn" :maxlength="-1" confirm-type="send" :placeholder="composerPlaceholder" @confirm="sendMessage"/><button class="composer-action" :class="{ ready: hasComposerContent, stop: activeTurn }" :disabled="!activeTurn && (!panesConnectionManager.getState(panesId).peerOnline || attachmentUploading || !hasComposerContent)" @tap="activeTurn ? stopTurn() : sendMessage()"><text v-if="activeTurn" class="stop-icon">■</text><uni-icons v-else-if="hasComposerContent" class="composer-send-icon" type="arrowthinup" :size="25" color="#ffffff"/><view v-else class="waveform-icon"><text/><text/><text/><text/></view></button></view></view>
+      <view v-if="pendingBatch" class="batch-status" :class="{ failed: pendingBatch.status === 'failed' }"><text>{{ pendingBatch.status === 'failed' ? `本批发送失败：${pendingBatch.error || '请重试或取消'}` : pendingBatch.status === 'sending' ? '正在提交本批…' : '正在上传本批附件…' }}</text><view class="batch-status-actions"><button v-if="pendingBatch.status === 'failed'" class="batch-retry" @tap="retryBatch">重试本批</button><button class="batch-abort" @tap="abortBatch">取消本批</button></view></view>
+      <scroll-view v-if="displayedAttachments.length" class="composer-attachments" scroll-x><view class="composer-attachment-track"><view v-for="attachment in displayedAttachments" :key="attachment.id" class="composer-attachment"><view class="attachment-thumb">{{ attachment.source === 'image' ? '图' : '文' }}</view><view class="attachment-copy"><text>{{ attachment.fileName }}</text><text>{{ pendingBatch ? (attachment.uploading ? '正在上传…' : attachment.failed ? attachment.error || '上传失败' : attachment.attachmentKey ? '已上传' : '待上传') : '已选择' }}</text></view><button class="attachment-remove" aria-label="移除附件" :disabled="Boolean(pendingBatch)" @tap="removeAttachment(attachment.id)">×</button></view></view></scroll-view>
+      <view class="composer-row"><button class="attachment-button" aria-label="选择附件" :disabled="!panesConnectionManager.getState(panesId).peerOnline || Boolean(pendingBatch) || conversation.attachments.length >= 10" @tap="chooseAttachment">＋</button><view class="composer-field"><textarea v-model="conversation.draft" class="composer-input" auto-height :disabled="!panesConnectionManager.getState(panesId).peerOnline || activeTurn || Boolean(pendingBatch)" :maxlength="-1" confirm-type="send" :placeholder="composerPlaceholder" @confirm="sendMessage"/><button class="composer-action" :class="{ ready: hasComposerContent, stop: activeTurn }" :disabled="!activeTurn && (!panesConnectionManager.getState(panesId).peerOnline || Boolean(pendingBatch) || !hasComposerContent)" @tap="activeTurn ? stopTurn() : sendMessage()"><text v-if="activeTurn" class="stop-icon">■</text><uni-icons v-else-if="hasComposerContent" class="composer-send-icon" type="arrowthinup" :size="25" color="#ffffff"/><view v-else class="waveform-icon"><text/><text/><text/><text/></view></button></view></view>
     </view>
     <!-- 重构初版将全部模型和协议强度值原样展示；保留原结构以便追溯。
     <view v-if="runtimePickerOpen" class="mobile-picker-backdrop" @tap="runtimePickerOpen = false"><view class="mobile-picker" @tap.stop><view class="mobile-picker-header"><text>模型与思考强度</text><button hover-class="none" @tap="runtimePickerOpen = false">完成</button></view><text class="mobile-picker-section-title">模型</text><scroll-view class="mobile-picker-list" scroll-y><button v-for="model in models" :key="model.id" class="mobile-picker-option" :class="{ selected: selectedModelId === model.id }" hover-class="none" @tap="chooseModel(model.id)"><view><text>{{ model.displayName || model.id }}</text><text>{{ model.description }}</text></view><text>{{ selectedModelId === model.id ? '✓' : '' }}</text></button></scroll-view><text class="mobile-picker-section-title">思考强度</text><view class="effort-options"><button v-for="effort in efforts" :key="effort.reasoningEffort" class="effort-option" :class="{ selected: selectedReasoningEffort === effort.reasoningEffort }" hover-class="none" @tap="chooseReasoningEffort(effort.reasoningEffort)">{{ effort.reasoningEffort }}</button></view></view></view> -->
@@ -432,7 +762,7 @@ onUnload(() => {
 </template>
 
 <style scoped>
-.conversation-page { display: grid; height: 100vh; grid-template-rows: auto auto minmax(0, 1fr) auto; background: var(--bg); }.conversation-meta { display: flex; padding: 8px 12px; gap: 7px; overflow-x: auto; border-bottom: 1px solid var(--line); white-space: nowrap; }.meta-chip { min-height: 28px; padding: 0 10px; overflow: hidden; border-radius: 999px; color: var(--muted); background: var(--surface); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.offline-banner { padding: 7px 12px; color: #f7c06e; background: rgba(247,192,110,.1); font-size: 10px; text-align: center; }.chat-scroll { height: 100%; }.chat-content { padding: 16px 13px 22px; }.markdown { display: block; padding: 11px 13px; border: 1px solid var(--line); border-radius: 5px 15px 15px 15px; background: var(--surface); font-size: 13px; line-height: 1.65; }.message.user .markdown { border-color: rgba(70, 211, 154, .18); border-radius: 15px 5px 15px 15px; background: rgba(38, 117, 87, .28); }.composer { display: flex; padding: 8px 10px calc(10px + env(safe-area-inset-bottom)); flex-direction: column; gap: 8px; border-top: 1px solid var(--line); }.composer-row { display: grid; grid-template-columns: 42px minmax(0, 1fr) 54px; align-items: end; gap: 7px; }.attachment-button { display: flex; width: 42px; height: 42px; align-items: center; justify-content: center; border-radius: 13px; color: var(--text); background: var(--raised); font-size: 24px; font-weight: 300; }.composer-input { width: 100%; min-height: 42px; max-height: 126px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 13px; color: var(--text); background: var(--surface); font-size: 13px; }.send { width: 54px; height: 42px; border-radius: 13px; color: #07140f; background: var(--accent); font-size: 11px; font-weight: 800; }.send.stop { color: #fff; background: var(--danger); }.input-placeholder { color: #6c7686; }.attachment-strip { width: 100%; white-space: nowrap; }.attachment-list { display: inline-flex; gap: 7px; }.attachment-item { display: inline-flex; max-width: 210px; padding: 7px 8px; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }.attachment-item view { min-width: 0; }.attachment-item text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.attachment-item text:first-child { font-size: 10px; }.attachment-item text:last-child { margin-top: 3px; color: var(--muted); font-size: 8px; }.attachment-remove { padding: 3px 5px; border-radius: 5px; color: var(--muted); background: rgba(255,255,255,.06); font-size: 9px; }.message { max-width: 92%; margin-bottom: 18px; }.message.user { margin-left: auto; }.message-role { display: block; margin: 0 7px 6px; color: var(--muted); font-size: 9px; font-weight: 700; }.message.user .message-role { text-align: right; }.streaming { display: block; margin: 5px 7px 0; color: var(--accent); font-size: 9px; }.load-older { width: 128px; min-height: 34px; margin: 0 auto 18px; color: var(--muted); font-size: 10px; }
+.conversation-page { display: grid; height: 100vh; grid-template-rows: auto auto minmax(0, 1fr) auto; background: var(--bg); }.conversation-meta { display: flex; padding: 8px 12px; gap: 7px; overflow-x: auto; border-bottom: 1px solid var(--line); white-space: nowrap; }.meta-chip { min-height: 28px; padding: 0 10px; overflow: hidden; border-radius: 999px; color: var(--muted); background: var(--surface); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.offline-banner { padding: 7px 12px; color: #f7c06e; background: rgba(247,192,110,.1); font-size: 10px; text-align: center; }.chat-scroll { height: 100%; }.chat-content { padding: 16px 13px 22px; }.markdown { display: block; padding: 11px 13px; border: 1px solid var(--line); border-radius: 5px 15px 15px 15px; background: var(--surface); font-size: 13px; line-height: 1.65; }.message.user .markdown { border-color: rgba(70, 211, 154, .18); border-radius: 15px 5px 15px 15px; background: rgba(38, 117, 87, .28); }.composer { display: flex; padding: 8px 10px calc(10px + env(safe-area-inset-bottom)); flex-direction: column; gap: 8px; border-top: 1px solid var(--line); }.composer-row { display: grid; grid-template-columns: 42px minmax(0, 1fr) 54px; align-items: end; gap: 7px; }.attachment-button { display: flex; width: 42px; height: 42px; align-items: center; justify-content: center; border-radius: 13px; color: var(--text); background: var(--raised); font-size: 24px; font-weight: 300; }.composer-input { width: 100%; min-height: 42px; max-height: 126px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 13px; color: var(--text); background: var(--surface); font-size: 13px; }.send { width: 54px; height: 42px; border-radius: 13px; color: #07140f; background: var(--accent); font-size: 11px; font-weight: 800; }.send.stop { color: #fff; background: var(--danger); }.input-placeholder { color: #6c7686; }.attachment-strip { width: 100%; white-space: nowrap; }.attachment-list { display: inline-flex; gap: 7px; }.attachment-item { display: inline-flex; max-width: 210px; padding: 7px 8px; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }.attachment-item view { min-width: 0; }.attachment-item text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.attachment-item text:first-child { font-size: 10px; }.attachment-item text:last-child { margin-top: 3px; color: var(--muted); font-size: 8px; }.attachment-remove { padding: 3px 5px; border-radius: 5px; color: var(--muted); background: rgba(255,255,255,.06); font-size: 9px; }.message { max-width: 92%; margin-bottom: 18px; }.message.user { margin-left: auto; }.message-role { display: block; margin: 0 7px 6px; color: var(--muted); font-size: 9px; font-weight: 700; }.message.user .message-role { text-align: right; } /* 本地消息附件位于正文上方，图片和普通文件分别排列。 */ .message-attachments { display: flex; margin-bottom: 7px; flex-direction: column; gap: 7px; }.message-images { display: flex; flex-wrap: wrap; gap: 6px; }.message-image { width: 104px; height: 104px; border-radius: 9px; background: var(--surface); }.message-files { display: flex; flex-direction: column; gap: 5px; }.message-file-item { display: flex; min-width: 0; padding: 7px 9px; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }.message-file-name { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.message-file-meta { margin-top: 3px; color: var(--muted); font-size: 8px; }.streaming { display: block; margin: 5px 7px 0; color: var(--accent); font-size: 9px; }.load-older { width: 128px; min-height: 34px; margin: 0 auto 18px; color: var(--muted); font-size: 10px; }
 .conversation-page { display: flex; height: 100vh; flex-direction: column; background: var(--bg); }
 .chat-scroll { height: auto; min-height: 0; flex: 1; }
 .chat-content { min-height: 100%; }

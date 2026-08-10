@@ -1,6 +1,8 @@
 import { reactive } from "vue";
-import type { ChatAttachment, Message, RemoteEvent } from "../types";
+import { deleteBatchAttachments, uploadAttachmentBatch } from "../attachments";
+import type { AttachmentBatchItem, AttachmentBatchState, ChatAttachment, Message, RemoteEvent } from "../types";
 import { panesConnectionManager } from "./panes-connection";
+import { panesDeviceStore } from "./panes-device";
 // 旧的整段会话快照会同时携带项目列表信息；该快照推送已停用。
 // import { projectStore } from "./project";
 
@@ -10,6 +12,8 @@ interface ConversationState {
   nextCursor: null;
   draft: string;
   attachments: ChatAttachment[];
+  // 点击发送后冻结的批次；编辑区后续变化不修改该快照。
+  pendingBatch: AttachmentBatchState | null;
   loading: boolean;
   loadingOlder: boolean;
   sending: boolean;
@@ -52,6 +56,7 @@ function createState(): ConversationState {
     nextCursor: null,
     draft: "",
     attachments: [],
+    pendingBatch: null,
     loading: false,
     loadingOlder: false,
     sending: false,
@@ -133,6 +138,117 @@ panesConnectionManager.subscribe((panesId, event: RemoteEvent) => {
   }
 });
 
+/** 发送批次 ID 使用标准 UUID；旧 WebView 没有 randomUUID 时采用 RFC 4122 v4 回退。 */
+function createBatchId() {
+  const cryptoObject = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  const randomUUID = cryptoObject?.randomUUID?.();
+  if (randomUUID && randomUUID.length <= 128) return randomUUID;
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+    const random = Math.floor(Math.random() * 16);
+    const value = char === "x" ? random : (random & 0x3) | 0x8;
+    return value.toString(16);
+  });
+}
+
+function toBatchAttachment(item: ChatAttachment): AttachmentBatchItem {
+  if (!item.localPath || !item.source) throw new Error(`附件 ${item.fileName} 缺少手机端来源信息`);
+  return {
+    ...item,
+    localPath: item.localPath,
+    source: item.source,
+    filePath: item.filePath || "",
+    uploading: false,
+    failed: false,
+    error: undefined,
+  };
+}
+
+/** 去掉手机端字段后构造 message.send 的远端附件引用。 */
+function toRemoteAttachment(item: AttachmentBatchItem) {
+  if (!item.attachmentKey) throw new Error(`附件 ${item.fileName} 缺少服务端附件键`);
+  return {
+    // HTTP 上传成功后返回的附件键。
+    attachment_key: item.attachmentKey,
+    // 服务端确认的文件名。
+    file_name: item.fileName,
+    // 服务端确认的文件字节数。
+    size_bytes: item.sizeBytes,
+    // 服务端确认的 MIME 类型。
+    mime_type: item.mimeType,
+  };
+}
+
+/** 为本地回显构造用户消息，不在上传失败时提前插入。 */
+function createLocalMessage(threadId: string, message: string, attachments: ChatAttachment[]): Message {
+  return {
+    // 手机端临时消息标识。
+    id: `mobile-user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+    // 本地消息所属会话。
+    threadId,
+    // 消息角色。
+    role: "user",
+    // 发送时冻结正文。
+    content: message,
+    // 发送成功后本地回显附件，页面按图片、普通附件分区渲染在文字上方。
+    attachments: attachments.map((attachment) => ({
+      ...attachment,
+      uploading: false,
+      failed: false,
+      error: undefined,
+    })),
+    // 发送成功后等待桌面最终消息替换。
+    status: "completed",
+    // 本地创建时间。
+    createdAt: new Date().toISOString(),
+    // 标记为尚未与桌面历史合并。
+    localOnly: true,
+  };
+}
+
+/** 发送一个冻结批次；失败时仅保留 pendingBatch，不创建或保留用户消息。 */
+async function transmitBatch(
+  panesId: string,
+  state: ConversationState,
+  batch: AttachmentBatchState,
+): Promise<void> {
+  await uploadAttachmentBatch(panesId, batch.batchId, batch.attachments, () => batch.cancelled === true);
+  if (batch.cancelled) throw new Error("发送已取消");
+  batch.status = "sending";
+  const device = panesDeviceStore.getDevice(panesId);
+  if (!device?.deviceId) throw new Error("设备未完成绑定");
+  const result = await panesConnectionManager.request<{ message?: Message }>(panesId, "message.send", {
+    // 协议要求消息和附件属于同一个批次。
+    batch_id: batch.batchId,
+    // WSS message.send 与 HTTP 上传使用同一个绑定设备 ID。
+    device_id: device.deviceId,
+    // 发送目标会话。
+    thread_id: batch.threadId,
+    // 冻结后的正文。
+    message: batch.message,
+    // 空字符串不应覆盖桌面默认模型。
+    model_id: batch.modelId || undefined,
+    // 空字符串不应覆盖桌面默认思考强度。
+    reasoning_effort: batch.reasoningEffort || undefined,
+    // 仅序列化桌面端附件字段，过滤 localPath/source/uploading 等本地字段。
+    attachments: batch.attachments.map(toRemoteAttachment),
+  });
+  const localAttachments = batch.attachments.map((attachment) => ({
+    ...attachment,
+    uploading: false,
+    failed: false,
+    error: undefined,
+  }));
+  const localMessage = createLocalMessage(batch.threadId, batch.message, localAttachments);
+  if (result?.message?.id) state.messages.push({ ...result.message, attachments: localAttachments, localOnly: false });
+  else state.messages.push(localMessage);
+  state.messageRevision += 1;
+  // 发送成功后只清理仍对应本批次的编辑区项；发送期间新选附件不会被误删。
+  const batchIds = new Set(batch.attachments.map((item) => item.id));
+  state.attachments = state.attachments.filter((item) => !batchIds.has(item.id));
+  if (state.draft.trim() === batch.message) state.draft = "";
+  state.pendingBatch = null;
+}
+
 export const conversationStore = {
   stateByConversation,
   unreadMap,
@@ -181,9 +297,17 @@ export const conversationStore = {
       const incoming = Array.isArray(result.messages) ? result.messages : [];
       const incomingIds = new Set(incoming.map((message) => message.id));
       const preserved = state.messages.filter((message) => !incomingIds.has(message.id));
+      const localById = new Map(state.messages.map((message) => [message.id, message]));
+      const mergedIncoming = incoming.map((message) => {
+        const local = localById.get(message.id);
+        // 桌面历史暂未返回附件时保留刚发送的本地回显，避免刷新会话后图片和附件区闪失。
+        return local?.attachments?.length && !message.attachments?.length
+          ? { ...message, attachments: local.attachments }
+          : message;
+      });
       // 后台已经按 created_at、rowid 返回稳定顺序；手机端必须原样显示，不能用 UUID 或其他字段二次排序。
       // preserved 只可能是本次请求期间新收到、尚未出现在返回结果中的消息，应追加在后台列表之后。
-      state.messages = [...incoming, ...preserved];
+      state.messages = [...mergedIncoming, ...preserved];
       state.messageRevision += 1;
       this.clearUnreadAfterSync(panesId, threadId);
       /*
@@ -229,51 +353,65 @@ export const conversationStore = {
   },
   async send(panesId: string, threadId: string, modelId: string, reasoningEffort: string) {
     const state = this.getState(panesId, threadId);
-    if (state.sending || state.attachments.some((item) => item.uploading)) return;
+    if (state.sending || state.pendingBatch) return;
+    if (!panesDeviceStore.getDevice(panesId)?.deviceId) throw new Error("设备未完成绑定");
     const message = state.draft.trim();
-    const attachments = state.attachments.slice();
-    if (!message && attachments.length === 0) return;
-    state.draft = "";
-    state.attachments = [];
-    state.sending = true;
-    const localMessage: Message = {
-      id: `mobile-user-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+    if (!message && state.attachments.length === 0) return;
+    const batch: AttachmentBatchState = {
+      // 每次点击发送生成唯一批次 UUID。
+      batchId: createBatchId(),
+      // 冻结目标会话。
       threadId,
-      role: "user",
-      content: message,
-      status: "completed",
-      createdAt: new Date().toISOString(),
-      localOnly: true,
+      // 冻结正文快照。
+      message,
+      // 冻结模型选择。
+      modelId,
+      // 冻结思考强度选择。
+      reasoningEffort,
+      // 深复制附件，发送后的编辑不会改变批次。
+      attachments: state.attachments.map(toBatchAttachment),
+      // 先进入上传阶段。
+      status: "uploading",
     };
-    // 用户消息必须先本地回显，不能等待桌面端完成事件。
-    state.messages.push(localMessage);
-    state.messageRevision += 1;
+    state.pendingBatch = batch;
+    state.sending = true;
     try {
-      const result = await panesConnectionManager.request<{ message?: Message }>(panesId, "message.send", {
-        thread_id: threadId,
-        message,
-        model_id: modelId || undefined,
-        reasoning_effort: reasoningEffort || undefined,
-        attachments: attachments.map((item) => ({
-          fileName: item.fileName,
-          filePath: item.filePath,
-          sizeBytes: item.sizeBytes,
-          mimeType: item.mimeType,
-        })),
-      });
-      if (result?.message?.id) {
-        const index = state.messages.findIndex((item) => item.id === localMessage.id);
-        if (index >= 0) state.messages.splice(index, 1, { ...result.message, localOnly: false });
-        state.messageRevision += 1;
-      }
+      await transmitBatch(panesId, state, batch);
     } catch (error) {
-      const index = state.messages.findIndex((item) => item.id === localMessage.id);
-      if (index >= 0) state.messages.splice(index, 1);
-      state.messageRevision += 1;
-      state.draft = message;
-      state.attachments = attachments;
+      batch.status = "failed";
+      batch.error = error instanceof Error ? error.message : String(error);
       throw error;
     } finally {
+      state.sending = false;
+    }
+  },
+  async retryBatch(panesId: string, threadId: string) {
+    const state = this.getState(panesId, threadId);
+    const batch = state.pendingBatch;
+    if (!batch || batch.status !== "failed" || state.sending) return;
+    batch.cancelled = false;
+    batch.error = undefined;
+    batch.status = "uploading";
+    state.sending = true;
+    try {
+      await transmitBatch(panesId, state, batch);
+    } catch (error) {
+      batch.status = "failed";
+      batch.error = error instanceof Error ? error.message : String(error);
+      throw error;
+    } finally {
+      state.sending = false;
+    }
+  },
+  async abortBatch(panesId: string, threadId: string) {
+    const state = this.getState(panesId, threadId);
+    const batch = state.pendingBatch;
+    if (!batch) return;
+    batch.cancelled = true;
+    try {
+      await deleteBatchAttachments(panesId, batch.attachments);
+    } finally {
+      state.pendingBatch = null;
       state.sending = false;
     }
   },
