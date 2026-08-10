@@ -231,6 +231,7 @@ pub fn run() {
             commands::remote::set_remote_access_enabled,
             commands::remote::regenerate_remote_access_identity,
             commands::remote::refresh_remote_pairing_token,
+            commands::remote::revoke_remote_device,
             commands::browser::browser_show,
             commands::browser::browser_set_bounds,
             commands::browser::browser_hide,

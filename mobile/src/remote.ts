@@ -190,8 +190,25 @@ export class RemoteClient {
 
   private markPeerOnline() {
     this.peerOnline = true;
+    const systemInfo = uni.getSystemInfoSync() as unknown as Record<string, unknown>;
+    const rawOsName = typeof systemInfo.osName === "string"
+      ? systemInfo.osName
+      : typeof systemInfo.platform === "string"
+        ? systemInfo.platform
+        : "";
+    const osName = rawOsName ? `${rawOsName.charAt(0).toUpperCase()}${rawOsName.slice(1)}` : "";
+    const osVersion = typeof systemInfo.osVersion === "string" ? systemInfo.osVersion : "";
+    const deviceModel = typeof systemInfo.deviceModel === "string"
+      ? systemInfo.deviceModel
+      : typeof systemInfo.model === "string"
+        ? systemInfo.model
+        : "";
+    const deviceName = [osName, osVersion, deviceModel].filter(Boolean).join(" ") || "Panes Mobile";
     if (!this.config || this.config.device_credential) {
       this.onState({ relayConnected: true, peerOnline: true, lastError: null });
+      if (this.config?.device_credential) {
+        void this.request("device.identify", { device_name: deviceName }).catch(() => undefined);
+      }
       return;
     }
     if (this.pairingInProgress) return;
@@ -201,7 +218,7 @@ export class RemoteClient {
     }
     this.pairingInProgress = true;
     this.onState({ relayConnected: true, peerOnline: false, lastError: null });
-    void this.request<{ device_credential: string }>("device.pair")
+    void this.request<{ device_credential: string }>("device.pair", { device_name: deviceName })
       .then((result) => {
         if (!this.config) return;
         this.config = {

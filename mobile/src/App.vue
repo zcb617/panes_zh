@@ -12,4 +12,9 @@ onHide(() => {
 </script>
 <style>
 @import "./styles.css";
+
+.markdown {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 </style>

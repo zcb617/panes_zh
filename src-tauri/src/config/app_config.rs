@@ -98,6 +98,16 @@ pub struct ComputerControlConfig {
     pub allowed_applications: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteDeviceConfig {
+    pub id: String,
+    pub name: String,
+    pub credential: String,
+    pub paired_at: String,
+    pub last_connected_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RemoteAccessConfig {
@@ -105,6 +115,8 @@ pub struct RemoteAccessConfig {
     pub endpoint: String,
     pub tunnel_id: String,
     pub credential: String,
+    pub devices: Vec<RemoteDeviceConfig>,
+    // 兼容旧版只保存一个手机凭据的配置；手机再次连接后会迁移到 devices。
     pub device_credential: String,
 }
 
@@ -128,6 +140,7 @@ impl RemoteAccessConfig {
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
+        self.devices.clear();
         self.device_credential.clear();
     }
 }
@@ -139,6 +152,7 @@ impl Default for RemoteAccessConfig {
             endpoint: "wss://panes.jxrjkf.cn/ws/tunnel".to_string(),
             tunnel_id: String::new(),
             credential: String::new(),
+            devices: Vec::new(),
             device_credential: String::new(),
         }
     }

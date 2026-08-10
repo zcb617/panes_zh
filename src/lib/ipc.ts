@@ -93,6 +93,8 @@ export const ipc = {
     invoke<RemoteAccessStatus>("regenerate_remote_access_identity"),
   refreshRemotePairingToken: () =>
     invoke<RemoteAccessStatus>("refresh_remote_pairing_token"),
+  revokeRemoteDevice: (deviceId: string) =>
+    invoke<RemoteAccessStatus>("revoke_remote_device", { deviceId }),
   listScheduledTasks: () => invoke<ScheduledTask[]>("list_scheduled_tasks"),
   createScheduledTask: (input: ScheduledTaskInput) =>
     invoke<ScheduledTask>("create_scheduled_task", { input }),

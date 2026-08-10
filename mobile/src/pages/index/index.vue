@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import { onLoad, onUnload } from "@dcloudio/uni-app";
-import { marked } from "marked";
+// marked 16 会把 Unicode 属性正则打进 app-service.js，部分 App 运行时无法解析并导致启动白屏。
+// import { marked } from "marked";
 import { RemoteClient } from "../../remote";
 import type { ConnectionState, DesktopStatus, Message, MessageWindow, PairingConfig, RemoteEvent, Thread, Workspace } from "../../types";
 
@@ -49,11 +50,12 @@ const renderedMessages = computed(() => messages.value.map((message) => {
       return "";
     }).filter(Boolean).join("\n\n");
   }
-  const escaped = (content || (message.status === "streaming" ? "正在生成…" : "")).replace(/&/g, "&amp;").replace(/</g, "&lt;");
-  const html = String(marked.parse(escaped, { async: false, breaks: true, gfm: true }))
-    .replace(/\s(?:href|src)=(['"])\s*(?:javascript|data|vbscript):.*?\1/gi, "")
-    .replace(/\son[a-z]+=(['"]).*?\1/gi, "");
-  return { ...message, html };
+  // const escaped = (content || (message.status === "streaming" ? "正在生成…" : "")).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  // const html = String(marked.parse(escaped, { async: false, breaks: true, gfm: true }))
+  //   .replace(/\s(?:href|src)=(['"])\s*(?:javascript|data|vbscript):.*?\1/gi, "")
+  //   .replace(/\son[a-z]+=(['"]).*?\1/gi, "");
+  const text = content || (message.status === "streaming" ? "正在生成…" : "");
+  return { ...message, text };
 }));
 
 function showNotice(message: string) {
@@ -134,14 +136,18 @@ function acceptPairing(raw: string) {
       || typeof parsed.relay_credential !== "string" || typeof parsed.pairing_token !== "string") {
       throw new Error("二维码不是有效的 Panes Mobile 配对信息");
     }
-    const endpoint = new URL(parsed.endpoint);
-    const local = endpoint.protocol === "ws:" && ["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname);
-    if (endpoint.protocol !== "wss:" && !local) throw new Error("正式配对地址必须使用 WSS 加密连接");
+    const endpoint = parsed.endpoint.trim();
+    const endpointParts = /^(wss?):\/\/(\[[^\]]+\]|[^/:?#]+)(?::\d+)?(?:[/?#]|$)/i.exec(endpoint);
+    if (!endpointParts) throw new Error("配对地址不是有效的 WebSocket 地址");
+    const protocol = endpointParts[1].toLowerCase();
+    const hostname = endpointParts[2].toLowerCase();
+    const local = protocol === "ws" && ["127.0.0.1", "localhost", "[::1]"].includes(hostname);
+    if (protocol !== "wss" && !local) throw new Error("正式配对地址必须使用 WSS 加密连接");
     if (!parsed.tunnel_id || parsed.relay_credential.length < 32 || parsed.pairing_token.length < 32) throw new Error("配对凭据不完整，请刷新二维码");
     if (parsed.expires_at && new Date(parsed.expires_at).getTime() <= Date.now()) throw new Error("配对二维码已经过期，请刷新后重试");
     const config: PairingConfig = {
       version: 1,
-      endpoint: endpoint.toString(),
+      endpoint,
       tunnel_id: parsed.tunnel_id,
       relay_credential: parsed.relay_credential,
       pairing_token: parsed.pairing_token,
@@ -295,7 +301,7 @@ onUnload(() => {
 
     <view v-else-if="screen === 'chat'" class="chat-page"><scroll-view class="chat-scroll" scroll-y scroll-with-animation :scroll-top="chatScrollTop"><view class="chat-content">
       <button v-if="nextCursor" class="load-older" :disabled="loadingOlder" @tap="loadOlderMessages">{{ loadingOlder ? '正在加载…' : '加载更早消息' }}</button>
-      <view v-for="message in renderedMessages" :key="message.id" class="message" :class="message.role"><text class="message-role">{{ message.role === 'user' ? '你' : 'Panes' }}</text><rich-text class="markdown" :nodes="message.html"/><text v-if="message.status === 'streaming'" class="streaming">正在生成</text></view>
+      <view v-for="message in renderedMessages" :key="message.id" class="message" :class="message.role"><text class="message-role">{{ message.role === 'user' ? '你' : 'Panes' }}</text><text class="markdown" selectable>{{ message.text }}</text><text v-if="message.status === 'streaming'" class="streaming">正在生成</text></view>
     </view></scroll-view><view class="composer"><textarea v-model="draft" class="composer-input" auto-height :disabled="!connection.peerOnline" :maxlength="-1" confirm-type="send" :placeholder="connection.peerOnline ? activeTurn ? '当前回复尚未完成' : '给 Panes 发消息…' : '桌面离线，不能发送消息'" @confirm="sendMessage"/><button v-if="activeTurn" class="send stop" @tap="stopTurn">停止</button><button v-else class="send" :disabled="!draft.trim() || sending || !connection.peerOnline" @tap="sendMessage">{{ sending ? '发送中' : '发送' }}</button></view></view>
 
     <scroll-view v-else class="content-scroll" scroll-y><view class="content-page"><view class="settings-hero"><view class="pair-logo small">P</view><view><text>这台桌面 Panes</text><text>{{ pairing?.tunnel_id }}</text></view></view><view class="settings-group"><view><text>公网入口</text><text>{{ pairing?.endpoint }}</text></view><view><text>Relay 连接</text><text>{{ connection.relayConnected ? '已连接' : '重连中' }}</text></view><view><text>桌面状态</text><text>{{ connection.peerOnline ? '在线' : '离线' }}</text></view></view><button class="danger-button" @tap="removePairing">解除绑定并清除凭据</button></view></scroll-view>

@@ -44,7 +44,9 @@ export function createRelayServer(options = {}) {
       let mobileConnections = 0;
       for (const tunnel of tunnels.values()) {
         if (tunnel.desktop?.readyState === WebSocket.OPEN) desktopConnections += 1;
-        if (tunnel.mobile?.readyState === WebSocket.OPEN) mobileConnections += 1;
+        for (const mobile of tunnel.mobiles.values()) {
+          if (mobile.readyState === WebSocket.OPEN) mobileConnections += 1;
+        }
       }
       jsonResponse(response, 200, {
         status: "ok",
@@ -128,24 +130,33 @@ export function createRelayServer(options = {}) {
       const hash = credentialHash(credential);
       let tunnel = tunnels.get(tunnelId);
       if (!tunnel) {
-        tunnel = { credentialHash: hash, desktop: null, mobile: null };
+        tunnel = {
+          credentialHash: hash,
+          desktop: null,
+          mobiles: new Map(),
+          requestRoutes: new Map(),
+        };
         tunnels.set(tunnelId, tunnel);
       } else if (tunnel.credentialHash !== hash) {
         socket.close(4403, "invalid credential");
         return;
       }
 
-      const previous = tunnel[role];
-      if (previous && previous !== socket && previous.readyState !== WebSocket.CLOSED) {
-        previous.close(4409, "connection replaced");
+      if (role === "desktop") {
+        const previous = tunnel.desktop;
+        if (previous && previous !== socket && previous.readyState !== WebSocket.CLOSED) {
+          previous.close(4409, "connection replaced");
+        }
+        tunnel.desktop = socket;
+      } else {
+        tunnel.mobiles.set(socket.connectionId, socket);
       }
 
       socket.tunnelId = tunnelId;
       socket.role = role;
-      tunnel[role] = socket;
-      const peerRole = role === "desktop" ? "mobile" : "desktop";
-      const peer = tunnel[peerRole];
-      const peerOnline = peer?.readyState === WebSocket.OPEN;
+      const peerOnline = role === "desktop"
+        ? [...tunnel.mobiles.values()].some((mobile) => mobile.readyState === WebSocket.OPEN)
+        : tunnel.desktop?.readyState === WebSocket.OPEN;
 
       sendJson(socket, {
         version: 1,
@@ -154,7 +165,18 @@ export function createRelayServer(options = {}) {
         peer_online: peerOnline,
       });
       if (peerOnline) {
-        sendJson(peer, { version: 1, type: "tunnel.peer_online", role });
+        if (role === "desktop") {
+          for (const mobile of tunnel.mobiles.values()) {
+            sendJson(mobile, { version: 1, type: "tunnel.peer_online", role });
+          }
+        } else {
+          sendJson(tunnel.desktop, {
+            version: 1,
+            type: "tunnel.peer_online",
+            role,
+            mobile_count: tunnel.mobiles.size,
+          });
+        }
       }
 
       logger.info?.("tunnel connection ready", {
@@ -167,17 +189,65 @@ export function createRelayServer(options = {}) {
       socket.on("message", (payload, payloadIsBinary) => {
         socket.isAlive = true;
         const current = tunnels.get(tunnelId);
-        const target = current?.[peerRole];
-        if (!target || target.readyState !== WebSocket.OPEN) {
-          sendJson(socket, { version: 1, type: "tunnel.peer_offline", role: peerRole });
+        if (!current) return;
+
+        if (role === "mobile") {
+          const target = current.desktop;
+          if (!target || target.readyState !== WebSocket.OPEN) {
+            sendJson(socket, { version: 1, type: "tunnel.peer_offline", role: "desktop" });
+            return;
+          }
+          if (target.bufferedAmount > maxBufferedBytes) {
+            target.close(1013, "slow consumer");
+            sendJson(socket, { version: 1, type: "tunnel.peer_offline", role: "desktop" });
+            return;
+          }
+          if (!payloadIsBinary) {
+            try {
+              const message = JSON.parse(payload.toString("utf8"));
+              if (message?.kind === "request" && typeof message.id === "string") {
+                current.requestRoutes.set(message.id, socket.connectionId);
+              }
+            } catch {
+              // 非 JSON 文本仍按透明隧道转发。
+            }
+          }
+          target.send(payload, { binary: payloadIsBinary });
           return;
         }
-        if (target.bufferedAmount > maxBufferedBytes) {
-          target.close(1013, "slow consumer");
-          sendJson(socket, { version: 1, type: "tunnel.peer_offline", role: peerRole });
+
+        let targets = [];
+        let routedResponse = false;
+        if (!payloadIsBinary) {
+          try {
+            const message = JSON.parse(payload.toString("utf8"));
+            if (message?.kind === "response" && typeof message.id === "string") {
+              routedResponse = true;
+              const connectionId = current.requestRoutes.get(message.id);
+              current.requestRoutes.delete(message.id);
+              const mobile = connectionId ? current.mobiles.get(connectionId) : null;
+              if (mobile?.readyState === WebSocket.OPEN) targets = [mobile];
+            }
+          } catch {
+            // 非 JSON 文本广播给当前通道内的所有移动设备。
+          }
+        }
+        if (!routedResponse) {
+          targets = [...current.mobiles.values()].filter((mobile) => mobile.readyState === WebSocket.OPEN);
+        }
+        if (targets.length === 0) {
+          if (current.mobiles.size === 0) {
+            sendJson(socket, { version: 1, type: "tunnel.peer_offline", role: "mobile" });
+          }
           return;
         }
-        target.send(payload, { binary: payloadIsBinary });
+        for (const target of targets) {
+          if (target.bufferedAmount > maxBufferedBytes) {
+            target.close(1013, "slow consumer");
+            continue;
+          }
+          target.send(payload, { binary: payloadIsBinary });
+        }
       });
     });
 
@@ -194,15 +264,26 @@ export function createRelayServer(options = {}) {
       const role = socket.role;
       if (!tunnelId || !role) return;
       const tunnel = tunnels.get(tunnelId);
-      if (!tunnel || tunnel[role] !== socket) return;
+      if (!tunnel) return;
 
-      tunnel[role] = null;
-      const peerRole = role === "desktop" ? "mobile" : "desktop";
-      const peer = tunnel[peerRole];
-      if (peer?.readyState === WebSocket.OPEN) {
-        sendJson(peer, { version: 1, type: "tunnel.peer_offline", role });
+      if (role === "desktop") {
+        if (tunnel.desktop !== socket) return;
+        tunnel.desktop = null;
+        tunnel.requestRoutes.clear();
+        for (const mobile of tunnel.mobiles.values()) {
+          sendJson(mobile, { version: 1, type: "tunnel.peer_offline", role });
+        }
+      } else {
+        if (tunnel.mobiles.get(socket.connectionId) !== socket) return;
+        tunnel.mobiles.delete(socket.connectionId);
+        for (const [requestId, connectionId] of tunnel.requestRoutes.entries()) {
+          if (connectionId === socket.connectionId) tunnel.requestRoutes.delete(requestId);
+        }
+        if (tunnel.mobiles.size === 0) {
+          sendJson(tunnel.desktop, { version: 1, type: "tunnel.peer_offline", role });
+        }
       }
-      if (!tunnel.desktop && !tunnel.mobile) tunnels.delete(tunnelId);
+      if (!tunnel.desktop && tunnel.mobiles.size === 0) tunnels.delete(tunnelId);
       logger.info?.("tunnel connection closed", {
         tunnel_id: tunnelId,
         role,

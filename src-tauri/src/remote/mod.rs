@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     commands::chat::{cancel_turn_inner, send_message_inner},
-    config::app_config::{AppConfig, RemoteAccessConfig},
+    config::app_config::{AppConfig, RemoteAccessConfig, RemoteDeviceConfig},
     models::MessageWindowCursorDto,
     state::AppState,
 };
@@ -24,6 +24,15 @@ use crate::{
 const REMOTE_PROTOCOL_VERSION: u32 = 1;
 const MESSAGE_WINDOW_DEFAULT_LIMIT: usize = 50;
 const MESSAGE_WINDOW_MAX_LIMIT: usize = 100;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDeviceDto {
+    pub id: String,
+    pub name: String,
+    pub paired_at: Option<String>,
+    pub last_connected_at: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +47,7 @@ pub struct RemoteAccessStatusDto {
     pub pairing_qr_svg: Option<String>,
     pub pairing_expires_at: Option<String>,
     pub paired: bool,
+    pub devices: Vec<RemoteDeviceDto>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +93,16 @@ struct RemoteRequest {
     payload: Value,
 }
 
+fn device_name_from_payload(payload: &Value) -> String {
+    payload
+        .get("device_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(80).collect())
+        .unwrap_or_else(|| "Panes Mobile".to_string())
+}
+
 impl RemoteTunnelManager {
     pub async fn status(&self) -> RemoteAccessStatusDto {
         let runtime = self.runtime.read().await;
@@ -118,6 +138,30 @@ impl RemoteTunnelManager {
                     .build()
             })
         });
+        let mut devices = runtime
+            .config
+            .devices
+            .iter()
+            .map(|device| RemoteDeviceDto {
+                id: device.id.clone(),
+                name: if device.name.trim().is_empty() {
+                    "Panes Mobile".to_string()
+                } else {
+                    device.name.clone()
+                },
+                paired_at: (!device.paired_at.is_empty()).then(|| device.paired_at.clone()),
+                last_connected_at: (!device.last_connected_at.is_empty())
+                    .then(|| device.last_connected_at.clone()),
+            })
+            .collect::<Vec<_>>();
+        if !runtime.config.device_credential.is_empty() {
+            devices.push(RemoteDeviceDto {
+                id: "legacy".to_string(),
+                name: "Panes Mobile".to_string(),
+                paired_at: None,
+                last_connected_at: None,
+            });
+        }
         RemoteAccessStatusDto {
             enabled: runtime.config.enabled,
             endpoint: runtime.config.endpoint.clone(),
@@ -128,7 +172,8 @@ impl RemoteTunnelManager {
             pairing_payload,
             pairing_qr_svg,
             pairing_expires_at: runtime.pairing_expires_at.map(|value| value.to_rfc3339()),
-            paired: !runtime.config.device_credential.is_empty(),
+            paired: !devices.is_empty(),
+            devices,
         }
     }
 
@@ -164,17 +209,9 @@ impl RemoteTunnelManager {
             runtime.connected = false;
             runtime.peer_online = false;
             runtime.last_error = None;
-            if config.enabled {
-                runtime.pairing_token = Some(format!(
-                    "{}{}",
-                    uuid::Uuid::new_v4().simple(),
-                    uuid::Uuid::new_v4().simple()
-                ));
-                runtime.pairing_expires_at = Some(Utc::now() + ChronoDuration::minutes(5));
-            } else {
-                runtime.pairing_token = None;
-                runtime.pairing_expires_at = None;
-            }
+            // 配对凭据只在用户点击“添加设备”时生成，打开设置或重连服务时不生成二维码。
+            runtime.pairing_token = None;
+            runtime.pairing_expires_at = None;
             runtime.generation
         };
         let _ = app.emit("remote-access-updated", self.status().await);
@@ -354,8 +391,11 @@ impl RemoteTunnelManager {
                                                 .unwrap_or(false)
                                     } else {
                                         let runtime = manager.runtime.read().await;
-                                        !runtime.config.device_credential.is_empty()
-                                            && request.auth == runtime.config.device_credential
+                                        runtime.config.devices.iter().any(|device| {
+                                            !device.credential.is_empty()
+                                                && request.auth == device.credential
+                                        }) || (!runtime.config.device_credential.is_empty()
+                                            && request.auth == runtime.config.device_credential)
                                     };
                                     if !auth_valid {
                                         let response = json!({
@@ -376,11 +416,19 @@ impl RemoteTunnelManager {
                                                 uuid::Uuid::new_v4().simple(),
                                                 uuid::Uuid::new_v4().simple()
                                             );
-                                            let credential_to_save = device_credential.clone();
+                                            let now = Utc::now().to_rfc3339();
+                                            let device = RemoteDeviceConfig {
+                                                id: format!("mobile_{}", uuid::Uuid::new_v4().simple()),
+                                                name: device_name_from_payload(&request.payload),
+                                                credential: device_credential.clone(),
+                                                paired_at: now.clone(),
+                                                last_connected_at: now,
+                                            };
+                                            let device_to_save = device.clone();
                                             let _write_guard = state.config_write_lock.lock().await;
                                             let saved = tokio::task::spawn_blocking(move || {
                                                 AppConfig::mutate(|app_config| {
-                                                    app_config.remote_access.device_credential = credential_to_save;
+                                                    app_config.remote_access.devices.push(device_to_save);
                                                     Ok(())
                                                 })
                                             })
@@ -390,13 +438,76 @@ impl RemoteTunnelManager {
                                             match saved {
                                                 Ok(()) => {
                                                     let mut runtime = manager.runtime.write().await;
-                                                    runtime.config.device_credential = device_credential.clone();
+                                                    runtime.config.devices.push(device.clone());
                                                     runtime.pairing_token = None;
                                                     runtime.pairing_expires_at = None;
                                                     drop(runtime);
                                                     let _ = app.emit("remote-access-updated", manager.status().await);
-                                                    Ok(json!({ "device_credential": device_credential }))
+                                                    Ok(json!({
+                                                        "device_credential": device_credential,
+                                                        "device_id": device.id,
+                                                    }))
                                                 }
+                                                Err(error) => Err(error),
+                                            }
+                                        }
+                                        "device.identify" => {
+                                            let credential = request.auth.clone();
+                                            let device_name = device_name_from_payload(&request.payload);
+                                            let connected_at = Utc::now().to_rfc3339();
+                                            let credential_to_save = credential.clone();
+                                            let name_to_save = device_name.clone();
+                                            let connected_at_to_save = connected_at.clone();
+                                            let _write_guard = state.config_write_lock.lock().await;
+                                            let saved = tokio::task::spawn_blocking(move || {
+                                                AppConfig::mutate(|app_config| {
+                                                    if let Some(device) = app_config
+                                                        .remote_access
+                                                        .devices
+                                                        .iter_mut()
+                                                        .find(|device| device.credential == credential_to_save)
+                                                    {
+                                                        device.name = name_to_save;
+                                                        device.last_connected_at = connected_at_to_save;
+                                                        return Ok(Some(device.clone()));
+                                                    }
+                                                    if app_config.remote_access.device_credential == credential_to_save {
+                                                        let device = RemoteDeviceConfig {
+                                                            id: format!("mobile_{}", uuid::Uuid::new_v4().simple()),
+                                                            name: name_to_save,
+                                                            credential: credential_to_save,
+                                                            paired_at: connected_at_to_save.clone(),
+                                                            last_connected_at: connected_at_to_save,
+                                                        };
+                                                        app_config.remote_access.device_credential.clear();
+                                                        app_config.remote_access.devices.push(device.clone());
+                                                        return Ok(Some(device));
+                                                    }
+                                                    Ok(None)
+                                                })
+                                            })
+                                            .await
+                                            .map_err(|error| error.to_string())
+                                            .and_then(|result| result.map_err(|error| error.to_string()));
+                                            match saved {
+                                                Ok(Some(device)) => {
+                                                    let mut runtime = manager.runtime.write().await;
+                                                    runtime.config.device_credential.clear();
+                                                    if let Some(current) = runtime
+                                                        .config
+                                                        .devices
+                                                        .iter_mut()
+                                                        .find(|current| current.id == device.id)
+                                                    {
+                                                        *current = device.clone();
+                                                    } else {
+                                                        runtime.config.devices.push(device.clone());
+                                                    }
+                                                    drop(runtime);
+                                                    let _ = app.emit("remote-access-updated", manager.status().await);
+                                                    Ok(json!({ "device_id": device.id }))
+                                                }
+                                                Ok(None) => Err("Remote device is no longer authorized".to_string()),
                                                 Err(error) => Err(error),
                                             }
                                         }

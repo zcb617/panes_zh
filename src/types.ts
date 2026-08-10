@@ -1586,6 +1586,13 @@ export interface ContextUsage {
   windowSonnetWeeklyResetsAt: string | null;
 }
 
+export interface RemoteAccessDevice {
+  id: string;
+  name: string;
+  pairedAt: string | null;
+  lastConnectedAt: string | null;
+}
+
 export interface RemoteAccessStatus {
   enabled: boolean;
   endpoint: string;
@@ -1597,4 +1604,5 @@ export interface RemoteAccessStatus {
   pairingQrSvg: string | null;
   pairingExpiresAt: string | null;
   paired: boolean;
+  devices: RemoteAccessDevice[];
 }

@@ -13143,6 +13143,22 @@ button.chat-context-section:hover {
   font-size: 11px;
 }
 
+.remote-access-revoke-button {
+  color: var(--danger);
+}
+
+.remote-access-revoke-button:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg-3));
+}
+
+.remote-access-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 @media (max-width: 760px) {
   .remote-access-pairing-card {
     grid-template-columns: 1fr;
