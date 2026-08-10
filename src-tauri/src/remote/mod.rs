@@ -1,18 +1,24 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::Path,
     sync::Arc,
     time::Duration,
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures::{SinkExt, StreamExt};
 use qrcode::{render::svg, QrCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+    fs as tokio_fs,
+    sync::{Mutex, RwLock},
+};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::{
     commands::{
@@ -531,6 +537,10 @@ impl RemoteTunnelManager {
                                             "version": app.package_info().version.to_string(),
                                             "online": true,
                                         })),
+                                        "engine.list" => state.engines.list_engines()
+                                            .await
+                                            .map_err(|error| error.to_string())
+                                            .and_then(|items| serde_json::to_value(items).map_err(|error| error.to_string())),
                                         "workspace.list" => {
                                             let db = state.db.clone();
                                             tokio::task::spawn_blocking(move || crate::db::workspaces::list_workspaces(&db))
@@ -603,6 +613,88 @@ impl RemoteTunnelManager {
                                                 Err(error) => Err(error),
                                             }
                                         }
+                                        "thread.set_autonomy_preset" => {
+                                            let thread_id = request.payload.get("thread_id")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty())
+                                                .map(str::to_string)
+                                                .ok_or_else(|| "thread_id is required".to_string());
+                                            let preset = request.payload.get("preset")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| matches!(*value, "inherit" | "read-only" | "ask" | "auto" | "full"))
+                                                .map(str::to_string)
+                                                .ok_or_else(|| "preset is invalid".to_string());
+                                            match (thread_id, preset) {
+                                                (Ok(thread_id), Ok(preset)) => {
+                                                    let db = state.db.clone();
+                                                    let codex_uses_external_sandbox = state.engines.codex_uses_external_sandbox().await;
+                                                    tokio::task::spawn_blocking(move || {
+                                                        let thread = crate::db::threads::get_thread(&db, &thread_id)?
+                                                            .ok_or_else(|| anyhow::anyhow!("thread not found"))?;
+                                                        let mut metadata = thread.engine_metadata.unwrap_or_else(|| json!({}));
+                                                        if !metadata.is_object() { metadata = json!({}); }
+                                                        let values = metadata.as_object_mut().expect("metadata must be an object");
+                                                        values.remove("permissionProfile");
+                                                        values.remove("sandboxApprovalPolicy");
+                                                        values.remove("sandboxMode");
+                                                        values.remove("sandboxAllowNetwork");
+                                                        values.remove("claudePermissionMode");
+                                                        values.remove("opencodePermissionMode");
+
+                                                        if preset != "inherit" {
+                                                            match thread.engine_id.as_str() {
+                                                                "codex" => {
+                                                                    let (approval, sandbox, allow_network) = match preset.as_str() {
+                                                                        "read-only" => ("untrusted", (!codex_uses_external_sandbox).then_some("read-only"), false),
+                                                                        "ask" => ("on-request", (!codex_uses_external_sandbox).then_some("workspace-write"), false),
+                                                                        "auto" => ("on-request", (!codex_uses_external_sandbox).then_some("workspace-write"), true),
+                                                                        "full" => ("never", Some("danger-full-access"), true),
+                                                                        _ => unreachable!(),
+                                                                    };
+                                                                    values.insert("sandboxApprovalPolicy".to_string(), json!(approval));
+                                                                    if let Some(sandbox) = sandbox {
+                                                                        values.insert("sandboxMode".to_string(), json!(sandbox));
+                                                                    }
+                                                                    values.insert("sandboxAllowNetwork".to_string(), json!(allow_network));
+                                                                }
+                                                                "claude" => {
+                                                                    let (permission_mode, sandbox, allow_network) = match preset.as_str() {
+                                                                        "read-only" => ("default", "read-only", false),
+                                                                        "ask" => ("default", "workspace-write", false),
+                                                                        "auto" => ("acceptEdits", "workspace-write", true),
+                                                                        "full" => ("bypassPermissions", "danger-full-access", true),
+                                                                        _ => unreachable!(),
+                                                                    };
+                                                                    values.insert("claudePermissionMode".to_string(), json!(permission_mode));
+                                                                    values.insert("sandboxMode".to_string(), json!(sandbox));
+                                                                    values.insert("sandboxAllowNetwork".to_string(), json!(allow_network));
+                                                                }
+                                                                "opencode" => {
+                                                                    let permission_mode = match preset.as_str() {
+                                                                        "read-only" | "ask" => "default",
+                                                                        "auto" | "full" => "bypassPermissions",
+                                                                        _ => unreachable!(),
+                                                                    };
+                                                                    values.insert("opencodePermissionMode".to_string(), json!(permission_mode));
+                                                                }
+                                                                _ => return Err(anyhow::anyhow!("unsupported engine")),
+                                                            }
+                                                        }
+
+                                                        crate::db::threads::update_engine_metadata(&db, &thread_id, &metadata)?;
+                                                        crate::db::threads::get_thread(&db, &thread_id)?
+                                                            .ok_or_else(|| anyhow::anyhow!("thread not found after update"))
+                                                    })
+                                                    .await
+                                                    .map_err(|error| error.to_string())
+                                                    .and_then(|result| result.map_err(|error| error.to_string()))
+                                                    .and_then(|thread| serde_json::to_value(thread).map_err(|error| error.to_string()))
+                                                }
+                                                (Err(error), _) | (_, Err(error)) => Err(error),
+                                            }
+                                        }
                                         "message.list" => {
                                             let thread_id = request.payload.get("thread_id")
                                                 .and_then(Value::as_str)
@@ -656,9 +748,13 @@ impl RemoteTunnelManager {
                                             let mime_type = request.payload.get("mime_type")
                                                 .and_then(Value::as_str)
                                                 .map(str::trim)
-                                                .filter(|value| value.starts_with("image/") && value.len() <= 128)
+                                                .filter(|value| {
+                                                    value.len() <= 128
+                                                        && value.split_once('/').is_some_and(|(kind, subtype)| !kind.is_empty() && !subtype.is_empty())
+                                                        && value.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '+' | '-'))
+                                                })
                                                 .map(str::to_string)
-                                                .ok_or_else(|| "image mime_type is required".to_string());
+                                                .ok_or_else(|| "attachment mime_type is invalid".to_string());
                                             let chunk_index = request.payload.get("chunk_index")
                                                 .and_then(Value::as_u64)
                                                 .filter(|value| *value <= u32::MAX as u64)
@@ -712,16 +808,55 @@ impl RemoteTunnelManager {
                                                     match completed {
                                                         Ok(Some(upload)) => {
                                                             let original_file_name = upload.file_name.clone();
-                                                            save_pasted_image_attachment(
-                                                                upload.file_name,
-                                                                upload.mime_type,
-                                                                upload.data_base64,
-                                                            )
-                                                            .await
-                                                            .and_then(|mut attachment| {
-                                                                attachment.file_name = original_file_name;
-                                                                serde_json::to_value(attachment).map_err(|error| error.to_string())
-                                                            })
+                                                            if upload.mime_type.starts_with("image/") {
+                                                                save_pasted_image_attachment(
+                                                                    upload.file_name,
+                                                                    upload.mime_type,
+                                                                    upload.data_base64,
+                                                                )
+                                                                .await
+                                                                .and_then(|mut attachment| {
+                                                                    attachment.file_name = original_file_name;
+                                                                    serde_json::to_value(attachment).map_err(|error| error.to_string())
+                                                                })
+                                                            } else {
+                                                                let decoded = BASE64
+                                                                    .decode(upload.data_base64.trim())
+                                                                    .map_err(|_| "attachment data is not valid base64".to_string());
+                                                                match decoded {
+                                                                    Ok(bytes) if bytes.is_empty() => Err("attachment data is empty".to_string()),
+                                                                    Ok(bytes) if bytes.len() > 10 * 1024 * 1024 => Err("attachment exceeds the 10 MB limit".to_string()),
+                                                                    Ok(bytes) => {
+                                                                        let extension = Path::new(&original_file_name)
+                                                                            .extension()
+                                                                            .and_then(|value| value.to_str())
+                                                                            .filter(|value| !value.is_empty() && value.len() <= 24 && value.chars().all(|character| character.is_ascii_alphanumeric()))
+                                                                            .map(|value| format!(".{value}"))
+                                                                            .unwrap_or_default();
+                                                                        let stored_file_name = format!("mobile-file-{}{}", Uuid::new_v4().simple(), extension);
+                                                                        let attachment_dir = crate::runtime_env::app_data_dir()
+                                                                            .join("attachments")
+                                                                            .join("mobile-files");
+                                                                        match tokio_fs::create_dir_all(&attachment_dir).await {
+                                                                            Ok(()) => {
+                                                                                let file_path = attachment_dir.join(stored_file_name);
+                                                                                match tokio_fs::write(&file_path, &bytes).await {
+                                                                                    Ok(()) => serde_json::to_value(ChatAttachmentPayload {
+                                                                                        file_name: original_file_name,
+                                                                                        file_path: file_path.display().to_string(),
+                                                                                        size_bytes: bytes.len() as u64,
+                                                                                        mime_type: Some(upload.mime_type),
+                                                                                        browser_annotation: None,
+                                                                                    }).map_err(|error| error.to_string()),
+                                                                                    Err(error) => Err(format!("failed to save mobile attachment: {error}")),
+                                                                                }
+                                                                            }
+                                                                            Err(error) => Err(format!("failed to create mobile attachment directory: {error}")),
+                                                                        }
+                                                                    }
+                                                                    Err(error) => Err(error),
+                                                                }
+                                                            }
                                                         }
                                                         Ok(None) => Ok(json!({ "complete": false })),
                                                         Err(error) => Err(error),
@@ -747,6 +882,16 @@ impl RemoteTunnelManager {
                                                 .map(str::trim)
                                                 .unwrap_or_default()
                                                 .to_string();
+                                            let model_id = request.payload.get("model_id")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty())
+                                                .map(str::to_string);
+                                            let reasoning_effort = request.payload.get("reasoning_effort")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty())
+                                                .map(str::to_string);
                                             let attachments = request.payload.get("attachments")
                                                 .filter(|value| !value.is_null())
                                                 .cloned()
@@ -763,8 +908,8 @@ impl RemoteTunnelManager {
                                                         &state,
                                                         thread_id,
                                                         message,
-                                                        None,
-                                                        None,
+                                                        model_id,
+                                                        reasoning_effort,
                                                         attachments,
                                                         None,
                                                         Some(false),

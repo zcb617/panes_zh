@@ -1,14 +1,20 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
-import { onHide, onLoad, onShow, onUnload } from "@dcloudio/uni-app";
+import { onBackPress, onHide, onLoad, onShow, onUnload } from "@dcloudio/uni-app";
 // marked 16 会把 Unicode 属性正则打进 app-service.js，部分 App 运行时无法解析并导致启动白屏。
 // import { marked } from "marked";
 import { RemoteClient } from "../../remote";
-import type { ChatAttachment, ConnectionState, DesktopStatus, Message, MessageWindow, PairingConfig, RemoteEvent, Thread, Workspace } from "../../types";
+import type { ChatAttachment, ConnectionState, DesktopStatus, EngineInfo, EngineModel, Message, MessageWindow, PairingConfig, RemoteEvent, Thread, Workspace } from "../../types";
 
 declare const plus: any;
 
 type Screen = "pair" | "projects" | "threads" | "chat" | "settings";
+type AutonomyPreset = "inherit" | "read-only" | "ask" | "auto" | "full";
+type ThreadComposerState = {
+  text: string;
+  attachments: ChatAttachment[];
+  inputHeight: number;
+};
 const STORAGE_KEY = "panes-mobile:pairing:v1";
 const client = new RemoteClient();
 const pairing = ref<PairingConfig | null>(null);
@@ -19,6 +25,7 @@ const priorScreen = ref<Screen>("projects");
 const workspaces = ref<Workspace[]>([]);
 const threads = ref<Thread[]>([]);
 const messages = ref<Message[]>([]);
+const engines = ref<EngineInfo[]>([]);
 const selectedWorkspaceId = ref<string | null>(null);
 const selectedThreadId = ref<string | null>(null);
 const nextCursor = ref<MessageWindow["nextCursor"]>(null);
@@ -30,10 +37,26 @@ const creatingThread = ref(false);
 const draft = ref("");
 const composerInputHeight = ref(50);
 const attachments = ref<ChatAttachment[]>([]);
+const composerStateByThread = new Map<string, ThreadComposerState>();
+const runtimePickerOpen = ref(false);
+const permissionPickerOpen = ref(false);
+const permissionSaving = ref(false);
+const selectedModelId = ref("");
+const selectedReasoningEffort = ref("");
+const selectedAutonomyPreset = ref<AutonomyPreset>("inherit");
+const autonomyOptions: Array<{ id: AutonomyPreset; label: string; description: string }> = [
+  { id: "inherit", label: "跟随默认权限", description: "使用桌面端当前默认设置" },
+  { id: "read-only", label: "只读权限", description: "只能读取，修改前需要批准" },
+  { id: "ask", label: "标准访问权限", description: "可在工作区修改，敏感操作前询问" },
+  { id: "auto", label: "工作区自动权限", description: "工作区内自动执行并允许网络" },
+  { id: "full", label: "完全访问权限", description: "允许访问电脑上的所有路径和网络" },
+];
 const pairingText = ref("");
 const pairingError = ref<string | null>(null);
 const notice = ref<string | null>(null);
 const chatScrollTop = ref(0);
+const chatScrollWithAnimation = ref(true);
+const chatScrollTopByThread = new Map<string, number>();
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
 const selectedWorkspace = computed(() => workspaces.value.find((item) => item.id === selectedWorkspaceId.value) ?? null);
@@ -41,6 +64,8 @@ const selectedThread = computed(() => threads.value.find((item) => item.id === s
 const activeTurn = computed(() => selectedThread.value?.status === "streaming");
 const attachmentUploading = computed(() => attachments.value.some((item) => item.uploading));
 const hasComposerContent = computed(() => Boolean(draft.value.trim()) || attachments.value.length > 0);
+let attachmentPickerActive = false;
+/*
 const runtimeLabel = computed(() => {
   const thread = selectedThread.value;
   if (!thread) return "GPT-5.4 高";
@@ -56,6 +81,31 @@ const accessLabel = computed(() => {
     ? "完全访问权限"
     : "标准访问权限";
 });
+*/
+const currentEngine = computed(() => engines.value.find((item) => item.id === selectedThread.value?.engineId) ?? null);
+const availableModels = computed(() => currentEngine.value?.models ?? []);
+const selectedModel = computed<EngineModel | null>(() => availableModels.value.find((item) => item.id === selectedModelId.value) ?? null);
+const availableEfforts = computed(() => selectedModel.value?.supportedReasoningEfforts ?? []);
+function formatReasoningEffort(effort: string) {
+  return effort === "xhigh" ? "极高"
+    : effort === "high" ? "高"
+      : effort === "medium" ? "中"
+        : effort === "low" ? "低"
+          : effort === "minimal" ? "最低"
+            : effort === "none" ? "无"
+              : effort;
+}
+const runtimeLabel = computed(() => {
+  const modelName = selectedModel.value?.displayName || selectedModelId.value || selectedThread.value?.modelId || "GPT-5.4";
+  const effort = selectedReasoningEffort.value || selectedModel.value?.defaultReasoningEffort || "high";
+  const effortLabel = formatReasoningEffort(effort);
+  return `${modelName} ${effortLabel}`;
+});
+const accessLabel = computed(() => selectedAutonomyPreset.value === "full" ? "完全访问权限"
+  : selectedAutonomyPreset.value === "read-only" ? "只读权限"
+    : selectedAutonomyPreset.value === "auto" ? "工作区自动权限"
+      : selectedAutonomyPreset.value === "ask" ? "标准访问权限"
+        : "跟随默认权限");
 const pageTitle = computed(() => {
   if (screen.value === "projects") return "项目";
   if (screen.value === "threads") return selectedWorkspace.value?.name || "项目会话";
@@ -90,7 +140,10 @@ function showNotice(message: string) {
 async function loadWorkspaces() {
   if (!connection.value.peerOnline) return;
   loading.value = true;
-  try { workspaces.value = await client.request<Workspace[]>("workspace.list"); }
+  try {
+    workspaces.value = await client.request<Workspace[]>("workspace.list");
+    if (engines.value.length === 0) engines.value = await client.request<EngineInfo[]>("engine.list");
+  }
   catch (error) { showNotice(String(error)); }
   finally { loading.value = false; }
 }
@@ -103,7 +156,8 @@ async function loadThreads(workspaceId: string) {
   finally { loading.value = false; }
 }
 
-async function loadMessages(threadId: string) {
+// async function loadMessages(threadId: string) {
+async function loadMessages(threadId: string, initialScrollTop?: number | null) {
   if (!connection.value.peerOnline) return;
   loading.value = true;
   try {
@@ -112,7 +166,17 @@ async function loadMessages(threadId: string) {
     nextCursor.value = result.nextCursor;
     await client.request("thread.subscribe", { thread_id: threadId });
     await nextTick();
-    chatScrollTop.value += 100000;
+    // 旧逻辑每次进入会话都开启动画并再次滚到底部，长会话会出现明显的滚动过程。
+    // chatScrollTop.value += 100000;
+    if (initialScrollTop === undefined) {
+      chatScrollWithAnimation.value = true;
+      chatScrollTop.value += 100000;
+    } else {
+      chatScrollWithAnimation.value = false;
+      chatScrollTop.value = initialScrollTop ?? 100000;
+      await nextTick();
+      chatScrollWithAnimation.value = true;
+    }
   } catch (error) { showNotice(String(error)); }
   finally { loading.value = false; }
 }
@@ -196,7 +260,17 @@ function startScanner() {
   });
 }
 
+function storeComposerState(threadId: string | null) {
+  if (!threadId) return;
+  composerStateByThread.set(threadId, {
+    text: draft.value,
+    attachments: attachments.value,
+    inputHeight: composerInputHeight.value,
+  });
+}
+
 async function selectWorkspace(workspace: Workspace) {
+  storeComposerState(selectedThreadId.value);
   selectedWorkspaceId.value = workspace.id;
   selectedThreadId.value = null;
   threads.value = [];
@@ -228,10 +302,46 @@ async function createNewThread() {
 }
 
 async function selectThread(thread: Thread) {
+  storeComposerState(selectedThreadId.value);
+  // 旧逻辑只切换会话 ID，导致所有会话共用同一份输入文字和附件。
+  // selectedThreadId.value = thread.id;
   selectedThreadId.value = thread.id;
+  const composerState = composerStateByThread.get(thread.id);
+  draft.value = composerState?.text ?? "";
+  attachments.value = composerState?.attachments ?? [];
+  composerInputHeight.value = composerState?.inputHeight ?? 50;
+  const metadata = thread.engineMetadata ?? {};
+  selectedModelId.value = typeof metadata.lastModelId === "string" ? metadata.lastModelId : thread.modelId;
+  const engine = engines.value.find((item) => item.id === thread.engineId) ?? null;
+  const model = engine?.models.find((item) => item.id === selectedModelId.value) ?? null;
+  selectedReasoningEffort.value = typeof metadata.reasoningEffort === "string"
+    ? metadata.reasoningEffort
+    : model?.defaultReasoningEffort || "high";
+  const sandboxMode = typeof metadata.sandboxMode === "string" ? metadata.sandboxMode : "";
+  const approvalPolicy = typeof metadata.sandboxApprovalPolicy === "string"
+    ? metadata.sandboxApprovalPolicy
+    : typeof metadata.approvalPolicy === "string"
+      ? metadata.approvalPolicy
+      : "";
+  const allowNetwork = metadata.sandboxAllowNetwork === true;
+  selectedAutonomyPreset.value = sandboxMode === "danger-full-access" && approvalPolicy === "never"
+    ? "full"
+    : sandboxMode === "read-only" || approvalPolicy === "untrusted"
+      ? "read-only"
+      : sandboxMode === "workspace-write" && allowNetwork
+        ? "auto"
+        : sandboxMode === "workspace-write" || approvalPolicy === "on-request"
+          ? "ask"
+          : "inherit";
+  runtimePickerOpen.value = false;
+  permissionPickerOpen.value = false;
+  const savedScrollTop = chatScrollTopByThread.get(thread.id);
+  chatScrollWithAnimation.value = false;
+  chatScrollTop.value = 0;
   messages.value = [];
   screen.value = "chat";
-  await loadMessages(thread.id);
+  // await loadMessages(thread.id);
+  await loadMessages(thread.id, savedScrollTop ?? null);
 }
 
 async function loadOlderMessages() {
@@ -246,21 +356,274 @@ async function loadOlderMessages() {
   finally { loadingOlder.value = false; }
 }
 
-function resizeComposerInput(event: { detail?: { height?: number } }) {
+function resizeComposerInput(event: { detail?: { height?: number; lineCount?: number } }) {
   const measuredHeight = Number(event.detail?.height);
-  if (!Number.isFinite(measuredHeight)) return;
-  const nextHeight = Math.max(50, Math.min(154, Math.ceil(measuredHeight)));
+  const lineCount = Number(event.detail?.lineCount);
+  if (!Number.isFinite(measuredHeight) && !Number.isFinite(lineCount)) return;
+  const nextHeight = Number.isFinite(measuredHeight)
+    ? Math.max(50, Math.min(154, Math.ceil(measuredHeight)))
+    : Math.max(50, Math.min(154, 6 + Math.ceil(lineCount) * 22));
   const heightGrowth = Math.max(0, nextHeight - composerInputHeight.value);
   composerInputHeight.value = nextHeight;
   if (heightGrowth > 0) void nextTick(() => { chatScrollTop.value += heightGrowth; });
 }
 
+function chooseModel(model: EngineModel) {
+  selectedModelId.value = model.id;
+  const currentEffortSupported = model.supportedReasoningEfforts.some((item) => item.reasoningEffort === selectedReasoningEffort.value);
+  if (!currentEffortSupported) selectedReasoningEffort.value = model.defaultReasoningEffort
+    || model.supportedReasoningEfforts[0]?.reasoningEffort
+    || "none";
+}
+
+function chooseReasoningEffort(reasoningEffort: string) {
+  selectedReasoningEffort.value = reasoningEffort;
+}
+
+function readAndroidAttachment(fileUri: string, fallbackName: string) {
+  return new Promise<{ dataUrl: string; fileName: string; sizeBytes: number }>((resolve, reject) => {
+    try {
+      if (typeof plus === "undefined" || !plus.android) throw new Error("当前设备无法读取所选文件");
+      /* 旧实现直接调用 Native.js 返回实例的方法，真机上的 resolver 没有 query 函数。
+      const activity = plus.android.runtimeMainActivity();
+      const Uri = plus.android.importClass("android.net.Uri");
+      const File = plus.android.importClass("java.io.File");
+      const Base64 = plus.android.importClass("android.util.Base64");
+      const Byte = plus.android.importClass("java.lang.Byte");
+      const ReflectArray = plus.android.importClass("java.lang.reflect.Array");
+      const resolver = activity.getContentResolver();
+      let normalizedUri = fileUri;
+      if (normalizedUri.startsWith("_")) normalizedUri = plus.io.convertLocalFileSystemURL(normalizedUri);
+      const uri = normalizedUri.startsWith("/")
+        ? Uri.fromFile(new File(normalizedUri))
+        : Uri.parse(normalizedUri);
+      let fileName = fallbackName;
+      let sizeBytes = 0;
+      let cursor: any = null;
+      try {
+        cursor = resolver.query(uri, null, null, null, null);
+        if (cursor && cursor.moveToFirst()) {
+          const nameIndex = cursor.getColumnIndex("_display_name");
+          const sizeIndex = cursor.getColumnIndex("_size");
+          if (nameIndex >= 0) fileName = String(cursor.getString(nameIndex) || fallbackName);
+          if (sizeIndex >= 0) sizeBytes = Number(cursor.getLong(sizeIndex)) || 0;
+        }
+      } finally {
+        if (cursor) cursor.close();
+      }
+      if (sizeBytes > 10 * 1024 * 1024) throw new Error("单个附件不能超过 10 MB");
+      const mimeType = String(resolver.getType(uri) || "application/octet-stream");
+      const input = resolver.openInputStream(uri);
+      if (!input) throw new Error("无法打开所选文件");
+      const output = plus.android.newObject("java.io.ByteArrayOutputStream");
+      // Native.js 的静态字段必须通过 plus.android.getAttribute 读取。
+      // Byte.plusGetAttribute 在真机上不存在，会让图片回退读取和普通文件读取同时失败。
+      const byteType = plus.android.getAttribute(Byte, "TYPE");
+      const buffer = ReflectArray.newInstance(byteType, 32768);
+      try {
+        let bytesRead = Number(input.read(buffer));
+        while (bytesRead > 0) {
+          output.write(buffer, 0, bytesRead);
+          if (Number(output.size()) > 10 * 1024 * 1024) throw new Error("单个附件不能超过 10 MB");
+          bytesRead = Number(input.read(buffer));
+        }
+        sizeBytes = Number(output.size()) || sizeBytes;
+        const base64 = String(Base64.encodeToString(output.toByteArray(), 2));
+        resolve({ dataUrl: `data:${mimeType};base64,${base64}`, fileName, sizeBytes });
+      } finally {
+        input.close();
+        output.close();
+      }
+      */
+      const activity = plus.android.runtimeMainActivity();
+      const Uri = plus.android.importClass("android.net.Uri");
+      const File = plus.android.importClass("java.io.File");
+      const Base64 = plus.android.importClass("android.util.Base64");
+      const Byte = plus.android.importClass("java.lang.Byte");
+      const ReflectArray = plus.android.importClass("java.lang.reflect.Array");
+      const URLConnection = plus.android.importClass("java.net.URLConnection");
+      const resolver = plus.android.invoke(activity, "getContentResolver");
+      let normalizedUri = fileUri;
+      if (normalizedUri.startsWith("_")) normalizedUri = plus.io.convertLocalFileSystemURL(normalizedUri);
+      const contentUri = normalizedUri.startsWith("content://");
+      const uri = normalizedUri.startsWith("/")
+        ? Uri.fromFile(new File(normalizedUri))
+        : Uri.parse(normalizedUri);
+      let fileName = fallbackName;
+      let sizeBytes = 0;
+      let mimeType = "application/octet-stream";
+      let input: any = null;
+      if (contentUri) {
+        let cursor: any = null;
+        try {
+          cursor = plus.android.invoke(resolver, "query", uri, null, null, null, null);
+          if (cursor && plus.android.invoke(cursor, "moveToFirst")) {
+            const nameIndex = Number(plus.android.invoke(cursor, "getColumnIndex", "_display_name"));
+            const sizeIndex = Number(plus.android.invoke(cursor, "getColumnIndex", "_size"));
+            if (nameIndex >= 0) fileName = String(plus.android.invoke(cursor, "getString", nameIndex) || fallbackName);
+            if (sizeIndex >= 0) sizeBytes = Number(plus.android.invoke(cursor, "getLong", sizeIndex)) || 0;
+          }
+        } finally {
+          if (cursor) plus.android.invoke(cursor, "close");
+        }
+        mimeType = String(plus.android.invoke(resolver, "getType", uri) || "application/octet-stream");
+        input = plus.android.invoke(resolver, "openInputStream", uri);
+      } else {
+        const localPath = normalizedUri.startsWith("file://")
+          ? String(plus.android.invoke(uri, "getPath") || normalizedUri.slice(7))
+          : normalizedUri;
+        const localFile = new File(localPath);
+        fileName = String(plus.android.invoke(localFile, "getName") || fallbackName);
+        sizeBytes = Number(plus.android.invoke(localFile, "length")) || 0;
+        mimeType = String(plus.android.invoke(URLConnection, "guessContentTypeFromName", fileName) || "application/octet-stream");
+        input = plus.android.newObject("java.io.FileInputStream", localFile);
+      }
+      if (sizeBytes > 10 * 1024 * 1024) throw new Error("单个附件不能超过 10 MB");
+      if (!input) throw new Error("无法打开所选文件");
+      const output = plus.android.newObject("java.io.ByteArrayOutputStream");
+      const byteType = plus.android.getAttribute(Byte, "TYPE");
+      const buffer = plus.android.invoke(ReflectArray, "newInstance", byteType, 32768);
+      try {
+        let bytesRead = Number(plus.android.invoke(input, "read", buffer));
+        while (bytesRead > 0) {
+          plus.android.invoke(output, "write", buffer, 0, bytesRead);
+          if (Number(plus.android.invoke(output, "size")) > 10 * 1024 * 1024) throw new Error("单个附件不能超过 10 MB");
+          bytesRead = Number(plus.android.invoke(input, "read", buffer));
+        }
+        sizeBytes = Number(plus.android.invoke(output, "size")) || sizeBytes;
+        const byteArray = plus.android.invoke(output, "toByteArray");
+        const base64 = String(plus.android.invoke(Base64, "encodeToString", byteArray, 2));
+        resolve({ dataUrl: `data:${mimeType};base64,${base64}`, fileName, sizeBytes });
+      } finally {
+        plus.android.invoke(input, "close");
+        plus.android.invoke(output, "close");
+      }
+    } catch (error) {
+      console.error("[附件] Android 文件读取失败", error);
+      reject(error instanceof Error ? error : new Error(`读取所选文件失败：${String(error)}`));
+    }
+  });
+}
+
+// async function uploadAttachmentData(localId: string, localFile: { dataUrl: string; fileName: string; sizeBytes: number }) {
+async function uploadAttachmentData(localId: string, localFile: { dataUrl: string; fileName: string; sizeBytes: number }, targetAttachments: ChatAttachment[]) {
+  const dataMatch = /^data:([^;,]+);base64,/i.exec(localFile.dataUrl);
+  const commaIndex = localFile.dataUrl.indexOf(",");
+  if (!dataMatch || commaIndex < 0) throw new Error("附件数据格式无效");
+  const mimeType = dataMatch[1].toLowerCase();
+  const dataBase64 = localFile.dataUrl.slice(commaIndex + 1);
+  const chunkSize = 256 * 1024;
+  const chunkCount = Math.ceil(dataBase64.length / chunkSize);
+  const uploadId = `${localId}-${Date.now()}`;
+  let uploaded: ChatAttachment | null = null;
+  for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+    uploaded = await client.request<ChatAttachment>("attachment.upload", {
+      upload_id: uploadId,
+      file_name: localFile.fileName,
+      mime_type: mimeType,
+      chunk_index: chunkIndex,
+      chunk_count: chunkCount,
+      data_base64: dataBase64.slice(chunkIndex * chunkSize, (chunkIndex + 1) * chunkSize),
+    });
+  }
+  if (!uploaded?.filePath) throw new Error("附件上传没有返回文件路径");
+  // const attachmentIndex = attachments.value.findIndex((item) => item.id === localId);
+  // if (attachmentIndex >= 0) attachments.value.splice(attachmentIndex, 1, {
+  const attachmentIndex = targetAttachments.findIndex((item) => item.id === localId);
+  if (attachmentIndex >= 0) targetAttachments.splice(attachmentIndex, 1, {
+    ...uploaded,
+    id: localId,
+    fileName: localFile.fileName,
+    sizeBytes: localFile.sizeBytes || uploaded.sizeBytes,
+    uploading: false,
+  });
+}
+
+async function chooseAutonomyPreset(preset: AutonomyPreset) {
+  if (!selectedThreadId.value || permissionSaving.value) return;
+  permissionSaving.value = true;
+  try {
+    const updated = await client.request<Thread>("thread.set_autonomy_preset", {
+      thread_id: selectedThreadId.value,
+      preset,
+    });
+    const threadIndex = threads.value.findIndex((item) => item.id === updated.id);
+    if (threadIndex >= 0) threads.value.splice(threadIndex, 1, updated);
+    selectedAutonomyPreset.value = preset;
+    permissionPickerOpen.value = false;
+  } catch (error) { showNotice(String(error)); }
+  finally { permissionSaving.value = false; }
+}
+
 function chooseAttachments() {
   if (!connection.value.peerOnline || attachmentUploading.value || attachments.value.length >= 6) return;
-  uni.chooseImage({
-    count: Math.max(1, 6 - attachments.value.length),
+  const targetAttachments = attachments.value;
+  uni.showActionSheet({
+    itemList: ["拍照", "从相册选择", "选择文件"],
+    success: (choice) => {
+      if (choice.tapIndex === 2) {
+        if (typeof plus === "undefined" || !plus.android || String(plus.os?.name || "").toLowerCase() !== "android") {
+          showNotice("当前版本暂不支持在此设备上选择普通文件");
+          return;
+        }
+        try {
+          const activity = plus.android.runtimeMainActivity();
+          const Intent = plus.android.importClass("android.content.Intent");
+          const intent = new Intent("android.intent.action.OPEN_DOCUMENT");
+          intent.addCategory("android.intent.category.OPENABLE");
+          intent.setType("*/*");
+          const requestCode = 47218;
+          activity.onActivityResult = async (returnedRequestCode: number, resultCode: number, resultData: any) => {
+            if (returnedRequestCode !== requestCode) return;
+            attachmentPickerActive = false;
+            if (resultCode !== -1 || !resultData) return;
+            const localId = `mobile-file-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            const placeholder: ChatAttachment = {
+              id: localId,
+              fileName: "正在读取文件…",
+              filePath: "",
+              sizeBytes: 0,
+              mimeType: "application/octet-stream",
+              uploading: true,
+            };
+          // attachments.value.push(placeholder);
+          targetAttachments.push(placeholder);
+            try {
+              const uri = String(resultData.getData().toString());
+              const localFile = await readAndroidAttachment(uri, "附件");
+            // const attachmentIndex = attachments.value.findIndex((item) => item.id === localId);
+            // if (attachmentIndex >= 0) attachments.value.splice(attachmentIndex, 1, {
+            const attachmentIndex = targetAttachments.findIndex((item) => item.id === localId);
+            if (attachmentIndex >= 0) targetAttachments.splice(attachmentIndex, 1, {
+                ...placeholder,
+                fileName: localFile.fileName,
+                sizeBytes: localFile.sizeBytes,
+              });
+            // await uploadAttachmentData(localId, localFile);
+            await uploadAttachmentData(localId, localFile, targetAttachments);
+            } catch (error) {
+              console.error("[附件] 普通文件处理失败", error);
+            // const attachmentIndex = attachments.value.findIndex((item) => item.id === localId);
+            // if (attachmentIndex >= 0) attachments.value.splice(attachmentIndex, 1);
+            const attachmentIndex = targetAttachments.findIndex((item) => item.id === localId);
+            if (attachmentIndex >= 0) targetAttachments.splice(attachmentIndex, 1);
+              showNotice(error instanceof Error ? error.message : "读取所选文件失败");
+            }
+          };
+          attachmentPickerActive = true;
+          activity.startActivityForResult(intent, requestCode);
+        } catch {
+          attachmentPickerActive = false;
+          showNotice("无法打开系统文件选择器");
+        }
+        return;
+      }
+      attachmentPickerActive = true;
+      uni.chooseImage({
+      // count: Math.max(1, 6 - attachments.value.length),
+      count: Math.max(1, 6 - targetAttachments.length),
     sizeType: ["original"],
-    sourceType: ["album", "camera"],
+    sourceType: choice.tapIndex === 0 ? ["camera"] : ["album"],
     success: async (result) => {
       const paths = (result.tempFilePaths || []).map((item) => String(item));
       if (paths.length === 0) return;
@@ -269,16 +632,25 @@ function chooseAttachments() {
         const localId = `mobile-${Date.now()}-${pathIndex}-${Math.random().toString(16).slice(2)}`;
         const placeholder: ChatAttachment = {
           id: localId,
-          fileName: `图片-${attachments.value.length + 1}`,
+            // fileName: `图片-${attachments.value.length + 1}`,
+            fileName: `图片-${targetAttachments.length + 1}`,
           filePath: "",
           sizeBytes: 0,
           mimeType: "image/jpeg",
           uploading: true,
         };
-        attachments.value.push(placeholder);
+          // attachments.value.push(placeholder);
+          targetAttachments.push(placeholder);
         try {
           if (typeof plus === "undefined" || !plus.io) throw new Error("当前运行环境无法读取附件");
           const localFile = await new Promise<{ dataUrl: string; fileName: string; sizeBytes: number }>((resolve, reject) => {
+            let androidFallbackStarted = false;
+            const resolveWithAndroid = async () => {
+              if (androidFallbackStarted) return;
+              androidFallbackStarted = true;
+              try { resolve(await readAndroidAttachment(filePath, `图片-${pathIndex + 1}.jpg`)); }
+              catch (error) { reject(error); }
+            };
             plus.io.resolveLocalFileSystemURL(filePath, (entry: any) => {
               entry.file((file: any) => {
                 if (Number(file.size) > 10 * 1024 * 1024) {
@@ -286,16 +658,28 @@ function chooseAttachments() {
                   return;
                 }
                 const reader = new plus.io.FileReader();
-                reader.onloadend = () => resolve({
-                  dataUrl: String(reader.result || ""),
-                  fileName: String(file.name || entry.name || `图片-${pathIndex + 1}.jpg`),
-                  sizeBytes: Number(file.size) || 0,
-                });
-                reader.onerror = () => reject(new Error("读取附件失败"));
+                reader.onloadend = () => {
+                  const dataUrl = String(reader.result || "");
+                  if (!dataUrl.startsWith("data:") || !dataUrl.includes(";base64,")) {
+                    void resolveWithAndroid();
+                    return;
+                  }
+                  resolve({
+                    dataUrl,
+                    fileName: String(file.name || entry.name || `图片-${pathIndex + 1}.jpg`),
+                    sizeBytes: Number(file.size) || 0,
+                  });
+                };
+                // 旧逻辑在 FileReader 失败时直接报错，没有进入已经存在的 Android 原生读取回退。
+                // reader.onerror = () => reject(new Error("读取附件失败"));
+                reader.onerror = () => { void resolveWithAndroid(); };
                 reader.readAsDataURL(file);
-              }, () => reject(new Error("读取附件信息失败")));
-            }, () => reject(new Error("无法打开所选附件")));
+              }, resolveWithAndroid);
+            }, resolveWithAndroid);
           });
+            // await uploadAttachmentData(localId, localFile);
+            await uploadAttachmentData(localId, localFile, targetAttachments);
+          /* 原上传逻辑已由图片和普通文件共同调用的 uploadAttachmentData 接管。
           const dataMatch = /^data:([^;,]+);base64,/i.exec(localFile.dataUrl);
           const commaIndex = localFile.dataUrl.indexOf(",");
           if (!dataMatch || commaIndex < 0) throw new Error("附件数据格式无效");
@@ -326,9 +710,13 @@ function chooseAttachments() {
               uploading: false,
             });
           }
+          */
         } catch (error) {
-          const attachmentIndex = attachments.value.findIndex((item) => item.id === localId);
-          if (attachmentIndex >= 0) attachments.value.splice(attachmentIndex, 1);
+          console.error("[附件] 图片处理失败", error);
+            // const attachmentIndex = attachments.value.findIndex((item) => item.id === localId);
+            // if (attachmentIndex >= 0) attachments.value.splice(attachmentIndex, 1);
+            const attachmentIndex = targetAttachments.findIndex((item) => item.id === localId);
+            if (attachmentIndex >= 0) targetAttachments.splice(attachmentIndex, 1);
           showNotice(String(error));
         }
       }
@@ -336,6 +724,12 @@ function chooseAttachments() {
     fail: (error) => {
       const failureMessage = String(error.errMsg || "").trim();
       const normalizedFailure = failureMessage.toLowerCase();
+      const permissionFailure = normalizedFailure.includes("permission")
+        || normalizedFailure.includes("auth deny")
+        || normalizedFailure.includes("permission denied")
+        || failureMessage.includes("权限");
+      if (permissionFailure) showNotice("无法使用相机或相册，请检查应用权限");
+      /* 没有选择照片或主动返回均属于正常取消，不显示底层英文错误。
       const userCancelled = normalizedFailure.includes("cancel")
         || normalizedFailure.includes("canceled")
         || normalizedFailure.includes("cancelled")
@@ -350,24 +744,35 @@ function chooseAttachments() {
         || failureMessage.includes("没选")
         || failureMessage.includes("取消");
       if (!userCancelled) showNotice(`无法选择附件：${failureMessage || "请检查相册权限"}`);
+      */
     },
+        complete: () => { attachmentPickerActive = false; },
+      });
+    },
+    fail: () => undefined,
   });
 }
 
 async function sendMessage() {
   const text = draft.value.trim();
-  if (!selectedThreadId.value || sending.value || activeTurn.value || attachmentUploading.value) return;
+  const threadId = selectedThreadId.value;
+  // if (!selectedThreadId.value || sending.value || activeTurn.value || attachmentUploading.value) return;
+  if (!threadId || sending.value || activeTurn.value || attachmentUploading.value) return;
   const selectedAttachments = attachments.value.slice();
   if (!text && selectedAttachments.length === 0) return;
   const previousInputHeight = composerInputHeight.value;
   draft.value = "";
   composerInputHeight.value = 50;
   attachments.value = [];
+  composerStateByThread.delete(threadId);
   sending.value = true;
   try {
     await client.request("message.send", {
-      thread_id: selectedThreadId.value,
+      // thread_id: selectedThreadId.value,
+      thread_id: threadId,
       message: text,
+      model_id: selectedModelId.value || undefined,
+      reasoning_effort: selectedReasoningEffort.value || undefined,
       attachments: selectedAttachments.map((item) => ({
         fileName: item.fileName,
         filePath: item.filePath,
@@ -377,9 +782,20 @@ async function sendMessage() {
     });
     chatScrollTop.value += 100000;
   } catch (error) {
-    draft.value = text;
-    composerInputHeight.value = previousInputHeight;
-    attachments.value = selectedAttachments;
+    composerStateByThread.set(threadId, {
+      text,
+      attachments: selectedAttachments,
+      inputHeight: previousInputHeight,
+    });
+    // 旧逻辑在请求返回前已经切换会话时，会把失败内容覆盖到新会话。
+    // draft.value = text;
+    // composerInputHeight.value = previousInputHeight;
+    // attachments.value = selectedAttachments;
+    if (selectedThreadId.value === threadId) {
+      draft.value = text;
+      composerInputHeight.value = previousInputHeight;
+      attachments.value = selectedAttachments;
+    }
     showNotice(String(error));
   }
   finally { sending.value = false; }
@@ -391,6 +807,7 @@ function stopTurn() {
 
 function goBack() {
   if (screen.value === "chat") {
+    storeComposerState(selectedThreadId.value);
     if (selectedThreadId.value && connection.value.peerOnline) void client.request("thread.unsubscribe", { thread_id: selectedThreadId.value }).catch(() => undefined);
     selectedThreadId.value = null;
     screen.value = "threads";
@@ -438,7 +855,18 @@ onShow(() => {
 });
 
 onHide(() => {
+  if (attachmentPickerActive) return;
+  /* 旧逻辑在相册、相机或系统文件选择器打开时也断开 WSS，返回后上传会先报“桌面离线”。 */
+  // client.suspend();
   client.suspend();
+});
+
+onBackPress(() => {
+  if (screen.value === "settings" || screen.value === "chat" || screen.value === "threads") {
+    goBack();
+    return true;
+  }
+  return false;
 });
 
 onUnload(() => {
@@ -474,22 +902,263 @@ onUnload(() => {
     </view></scroll-view>
 
     <scroll-view v-else-if="screen === 'threads'" class="content-scroll" scroll-y><view class="content-page">
-      <view class="section-heading first"><view><text>项目会话</text><text>{{ selectedWorkspace?.name }}</text></view><view class="thread-heading-actions"><button class="mini-button create-thread-button" aria-label="新建会话" :disabled="creatingThread || loading || !connection.peerOnline" @tap="createNewThread"><!-- <text class="thread-add-icon">＋</text> --><!-- <view class="thread-add-glyph"><view/><view/></view> --><!-- <view class="toolbar-icon toolbar-icon-add"/> --><!-- <text class="refresh-icon thread-add-standard-icon">＋</text> --><uni-icons class="official-toolbar-icon" type="plusempty" :size="20" color="#8d97a7"/></button><button class="mini-button refresh-button thread-refresh-button" aria-label="刷新会话" :disabled="loading || !selectedWorkspaceId" @tap="selectedWorkspaceId && loadThreads(selectedWorkspaceId)"><!-- <text class="thread-refresh-icon">↻</text> --><!-- <view class="thread-refresh-glyph"><view class="thread-refresh-ring"/><view class="thread-refresh-arrow"/></view> --><!-- <text class="refresh-icon thread-refresh-standard-icon">↻</text> --><!-- <view class="toolbar-icon toolbar-icon-refresh"/> --><uni-icons class="official-toolbar-icon" type="refreshempty" :size="20" color="#8d97a7"/></button></view></view>
+      <!-- 两个按钮使用各自的 hover-class，避免按压状态串到另一个按钮。 -->
+      <!-- 旧逻辑把 loading 同时绑定到加号和刷新，导致两个按钮一起进入禁用态。 -->
+      <view class="section-heading first"><view><text>项目会话</text><text>{{ selectedWorkspace?.name }}</text></view><view class="thread-heading-actions"><button class="mini-button create-thread-button" hover-class="create-thread-button-pressed" aria-label="新建会话" :disabled="creatingThread || !connection.peerOnline" @tap="createNewThread"><!-- <text class="thread-add-icon">＋</text> --><!-- <view class="thread-add-glyph"><view/><view/></view> --><!-- <view class="toolbar-icon toolbar-icon-add"/> --><!-- <text class="refresh-icon thread-add-standard-icon">＋</text> --><uni-icons class="official-toolbar-icon" type="plusempty" :size="20" color="#8d97a7"/></button><button class="mini-button refresh-button thread-refresh-button" hover-class="thread-refresh-button-pressed" aria-label="刷新会话" :disabled="loading || !selectedWorkspaceId" @tap="selectedWorkspaceId && loadThreads(selectedWorkspaceId)"><!-- <text class="thread-refresh-icon">↻</text> --><!-- <view class="thread-refresh-glyph"><view class="thread-refresh-ring"/><view class="thread-refresh-arrow"/></view> --><!-- <text class="refresh-icon thread-refresh-standard-icon">↻</text> --><!-- <view class="toolbar-icon toolbar-icon-refresh"/> --><uni-icons class="official-toolbar-icon" type="refreshempty" :size="20" color="#8d97a7"/></button></view></view>
       <view v-if="loading && !threads.length" class="empty-state"><view class="loader"/><text>正在加载会话…</text></view>
       <view v-else-if="!threads.length" class="empty-state"><text>0</text><text>此项目还没有会话</text></view>
       <view v-else class="card-list"><view v-for="thread in threads" :key="thread.id" class="nav-card" @tap="selectThread(thread)"><view class="card-icon">话</view><view class="card-copy"><text>{{ thread.title || '新会话' }}</text><text>{{ thread.engineId }} · {{ thread.modelId }}</text><text>{{ thread.messageCount }} 条消息 · {{ formatTime(thread.lastActivityAt) }}</text></view><text class="thread-status" :class="thread.status">{{ thread.status === 'streaming' ? '运行中' : thread.status === 'error' ? '出错' : '空闲' }}</text></view></view>
     </view></scroll-view>
 
-    <view v-else-if="screen === 'chat'" class="chat-page"><scroll-view class="chat-scroll" scroll-y scroll-with-animation :scroll-top="chatScrollTop"><view class="chat-content">
+    <!-- 旧逻辑永久启用 scroll-with-animation，并且没有保存各会话的实际滚动位置。 -->
+    <!-- <view v-else-if="screen === 'chat'" class="chat-page"><scroll-view class="chat-scroll" scroll-y scroll-with-animation :scroll-top="chatScrollTop"><view class="chat-content"> -->
+    <view v-else-if="screen === 'chat'" class="chat-page"><scroll-view class="chat-scroll" scroll-y :scroll-with-animation="chatScrollWithAnimation" :scroll-top="chatScrollTop" @scroll="selectedThreadId && chatScrollTopByThread.set(selectedThreadId, Number($event.detail.scrollTop) || 0)"><view class="chat-content">
       <button v-if="nextCursor" class="load-older" :disabled="loadingOlder" @tap="loadOlderMessages">{{ loadingOlder ? '正在加载…' : '加载更早消息' }}</button>
       <view v-for="message in renderedMessages" :key="message.id" class="message" :class="message.role"><text class="message-role">{{ message.role === 'user' ? '你' : 'Panes' }}</text><text class="markdown" selectable>{{ message.text }}</text><text v-if="message.status === 'streaming'" class="streaming">正在生成</text></view>
     </view></scroll-view><view class="composer">
-      <view class="composer-meta"><text class="composer-chip">{{ runtimeLabel }}</text><text class="composer-chip">{{ accessLabel }}</text></view>
-      <scroll-view v-if="attachments.length" class="composer-attachments" scroll-x><view class="composer-attachment-track"><view v-for="(attachment, index) in attachments" :key="attachment.id" class="composer-attachment"><view class="attachment-thumb">图</view><view class="attachment-copy"><text>{{ attachment.fileName }}</text><text>{{ attachment.uploading ? '正在上传…' : `${Math.max(1, Math.ceil(attachment.sizeBytes / 1024))} KB` }}</text></view><button class="attachment-remove" aria-label="移除附件" :disabled="attachment.uploading" @tap.stop="attachments.splice(index, 1)">×</button></view></view></scroll-view>
-      <view class="composer-row"><button class="attachment-button" aria-label="选择附件" :disabled="!connection.peerOnline || attachmentUploading || attachments.length >= 6" @tap="chooseAttachments">＋</button><view class="composer-field"><textarea v-model="draft" class="composer-input" auto-height :style="{ height: `${composerInputHeight}px` }" :disabled="!connection.peerOnline || activeTurn" :maxlength="-1" confirm-type="send" :placeholder="connection.peerOnline ? activeTurn ? '当前回复尚未完成' : selectedWorkspace ? `在 ${selectedWorkspace.name} 上工作` : '给 Panes 发消息…' : '桌面离线，不能发送消息'" @linechange="resizeComposerInput" @confirm="sendMessage"/><button class="composer-action" :class="{ ready: hasComposerContent, stop: activeTurn }" :disabled="sending || !connection.peerOnline || attachmentUploading" @tap="activeTurn ? stopTurn() : sendMessage()"><text v-if="activeTurn" class="stop-icon">■</text><text v-else-if="hasComposerContent" class="send-arrow">↑</text><view v-else class="waveform-icon"><text/><text/><text/><text/></view></button></view></view>
+      <!-- <view class="composer-meta"><text class="composer-chip">{{ runtimeLabel }}</text><text class="composer-chip">{{ accessLabel }}</text></view> -->
+      <view class="composer-meta"><button class="composer-chip composer-chip-button" hover-class="none" @tap="permissionPickerOpen = false; runtimePickerOpen = !runtimePickerOpen">{{ runtimeLabel }}</button><button class="composer-chip composer-chip-button" hover-class="none" @tap="runtimePickerOpen = false; permissionPickerOpen = !permissionPickerOpen">{{ accessLabel }}</button></view>
+      <scroll-view v-if="attachments.length" class="composer-attachments" scroll-x><view class="composer-attachment-track"><view v-for="(attachment, index) in attachments" :key="attachment.id" class="composer-attachment"><view class="attachment-thumb">{{ attachment.mimeType?.startsWith('image/') ? '图' : '文' }}</view><view class="attachment-copy"><text>{{ attachment.fileName }}</text><text>{{ attachment.uploading ? '正在上传…' : `${Math.max(1, Math.ceil(attachment.sizeBytes / 1024))} KB` }}</text></view><button class="attachment-remove" aria-label="移除附件" :disabled="attachment.uploading" @tap.stop="attachments.splice(index, 1)">×</button></view></view></scroll-view>
+      <!-- 旧输入框把 @linechange 计算结果再次写回 height，会和 textarea 的 auto-height 叠加，造成默认高度突出。 -->
+      <!-- <view class="composer-row"><button class="attachment-button">＋</button><view class="composer-field"><textarea v-model="draft" class="composer-input" auto-height :style="composerInputHeight ? { height: `${composerInputHeight}px` } : undefined" @linechange="resizeComposerInput"/></view></view> -->
+      <view class="composer-row"><button class="attachment-button" aria-label="选择附件" :disabled="!connection.peerOnline || attachmentUploading || attachments.length >= 6" @tap="chooseAttachments">＋</button><view class="composer-field"><textarea v-model="draft" class="composer-input" auto-height :disabled="!connection.peerOnline || activeTurn" :maxlength="-1" confirm-type="send" :placeholder="connection.peerOnline ? activeTurn ? '当前回复尚未完成' : selectedWorkspace ? `在 ${selectedWorkspace.name} 上工作` : '给 Panes 发消息…' : '桌面离线，不能发送消息'" @linechange="resizeComposerInput" @confirm="sendMessage"/><button class="composer-action" :class="{ ready: hasComposerContent, stop: activeTurn }" :disabled="sending || !connection.peerOnline || attachmentUploading" @tap="activeTurn ? stopTurn() : sendMessage()"><text v-if="activeTurn" class="stop-icon">■</text><!-- <text v-else-if="hasComposerContent" class="send-arrow">↑</text> --><uni-icons v-else-if="hasComposerContent" class="composer-send-icon" type="arrowthinup" :size="25" color="#ffffff"/><view v-else class="waveform-icon"><text/><text/><text/><text/></view></button></view></view>
+    </view>
+
+    <view v-if="runtimePickerOpen" class="mobile-picker-backdrop" @tap="runtimePickerOpen = false"><view class="mobile-picker" @tap.stop>
+      <view class="mobile-picker-header"><text>模型与思考强度</text><button hover-class="none" @tap="runtimePickerOpen = false">完成</button></view>
+      <text class="mobile-picker-section-title">模型</text>
+      <scroll-view class="mobile-picker-list" scroll-y><button v-for="model in availableModels" :key="model.id" class="mobile-picker-option" :class="{ selected: selectedModelId === model.id }" hover-class="none" @tap="chooseModel(model)"><view><text>{{ model.displayName || model.id }}</text><text>{{ model.description }}</text></view><text>{{ selectedModelId === model.id ? '✓' : '' }}</text></button></scroll-view>
+      <text class="mobile-picker-section-title">思考强度</text>
+      <view class="effort-options"><button v-for="effort in availableEfforts" :key="effort.reasoningEffort" class="effort-option" :class="{ selected: selectedReasoningEffort === effort.reasoningEffort }" hover-class="none" @tap="chooseReasoningEffort(effort.reasoningEffort)">{{ formatReasoningEffort(effort.reasoningEffort) }}</button></view>
     </view></view>
+
+    <view v-if="permissionPickerOpen" class="mobile-picker-backdrop" @tap="permissionPickerOpen = false"><view class="mobile-picker permission-picker" @tap.stop>
+      <view class="mobile-picker-header"><text>访问权限</text><button hover-class="none" @tap="permissionPickerOpen = false">完成</button></view>
+      <button v-for="option in autonomyOptions" :key="option.id" class="mobile-picker-option" :class="{ selected: selectedAutonomyPreset === option.id }" hover-class="none" :disabled="permissionSaving" @tap="chooseAutonomyPreset(option.id)"><view><text>{{ option.label }}</text><text>{{ option.description }}</text></view><text>{{ selectedAutonomyPreset === option.id ? '✓' : '' }}</text></button>
+    </view></view>
+    </view>
 
     <scroll-view v-else class="content-scroll" scroll-y><view class="content-page"><view class="settings-hero"><view class="pair-logo small">P</view><view><text>这台桌面 Panes</text><text>{{ pairing?.tunnel_id }}</text></view></view><view class="settings-group"><view><text>公网入口</text><text>{{ pairing?.endpoint }}</text></view><view><text>Relay 连接</text><text>{{ connection.relayConnected ? '已连接' : '重连中' }}</text></view><view><text>桌面状态</text><text>{{ connection.peerOnline ? '在线' : '离线' }}</text></view></view><button class="danger-button" @tap="removePairing">解除绑定并清除凭据</button></view></scroll-view>
     <view v-if="notice" class="toast"><text>{{ notice }}</text></view>
   </view>
 </template>
+
+<style scoped>
+.create-thread-button-pressed {
+  background: rgba(74, 213, 157, 0.16) !important;
+}
+
+.thread-refresh-button-pressed {
+  background: rgba(141, 151, 167, 0.16) !important;
+}
+
+.composer-chip-button {
+  margin: 0;
+  line-height: 1.2;
+}
+
+/*
+旧的局部尺寸只改了零散属性，无法覆盖 App.vue 中更具体的选择器，导致输入框实际高度叠加。
+.composer-row { grid-template-columns: 54px minmax(0, 1fr); }
+.attachment-button { width: 54px; height: 54px; line-height: 54px; }
+.composer-field, .composer-input { min-height: 54px; }
+.composer-input { max-height: 166px; padding: 15px 60px 13px 20px; }
+.composer-action { right: 5px; bottom: 5px; width: 44px; height: 44px; }
+*/
+
+/* 输入组件只在聊天页上下文内成套定义：默认等高，多行时输入框向上增长。 */
+.chat-page .composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.chat-page .attachment-button {
+  display: flex;
+  width: 50px;
+  height: 50px;
+  min-height: 50px;
+  padding: 0 0 3px;
+  flex: 0 0 50px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  line-height: 1;
+}
+
+.chat-page .composer-row {
+  position: relative;
+}
+
+.chat-page .composer-field {
+  /* position: relative; */
+  position: static;
+  min-width: 0;
+  min-height: 50px;
+  flex: 1;
+  /* overflow: hidden; */
+  /* overflow: visible; */
+  overflow: hidden;
+  border-radius: 25px;
+}
+
+.chat-page .composer-field .composer-input {
+  display: block;
+  width: 100%;
+  height: auto;
+  /* App 原生 textarea 的 auto-height 按内容区计算，旧值 50px 再叠加 28px 内边距，实际约 78px。 */
+  /* min-height: 50px; */
+  min-height: 22px;
+  max-height: 154px;
+  box-sizing: border-box;
+  padding: 14px 54px 14px 17px;
+  border-radius: 25px;
+  line-height: 22px;
+}
+
+.chat-page .composer-action {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 40px;
+  height: 40px;
+}
+
+.composer-send-icon {
+  display: flex;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.mobile-picker-backdrop {
+  position: fixed;
+  z-index: 2000;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(0, 0, 0, 0.56);
+}
+
+.mobile-picker {
+  width: 100%;
+  max-height: 72vh;
+  box-sizing: border-box;
+  padding: 18px 18px calc(18px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+  border: 1px solid #2b313d;
+  border-radius: 24px 24px 0 0;
+  background: #151922;
+}
+
+.mobile-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.mobile-picker-header > text {
+  color: #f1f4fa;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.mobile-picker-header button {
+  margin: 0;
+  padding: 6px 10px;
+  color: #4ad59d;
+  background: transparent;
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.mobile-picker-section-title {
+  display: block;
+  margin: 14px 0 8px;
+  color: #8d97a7;
+  font-size: 12px;
+}
+
+.mobile-picker-list {
+  max-height: 270px;
+}
+
+.mobile-picker-option {
+  display: flex;
+  width: 100%;
+  min-height: 58px;
+  box-sizing: border-box;
+  margin: 0 0 8px;
+  padding: 10px 14px;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid #2b313d;
+  border-radius: 14px;
+  color: #eef2f8;
+  background: #1a1f29;
+  text-align: left;
+  line-height: 1.25;
+}
+
+.mobile-picker-option.selected {
+  border-color: rgba(74, 213, 157, 0.55);
+  background: rgba(74, 213, 157, 0.1);
+}
+
+.mobile-picker-option > view {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mobile-picker-option > view > text:first-child {
+  color: #f3f6fa;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.mobile-picker-option > view > text:last-child {
+  color: #8d97a7;
+  font-size: 12px;
+}
+
+.mobile-picker-option > text {
+  margin-left: 12px;
+  color: #4ad59d;
+  font-size: 18px;
+}
+
+.effort-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.effort-option {
+  min-width: 58px;
+  margin: 0;
+  padding: 9px 14px;
+  border: 1px solid #2b313d;
+  border-radius: 999px;
+  color: #aeb7c5;
+  background: #1a1f29;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.effort-option.selected {
+  border-color: rgba(74, 213, 157, 0.55);
+  color: #4ad59d;
+  background: rgba(74, 213, 157, 0.1);
+}
+
+.permission-picker {
+  display: flex;
+  flex-direction: column;
+}
+</style>

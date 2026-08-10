@@ -68,6 +68,26 @@ export interface DesktopStatus {
   online: boolean;
 }
 
+export interface ReasoningEffortOption {
+  reasoningEffort: string;
+  description: string;
+}
+
+export interface EngineModel {
+  id: string;
+  displayName: string;
+  description: string;
+  defaultReasoningEffort: string | null;
+  supportedReasoningEfforts: ReasoningEffortOption[];
+  isDefault: boolean;
+}
+
+export interface EngineInfo {
+  id: string;
+  name: string;
+  models: EngineModel[];
+}
+
 export interface RemoteEvent {
   version: number;
   kind: "event";
