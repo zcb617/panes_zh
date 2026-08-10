@@ -47,7 +47,14 @@ remotion/
 build-flatpak/
 
 # Local uni-app Android build output
-/uniapp_build/
+mobile/src/uni_modules
+mobile/unpackage/resources
+uniapp_build/simpleDemo/src/main/assets/apps
+uniapp_build/simpleDemo/build
+uniapp_build/.gradle
+uniapp_build/build
+uniapp_build/simpleDemo/src/main/AndroidManifest.xml
+uniapp_build/simpleDemo/build.gradle
 
 .tmp
 .pnpm-store
