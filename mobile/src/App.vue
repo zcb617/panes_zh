@@ -1,13 +1,20 @@
 <script setup lang="ts">
 import { onLaunch, onShow, onHide } from "@dcloudio/uni-app";
+import { panesConnectionManager } from "./stores/panes-connection";
+import { panesDeviceStore } from "./stores/panes-device";
+
 onLaunch(() => {
-  console.info("Panes Mobile launched");
+  // console.info("Panes Mobile launched");
+  panesDeviceStore.initialize();
+  panesConnectionManager.initialize();
 });
 onShow(() => {
-  console.log("App Show");
+  // console.log("App Show");
+  panesConnectionManager.resumeAll();
 });
 onHide(() => {
-  console.log("App Hide");
+  // console.log("App Hide");
+  panesConnectionManager.keepAliveOnHide();
 });
 </script>
 <style>

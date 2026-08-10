@@ -11,7 +11,7 @@ use futures::{SinkExt, StreamExt};
 use qrcode::{render::svg, QrCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Listener};
 use tokio::{
     fs as tokio_fs,
     sync::{Mutex, RwLock},
@@ -29,13 +29,15 @@ use crate::{
         threads::create_thread_with_defaults,
     },
     config::app_config::{AppConfig, RemoteAccessConfig, RemoteDeviceConfig},
-    models::MessageWindowCursorDto,
+    // 历史分页使用的 MessageWindowCursorDto 已停用，保留原引用记录。
+    // models::MessageWindowCursorDto,
     state::AppState,
 };
 
 const REMOTE_PROTOCOL_VERSION: u32 = 1;
-const MESSAGE_WINDOW_DEFAULT_LIMIT: usize = 50;
-const MESSAGE_WINDOW_MAX_LIMIT: usize = 100;
+// 历史分页窗口限制已停用：手机进入会话时一次读取完整消息。
+// const MESSAGE_WINDOW_DEFAULT_LIMIT: usize = 50;
+// const MESSAGE_WINDOW_MAX_LIMIT: usize = 100;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,7 +92,8 @@ impl Default for RemoteRuntimeState {
 #[derive(Default)]
 pub struct RemoteTunnelManager {
     runtime: RwLock<RemoteRuntimeState>,
-    subscriptions: RwLock<HashSet<String>>,
+    /// 当前隧道内已经完成 `device.identify` 的在线设备集合。
+    online_devices: RwLock<HashSet<String>>,
     uploads: Mutex<HashMap<String, RemoteUploadState>>,
     cancellation: Mutex<Option<CancellationToken>>,
 }
@@ -122,6 +125,34 @@ fn device_name_from_payload(payload: &Value) -> String {
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(80).collect())
         .unwrap_or_else(|| "Panes Mobile".to_string())
+}
+
+/// 将聊天完成通知包装成移动端约定的远程事件。
+///
+/// 事件只携带刚刚完成持久化的单条助手消息，避免按线程扫描或发送流式差异。
+fn build_completed_message_event(target_device_id: &str, payload: &Value) -> Option<Value> {
+    let thread_id = payload
+        .get("threadId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let message_id = payload
+        .get("messageId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let message = payload.get("message")?.clone();
+    Some(json!({
+        "version": REMOTE_PROTOCOL_VERSION,
+        "kind": "event",
+        "event": "thread.message.completed",
+        "targetDeviceId": target_device_id,
+        "payload": {
+            "threadId": thread_id,
+            "messageId": message_id,
+            "message": message,
+        },
+    }))
 }
 
 impl RemoteTunnelManager {
@@ -221,7 +252,7 @@ impl RemoteTunnelManager {
         if let Some(cancellation) = self.cancellation.lock().await.take() {
             cancellation.cancel();
         }
-        self.subscriptions.write().await.clear();
+        self.online_devices.write().await.clear();
         self.uploads.lock().await.clear();
 
         let generation = {
@@ -299,9 +330,28 @@ impl RemoteTunnelManager {
                     continue;
                 }
 
+                /*
+                // 旧版按 thread-updated 做全线程差异扫描的实现已废弃。
                 let mut snapshots: HashMap<String, String> = HashMap::new();
                 let mut snapshot_interval = tokio::time::interval(Duration::from_millis(650));
                 snapshot_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let (thread_updated_tx, mut thread_updated_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                let thread_updated_listener = app.listen("thread-updated", move |event| {
+                    let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else { return; };
+                    let Some(thread_id) = payload.get("threadId").and_then(Value::as_str) else { return; };
+                    let _ = thread_updated_tx.send(thread_id.to_string());
+                });
+                let mut message_versions: HashMap<String, HashMap<String, String>> = HashMap::new();
+                */
+                // 只监听助手消息完成事件；流式块和线程状态更新不会进入远程推送通道。
+                let (completed_message_tx, mut completed_message_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<Value>();
+                let completed_message_listener = app.listen("assistant-message-completed", move |event| {
+                    let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else {
+                        return;
+                    };
+                    let _ = completed_message_tx.send(payload);
+                });
                 let mut disconnected_error: Option<String> = None;
 
                 loop {
@@ -366,8 +416,8 @@ impl RemoteTunnelManager {
                                                 if runtime.generation != generation { break; }
                                                 runtime.peer_online = false;
                                             }
-                                            manager.subscriptions.write().await.clear();
-                                            snapshots.clear();
+                                            // 隧道确认全部移动对端离线后，清理在线设备；切换会话或离开页面不会触发此处。
+                                            manager.online_devices.write().await.clear();
                                             let _ = app.emit("remote-access-updated", manager.status().await);
                                             continue;
                                         }
@@ -431,6 +481,18 @@ impl RemoteTunnelManager {
                                         continue;
                                     }
 
+                                    /*
+                                    // 旧版按请求即时推导 deviceId，仅供 thread.subscribe 使用；
+                                    // 现在设备在线集合只在 device.identify 成功后注册。
+                                    let device_id = {
+                                        let runtime = manager.runtime.read().await;
+                                        runtime.config.devices.iter()
+                                            .find(|device| device.credential == request.auth)
+                                            .map(|device| device.id.clone())
+                                            .unwrap_or_else(|| "legacy".to_string())
+                                    };
+                                    */
+
                                     let result: Result<Value, String> = match request.method.as_str() {
                                         "device.pair" => {
                                             let device_credential = format!(
@@ -464,6 +526,8 @@ impl RemoteTunnelManager {
                                                     runtime.pairing_token = None;
                                                     runtime.pairing_expires_at = None;
                                                     drop(runtime);
+                                                    // 配对成功即视为该设备在线，避免首次配对后等待额外 identify 才能收到完成事件。
+                                                    manager.online_devices.write().await.insert(device.id.clone());
                                                     let _ = app.emit("remote-access-updated", manager.status().await);
                                                     Ok(json!({
                                                         "device_credential": device_credential,
@@ -526,6 +590,8 @@ impl RemoteTunnelManager {
                                                         runtime.config.devices.push(device.clone());
                                                     }
                                                     drop(runtime);
+                                                    // `device.identify` 是设备在线注册点，重连时会覆盖同一 deviceId。
+                                                    manager.online_devices.write().await.insert(device.id.clone());
                                                     let _ = app.emit("remote-access-updated", manager.status().await);
                                                     Ok(json!({ "device_id": device.id }))
                                                 }
@@ -704,27 +770,41 @@ impl RemoteTunnelManager {
                                                 .ok_or_else(|| "thread_id is required".to_string());
                                             match thread_id {
                                                 Ok(thread_id) => {
+                                                    // 历史分页实现已停用：手机首次打开会话时直接取得全部消息。
+                                                    /*
                                                     let cursor = request.payload.get("cursor")
                                                         .filter(|value| !value.is_null())
                                                         .cloned()
                                                         .map(serde_json::from_value::<MessageWindowCursorDto>)
                                                         .transpose()
                                                         .map_err(|error| error.to_string());
-                                                    match cursor {
-                                                        Ok(cursor) => {
-                                                            let limit = request.payload.get("limit")
-                                                                .and_then(Value::as_u64)
-                                                                .map(|value| value as usize)
-                                                                .unwrap_or(MESSAGE_WINDOW_DEFAULT_LIMIT)
-                                                                .clamp(1, MESSAGE_WINDOW_MAX_LIMIT);
-                                                            let db = state.db.clone();
-                                                            tokio::task::spawn_blocking(move || {
-                                                                crate::db::messages::get_thread_messages_window(&db, &thread_id, cursor.as_ref(), limit)
-                                                            })
-                                                            .await
-                                                            .map_err(|error| error.to_string())
-                                                            .and_then(|result| result.map_err(|error| error.to_string()))
-                                                            .and_then(|window| serde_json::to_value(window).map_err(|error| error.to_string()))
+                                                    */
+                                                    let db = state.db.clone();
+                                                    let query_thread_id = thread_id.clone();
+                                                    let messages = tokio::task::spawn_blocking(move || {
+                                                        crate::db::messages::get_thread_messages(&db, &query_thread_id)
+                                                    })
+                                                    .await
+                                                    .map_err(|error| error.to_string())
+                                                    .and_then(|result| result.map_err(|error| error.to_string()));
+                                                    match messages {
+                                                        Ok(messages) => {
+                                                            // 历史查询不参与实时消息投递，直接返回消息列表。
+                                                            /*
+                                                            let versions = messages.iter()
+                                                                .map(|message| serde_json::to_string(message)
+                                                                    .map(|value| (message.id.clone(), value)))
+                                                                .collect::<Result<HashMap<String, String>, _>>()
+                                                                .map_err(|error| error.to_string());
+                                                            match versions {
+                                                                Ok(versions) => {
+                                                                    message_versions.insert(thread_id, versions);
+                                                                    Ok(json!({ "messages": messages }))
+                                                                }
+                                                                Err(error) => Err(error),
+                                                            }
+                                                            */
+                                                            Ok(json!({ "messages": messages }))
                                                         }
                                                         Err(error) => Err(error),
                                                     }
@@ -937,6 +1017,8 @@ impl RemoteTunnelManager {
                                             }
                                         }
                                         "thread.subscribe" => {
+                                            // 兼容旧客户端，但不再按 threadId 控制完成消息投递。
+                                            /*
                                             let thread_id = request.payload.get("thread_id")
                                                 .and_then(Value::as_str)
                                                 .map(str::trim)
@@ -945,13 +1027,46 @@ impl RemoteTunnelManager {
                                                 .ok_or_else(|| "thread_id is required".to_string());
                                             match thread_id {
                                                 Ok(thread_id) => {
-                                                    manager.subscriptions.write().await.insert(thread_id);
-                                                    Ok(json!({}))
+                                                    // 先记录当前完整会话的版本。这样订阅与首次取数之间若有新消息，
+                                                    // 后续只会推送那一条新消息，不会把整段历史再次当作实时消息发送。
+                                                    let db = state.db.clone();
+                                                    let query_thread_id = thread_id.clone();
+                                                    let messages = tokio::task::spawn_blocking(move || {
+                                                        crate::db::messages::get_thread_messages(&db, &query_thread_id)
+                                                    })
+                                                    .await
+                                                    .map_err(|error| error.to_string())
+                                                    .and_then(|result| result.map_err(|error| error.to_string()));
+                                                    match messages {
+                                                        Ok(messages) => {
+                                                            let versions = messages.into_iter()
+                                                                .map(|message| serde_json::to_string(&message)
+                                                                    .map(|value| (message.id, value)))
+                                                                .collect::<Result<HashMap<String, String>, _>>()
+                                                                .map_err(|error| error.to_string());
+                                                            match versions {
+                                                                Ok(versions) => {
+                                                                    manager.subscriptions.write().await
+                                                                        .entry(thread_id.clone())
+                                                                        .or_default()
+                                                                        .insert(device_id.clone());
+                                                                    message_versions.insert(thread_id, versions);
+                                                                    Ok(json!({}))
+                                                                }
+                                                                Err(error) => Err(error),
+                                                            }
+                                                        }
+                                                        Err(error) => Err(error),
+                                                    }
                                                 }
                                                 Err(error) => Err(error),
                                             }
+                                            */
+                                            Ok(json!({ "deprecated": true }))
                                         }
                                         "thread.unsubscribe" => {
+                                            // 离开会话不能取消设备注册；设备在线状态只由 identify/隧道离线维护。
+                                            /*
                                             let thread_id = request.payload.get("thread_id")
                                                 .and_then(Value::as_str)
                                                 .map(str::trim)
@@ -960,12 +1075,20 @@ impl RemoteTunnelManager {
                                                 .ok_or_else(|| "thread_id is required".to_string());
                                             match thread_id {
                                                 Ok(thread_id) => {
-                                                    manager.subscriptions.write().await.remove(&thread_id);
-                                                    snapshots.remove(&thread_id);
+                                                    let mut subscriptions = manager.subscriptions.write().await;
+                                                    if let Some(device_ids) = subscriptions.get_mut(&thread_id) {
+                                                        device_ids.remove(&device_id);
+                                                        if device_ids.is_empty() {
+                                                            subscriptions.remove(&thread_id);
+                                                            message_versions.remove(&thread_id);
+                                                        }
+                                                    }
                                                     Ok(json!({}))
                                                 }
                                                 Err(error) => Err(error),
                                             }
+                                            */
+                                            Ok(json!({ "deprecated": true }))
                                         }
                                         _ => Err(format!("unknown remote method: {}", request.method)),
                                     };
@@ -994,6 +1117,74 @@ impl RemoteTunnelManager {
                                 _ => {}
                             }
                         }
+                        /*
+                        Some(changed_thread_id) = thread_updated_rx.recv() => {
+                            let device_ids = manager.subscriptions.read().await
+                                .get(&changed_thread_id)
+                                .cloned()
+                                .unwrap_or_default();
+                            if device_ids.is_empty() {
+                                continue;
+                            }
+                            let db = state.db.clone();
+                            let query_thread_id = changed_thread_id.clone();
+                            let messages = tokio::task::spawn_blocking(move || {
+                                crate::db::messages::get_thread_messages(&db, &query_thread_id)
+                            })
+                            .await
+                            .ok()
+                            .and_then(Result::ok);
+                            let Some(messages) = messages else { continue; };
+                            let changed_messages = {
+                                let versions = message_versions.entry(changed_thread_id.clone()).or_default();
+                                messages.into_iter().filter_map(|message| {
+                                    let serialized = serde_json::to_string(&message).ok()?;
+                                    if versions.get(&message.id) == Some(&serialized) {
+                                        return None;
+                                    }
+                                    versions.insert(message.id.clone(), serialized);
+                                    serde_json::to_value(message).ok()
+                                }).collect::<Vec<_>>()
+                            };
+                            for message in changed_messages {
+                                for device_id in &device_ids {
+                                    let event = json!({
+                                        "version": REMOTE_PROTOCOL_VERSION,
+                                        "kind": "event",
+                                        "event": "thread.message",
+                                        "targetDeviceId": device_id,
+                                        "payload": { "message": message },
+                                    });
+                                    if let Err(error) = sink.send(Message::Text(event.to_string().into())).await {
+                                        disconnected_error = Some(error.to_string());
+                                        break;
+                                    }
+                                }
+                                if disconnected_error.is_some() { break; }
+                            }
+                            if disconnected_error.is_some() { break; }
+                        }
+                        */
+                        Some(completed_payload) = completed_message_rx.recv() => {
+                            let device_ids = manager.online_devices.read().await.clone();
+                            if device_ids.is_empty() {
+                                continue;
+                            }
+                            for device_id in device_ids {
+                                let Some(event) = build_completed_message_event(
+                                    &device_id,
+                                    &completed_payload,
+                                ) else {
+                                    continue;
+                                };
+                                if let Err(error) = sink.send(Message::Text(event.to_string().into())).await {
+                                    disconnected_error = Some(error.to_string());
+                                    break;
+                                }
+                            }
+                            if disconnected_error.is_some() { break; }
+                        }
+                        /*
                         _ = snapshot_interval.tick() => {
                             let thread_ids: Vec<String> = manager.subscriptions.read().await.iter().cloned().collect();
                             for thread_id in thread_ids {
@@ -1031,8 +1222,11 @@ impl RemoteTunnelManager {
                             }
                             if disconnected_error.is_some() { break; }
                         }
+                        */
                     }
                 }
+
+                app.unlisten(completed_message_listener);
 
                 {
                     let mut runtime = manager.runtime.write().await;
@@ -1043,7 +1237,7 @@ impl RemoteTunnelManager {
                     runtime.peer_online = false;
                     runtime.last_error = disconnected_error;
                 }
-                manager.subscriptions.write().await.clear();
+                manager.online_devices.write().await.clear();
                 let _ = app.emit("remote-access-updated", manager.status().await);
 
                 if cancellation.is_cancelled() {
@@ -1066,7 +1260,9 @@ impl RemoteTunnelManager {
 
 #[cfg(test)]
 mod tests {
+    use super::build_completed_message_event;
     use crate::config::app_config::RemoteAccessConfig;
+    use serde_json::json;
 
     #[test]
     fn remote_identity_is_generated_and_rotates() {
@@ -1080,5 +1276,37 @@ mod tests {
         config.regenerate_identity();
         assert_ne!(config.tunnel_id, first_id);
         assert!(config.device_credential.is_empty());
+    }
+
+    #[test]
+    fn completed_message_event_targets_device_and_preserves_exact_message() {
+        let payload = json!({
+            "threadId": "thread-1",
+            "messageId": "message-1",
+            "message": {
+                "id": "message-1",
+                "threadId": "thread-1",
+                "role": "assistant",
+                "status": "completed",
+                "content": "done",
+            },
+        });
+
+        let event = build_completed_message_event("mobile-1", &payload)
+            .expect("valid completed message payload");
+        assert_eq!(event["event"], "thread.message.completed");
+        assert_eq!(event["targetDeviceId"], "mobile-1");
+        assert_eq!(event["payload"]["threadId"], "thread-1");
+        assert_eq!(event["payload"]["messageId"], "message-1");
+        assert_eq!(event["payload"]["message"]["id"], "message-1");
+    }
+
+    #[test]
+    fn completed_message_event_rejects_missing_exact_ids() {
+        let payload = json!({
+            "threadId": "thread-1",
+            "message": { "id": "message-1" },
+        });
+        assert!(build_completed_message_event("mobile-1", &payload).is_none());
     }
 }

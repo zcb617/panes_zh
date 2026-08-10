@@ -561,6 +561,31 @@ pub fn complete_assistant_message(
     Ok(())
 }
 
+/// 按精确消息 ID读取单条消息，供远程完成事件使用。
+///
+/// 与 `get_thread_messages` 相同地补齐已处理审批块，但不会扫描整个会话。
+pub fn get_message(db: &Database, message_id: &str) -> anyhow::Result<Option<MessageDto>> {
+    let conn = db.connect()?;
+    let mut message = conn
+        .query_row(
+            "SELECT id, thread_id, role, content, blocks_json, schema_version, status,
+                token_input, token_output, turn_engine_id, turn_model_id, turn_reasoning_effort, created_at
+         FROM messages
+         WHERE id = ?1",
+            params![message_id],
+            map_message_row,
+        )
+        .optional()
+        .context("failed to load message")?;
+
+    if let Some(message) = message.as_mut() {
+        if let Some(blocks) = message.blocks.as_mut() {
+            reconcile_answered_approvals_for_message(&conn, &message.id, blocks)?;
+        }
+    }
+    Ok(message)
+}
+
 pub fn update_assistant_turn_model_id(
     db: &Database,
     message_id: &str,
@@ -2056,6 +2081,44 @@ mod tests {
         let reloaded = get_thread_messages(&db, &thread_id).unwrap();
         assert_eq!(reloaded.len(), 1);
         assert_eq!(reloaded[0].turn_model_id.as_deref(), Some("gpt-5.3-codex"));
+    }
+
+    #[test]
+    fn get_message_loads_exact_message_without_thread_history() {
+        let db = test_db();
+        let first_thread_id = test_thread(&db);
+        let second_thread_id = test_thread(&db);
+        let first = insert_message(
+            &db,
+            &first_thread_id,
+            "assistant",
+            Some("first".to_string()),
+            Some(json!([])),
+            MessageStatusDto::Completed,
+            Some("codex"),
+            Some("gpt-5.3-codex"),
+            None,
+        )
+        .unwrap();
+        let second = insert_message(
+            &db,
+            &second_thread_id,
+            "assistant",
+            Some("second".to_string()),
+            Some(json!([])),
+            MessageStatusDto::Completed,
+            Some("codex"),
+            Some("gpt-5.3-codex"),
+            None,
+        )
+        .unwrap();
+
+        let loaded = get_message(&db, &second.id).unwrap().unwrap();
+        assert_eq!(loaded.id, second.id);
+        assert_eq!(loaded.thread_id, second_thread_id);
+        assert_eq!(loaded.content.as_deref(), Some("second"));
+        assert!(get_message(&db, "missing-message").unwrap().is_none());
+        assert_ne!(loaded.id, first.id);
     }
 
     #[test]

@@ -10,6 +10,72 @@
           "bounce": "none"
         }
       }
+    },
+    {
+      "path": "pages/project/index",
+      "style": {
+        "navigationStyle": "default",
+        "navigationBarTitleText": "项目会话",
+        "navigationBarTextStyle": "white",
+        "navigationBarBackgroundColor": "#0d1016",
+        "backgroundColor": "#0d1016",
+        "backgroundTextStyle": "light"
+      }
+    },
+    {
+      "path": "pages/conversation/index",
+      "style": {
+        "navigationStyle": "default",
+        "navigationBarTitleText": "会话",
+        "navigationBarTextStyle": "white",
+        "navigationBarBackgroundColor": "#0d1016",
+        "backgroundColor": "#0d1016",
+        "backgroundTextStyle": "light"
+      }
+    },
+    {
+      "path": "pages/settings/index",
+      "style": {
+        "navigationStyle": "default",
+        "navigationBarTitleText": "设置",
+        "navigationBarTextStyle": "white",
+        "navigationBarBackgroundColor": "#0d1016",
+        "backgroundColor": "#0d1016",
+        "backgroundTextStyle": "light"
+      }
+    },
+    {
+      "path": "pages/settings/panes/index",
+      "style": {
+        "navigationStyle": "default",
+        "navigationBarTitleText": "我的 Panes",
+        "navigationBarTextStyle": "white",
+        "navigationBarBackgroundColor": "#0d1016",
+        "backgroundColor": "#0d1016",
+        "backgroundTextStyle": "light"
+      }
+    },
+    {
+      "path": "pages/settings/panes/add",
+      "style": {
+        "navigationStyle": "default",
+        "navigationBarTitleText": "添加 Panes",
+        "navigationBarTextStyle": "white",
+        "navigationBarBackgroundColor": "#0d1016",
+        "backgroundColor": "#0d1016",
+        "backgroundTextStyle": "light"
+      }
+    },
+    {
+      "path": "pages/settings/panes/detail",
+      "style": {
+        "navigationStyle": "default",
+        "navigationBarTitleText": "Panes 设备",
+        "navigationBarTextStyle": "white",
+        "navigationBarBackgroundColor": "#0d1016",
+        "backgroundColor": "#0d1016",
+        "backgroundTextStyle": "light"
+      }
     }
   ],
   "globalStyle": {

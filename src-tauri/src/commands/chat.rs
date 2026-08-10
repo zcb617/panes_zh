@@ -8,7 +8,7 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
-use tauri::{Emitter, State};
+use tauri::{AppHandle, Emitter, State};
 use tokio::fs as tokio_fs;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -438,6 +438,61 @@ where
         .await
         .map_err(|error| error.to_string())?
         .map_err(err_to_string)
+}
+
+/// 发送给 PC 远程隧道的助手消息最终持久化事件。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssistantMessageCompletedEvent {
+    /// 已完成消息所属的本地会话 ID。
+    thread_id: String,
+    /// 刚完成持久化的助手消息 ID。
+    message_id: String,
+    /// 与 `message.list` 单条消息结构一致的最终消息。
+    message: MessageDto,
+}
+
+/// 在完成状态和消息字段都写入数据库后，按精确消息 ID发送远程通知。
+async fn emit_assistant_message_completed(
+    app: &AppHandle,
+    state: &AppState,
+    thread_id: &str,
+    message_id: &str,
+) {
+    let message_id_for_query = message_id.to_string();
+    let message = match run_db(state.db.clone(), move |db| {
+        Ok(db::messages::get_message(db, &message_id_for_query)?)
+    })
+    .await
+    {
+        Ok(Some(message)) => message,
+        Ok(None) => {
+            log::warn!(
+                "assistant message {message_id} was not found after final persistence"
+            );
+            return;
+        }
+        Err(error) => {
+            log::warn!(
+                "failed to load assistant message {message_id} after final persistence: {error}"
+            );
+            return;
+        }
+    };
+
+    // 只有最终 completed 状态的助手消息才进入移动端事件流；流式、错误和中断消息不推送。
+    if message.thread_id != thread_id
+        || message.role != "assistant"
+        || !matches!(message.status, MessageStatusDto::Completed)
+    {
+        return;
+    }
+    let event = AssistantMessageCompletedEvent {
+        thread_id: thread_id.to_string(),
+        message_id: message_id.to_string(),
+        message,
+    };
+    let _ = app.emit("assistant-message-completed", event);
 }
 
 #[tauri::command]
@@ -2296,7 +2351,7 @@ async fn run_turn(
 
     state.turns.finish(&thread.id).await;
 
-    if let Err(error) = run_db(state.db.clone(), {
+    let assistant_message_persisted = match run_db(state.db.clone(), {
         let assistant_message_id = assistant_message_id.clone();
         let message_status = message_status.clone();
         let token_usage = token_usage;
@@ -2312,7 +2367,21 @@ async fn run_turn(
     })
     .await
     {
-        log::warn!("failed to complete assistant message: {error}");
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!("failed to complete assistant message: {error}");
+            false
+        }
+    };
+
+    if assistant_message_persisted && matches!(message_status, MessageStatusDto::Completed) {
+        emit_assistant_message_completed(
+            &app,
+            &state,
+            &thread.id,
+            &assistant_message_id,
+        )
+        .await;
     }
 
     if matches!(message_status, MessageStatusDto::Completed) {
@@ -2894,7 +2963,7 @@ async fn run_codex_review_turn(
     state.turns.finish(&source_thread.id).await;
     state.turns.finish(&review_thread.id).await;
 
-    if let Err(error) = run_db(state.db.clone(), {
+    let assistant_message_persisted = match run_db(state.db.clone(), {
         let assistant_message_id = assistant_message_id.clone();
         let message_status = message_status.clone();
         let token_usage = token_usage;
@@ -2910,7 +2979,21 @@ async fn run_codex_review_turn(
     })
     .await
     {
-        log::warn!("failed to complete review assistant message: {error}");
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!("failed to complete review assistant message: {error}");
+            false
+        }
+    };
+
+    if assistant_message_persisted && matches!(message_status, MessageStatusDto::Completed) {
+        emit_assistant_message_completed(
+            &app,
+            &state,
+            &review_thread.id,
+            &assistant_message_id,
+        )
+        .await;
     }
 
     if matches!(message_status, MessageStatusDto::Completed) {
