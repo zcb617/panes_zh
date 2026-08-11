@@ -2456,22 +2456,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       await ipc.cancelTurn(threadId);
       pendingTurnMetaByThread.delete(threadId);
+      const currentState = get();
+      if (currentState.threadId !== threadId || !currentState.streaming) {
+        return;
+      }
       // Remove the trailing assistant message if it has no meaningful content
       // (e.g. only thinking blocks with no text, or completely empty)
       const messages = updateSteerBlockDelivery(
-        get().messages,
+        currentState.messages,
         null,
         "settled",
       );
-      const last = messages[messages.length - 1];
+      const interruptedMessages = applyStreamEvent(
+        messages,
+        { type: "TurnCompleted", status: "interrupted" },
+        threadId,
+      );
+      const last = interruptedMessages[interruptedMessages.length - 1];
       const lastHasContent = last?.role === "assistant" && (last.blocks ?? []).some((b) => {
         if (b.type === "text") return Boolean(b.content?.trim());
         if (b.type === "action" || b.type === "diff" || b.type === "code" || b.type === "approval" || b.type === "steer") return true;
         return false;
       });
       const nextMessages = last?.role === "assistant" && !lastHasContent
-        ? messages.slice(0, -1)
-        : messages;
+        ? interruptedMessages.slice(0, -1)
+        : interruptedMessages;
       set({ status: "idle", streaming: false, turnStartedAt: null, messages: nextMessages });
     } catch (error) {
       set({ error: String(error) });

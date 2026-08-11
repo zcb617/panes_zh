@@ -2403,6 +2403,56 @@ async fn run_turn(
     }
 
     if cancellation.is_cancelled() && matches!(message_status, MessageStatusDto::Streaming) {
+        let interrupted_event = EngineEvent::TurnCompleted {
+            token_usage: None,
+            status: TurnCompletionStatus::Interrupted,
+        };
+        let interrupted_progress = process_stream_event(
+            &app,
+            &state,
+            &thread,
+            &assistant_message_id,
+            &stream_event_topic,
+            &approval_event_topic,
+            &interrupted_event,
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            max_output_chars,
+        )
+        .await;
+        let interrupted_force_persist = apply_stream_progress(
+            interrupted_progress,
+            &mut message_status,
+            &mut thread_status,
+            &mut turn_model_id,
+            &mut token_usage,
+            &mut blocks_dirty,
+            &mut message_state_dirty,
+            &mut thread_status_dirty,
+            &mut turn_model_dirty,
+        );
+        flush_stream_state(
+            &state,
+            &thread,
+            &assistant_message_id,
+            &blocks,
+            &message_status,
+            &thread_status,
+            &turn_model_id,
+            &mut blocks_dirty,
+            &mut message_state_dirty,
+            &mut thread_status_dirty,
+            &mut turn_model_dirty,
+            &mut last_persisted_thread_status,
+            &mut last_persist_at,
+            &mut last_blocks_persist_at,
+            interrupted_force_persist,
+        )
+        .await;
+    }
+
+    if cancellation.is_cancelled() && matches!(message_status, MessageStatusDto::Streaming) {
         message_status = MessageStatusDto::Interrupted;
         message_state_dirty = true;
         thread_status = ThreadStatusDto::Idle;
@@ -5929,6 +5979,112 @@ mod tests {
                 result: None,
                 ..
             } if status == "done"
+        ));
+    }
+
+    #[test]
+    fn interrupted_turn_finalizes_unfinished_actions_as_error() {
+        let mut blocks = Vec::new();
+        let mut action_index = HashMap::new();
+        let mut approval_index = HashMap::new();
+
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::ActionStarted {
+                action_id: "web-search-interrupted".to_string(),
+                engine_action_id: Some("item-interrupted".to_string()),
+                action_type: crate::engines::events::ActionType::Search,
+                summary: "Web search".to_string(),
+                details: serde_json::json!({}),
+            },
+            1000,
+        );
+
+        let progress = apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::TurnCompleted {
+                token_usage: None,
+                status: TurnCompletionStatus::Interrupted,
+            },
+            1000,
+        );
+
+        assert_eq!(progress.message_status, Some(MessageStatusDto::Interrupted));
+        assert_eq!(progress.thread_status, Some(ThreadStatusDto::Idle));
+        assert_eq!(progress.finalized_actions.len(), 1);
+        assert!(!progress.finalized_actions[0].1.success);
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::Action {
+                status,
+                result: Some(result),
+                ..
+            } if status == "error"
+                && !result.success
+                && result.error.as_deref()
+                    == Some("Action did not report completion before the turn was interrupted.")
+        ));
+    }
+
+    #[test]
+    fn interrupted_turn_does_not_overwrite_an_already_completed_action() {
+        let mut blocks = Vec::new();
+        let mut action_index = HashMap::new();
+        let mut approval_index = HashMap::new();
+
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::ActionStarted {
+                action_id: "web-search-completed".to_string(),
+                engine_action_id: Some("item-completed".to_string()),
+                action_type: crate::engines::events::ActionType::Search,
+                summary: "Web search".to_string(),
+                details: serde_json::json!({}),
+            },
+            1000,
+        );
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::ActionCompleted {
+                action_id: "web-search-completed".to_string(),
+                result: ActionResult {
+                    success: true,
+                    output: Some("done".to_string()),
+                    error: None,
+                    diff: None,
+                    duration_ms: 12,
+                },
+            },
+            1000,
+        );
+
+        let progress = apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::TurnCompleted {
+                token_usage: None,
+                status: TurnCompletionStatus::Interrupted,
+            },
+            1000,
+        );
+
+        assert!(progress.finalized_actions.is_empty());
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::Action {
+                status,
+                result: Some(result),
+                ..
+            } if status == "done" && result.success
         ));
     }
 

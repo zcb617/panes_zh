@@ -1540,6 +1540,7 @@ describe("chatStore send", () => {
     expect(useChatStore.getState().messages).toMatchObject([
       {
         id: "assistant-1",
+        status: "interrupted",
         blocks: [
           {
             type: "steer",
@@ -1549,6 +1550,123 @@ describe("chatStore send", () => {
         ],
       },
     ]);
+    expect(useChatStore.getState()).toMatchObject({
+      status: "idle",
+      streaming: false,
+      turnStartedAt: null,
+    });
+  });
+
+  it("interrupts the active assistant and finalizes a running action when canceled", async () => {
+    useChatStore.setState({
+      threadId: "thread-1",
+      messages: [
+        {
+          id: "assistant-running-action",
+          threadId: "thread-1",
+          role: "assistant",
+          status: "streaming",
+          schemaVersion: 1,
+          blocks: [
+            { type: "text", content: "Working on it" },
+            {
+              type: "notice",
+              kind: "hook_completed_first",
+              level: "info",
+              title: "Hook completed",
+              message: "first hook completed",
+            },
+            {
+              type: "action",
+              actionId: "web-search-1",
+              engineActionId: "item-1",
+              actionType: "search",
+              summary: "Web search",
+              details: {},
+              outputChunks: [],
+              status: "running",
+            },
+          ],
+          createdAt: new Date().toISOString(),
+          hydration: "full",
+          hasDeferredContent: false,
+        },
+      ],
+      status: "streaming",
+      streaming: true,
+      turnStartedAt: Date.now(),
+    });
+
+    await useChatStore.getState().cancel();
+
+    expect(useChatStore.getState()).toMatchObject({
+      status: "idle",
+      streaming: false,
+      turnStartedAt: null,
+      messages: [
+        {
+          id: "assistant-running-action",
+          status: "interrupted",
+          blocks: [
+            { type: "text", content: "Working on it" },
+            { type: "notice", kind: "hook_completed_first" },
+            {
+              type: "action",
+              actionId: "web-search-1",
+              status: "error",
+              result: {
+                success: false,
+                error: "Action did not report completion before the turn was interrupted.",
+              },
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("does not overwrite a completed turn when completion wins the cancel race", async () => {
+    const cancelRequest = deferred<void>();
+    mockIpc.cancelTurn.mockReturnValueOnce(cancelRequest.promise);
+    useChatStore.setState({
+      threadId: "thread-1",
+      messages: [
+        {
+          id: "assistant-completed-race",
+          threadId: "thread-1",
+          role: "assistant",
+          status: "streaming",
+          schemaVersion: 1,
+          blocks: [{ type: "text", content: "Almost done" }],
+          createdAt: new Date().toISOString(),
+          hydration: "full",
+          hasDeferredContent: false,
+        },
+      ],
+      status: "streaming",
+      streaming: true,
+      turnStartedAt: Date.now(),
+    });
+
+    const cancelPromise = useChatStore.getState().cancel();
+    useChatStore.setState((current) => ({
+      messages: current.messages.map((message) =>
+        message.id === "assistant-completed-race"
+          ? { ...message, status: "completed" }
+          : message,
+      ),
+      status: "completed",
+      streaming: false,
+      turnStartedAt: null,
+    }));
+    cancelRequest.resolve(undefined);
+    await cancelPromise;
+
+    expect(useChatStore.getState()).toMatchObject({
+      status: "completed",
+      streaming: false,
+      messages: [{ id: "assistant-completed-race", status: "completed" }],
+    });
   });
 
   it("folds persisted steer messages into the preceding completed assistant when binding", async () => {
