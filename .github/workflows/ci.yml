@@ -159,14 +159,14 @@ jobs:
       - name: Sign updater probe
         shell: bash
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          UPDATER_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           probe="$(mktemp)"
           private_key_file="$(mktemp)"
           trap 'rm -f "$probe" "$probe.sig" "$private_key_file"' EXIT
           printf 'updater-signing-preflight\n' > "$probe"
-          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$private_key_file"
+          printf '%s' "$UPDATER_SIGNING_PRIVATE_KEY" > "$private_key_file"
           pnpm exec tauri signer sign --private-key-path "$private_key_file" --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$probe"
           test -s "$probe.sig"
 
