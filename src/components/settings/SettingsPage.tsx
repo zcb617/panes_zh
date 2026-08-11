@@ -214,8 +214,11 @@ export function SettingsPage() {
   const downloadPhase = useUpdateStore((state) => state.downloadPhase);
   const downloadedBytes = useUpdateStore((state) => state.downloadedBytes);
   const totalBytes = useUpdateStore((state) => state.totalBytes);
+  const autoUpdateIntervalMinutes = useUpdateStore((state) => state.autoUpdateIntervalMinutes);
   const checkForUpdate = useUpdateStore((state) => state.checkForUpdate);
   const downloadAndInstall = useUpdateStore((state) => state.downloadAndInstall);
+  const installDownloadedUpdate = useUpdateStore((state) => state.installDownloadedUpdate);
+  const setAutoUpdateIntervalMinutes = useUpdateStore((state) => state.setAutoUpdateIntervalMinutes);
   const keepAwakeState = useKeepAwakeStore((state) => state.state);
   const keepAwakeLoading = useKeepAwakeStore((state) => state.loading);
   const toggleKeepAwake = useKeepAwakeStore((state) => state.toggle);
@@ -432,7 +435,7 @@ export function SettingsPage() {
       }).format(lastCheckedAt)
     : null;
   const downloadPercent = totalBytes && totalBytes > 0
-    ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100))
+    ? Math.min(99, Math.round((downloadedBytes / totalBytes) * 100))
     : null;
   const downloadedSizeLabel = formatBytes(downloadedBytes, i18n.language);
   const totalSizeLabel = totalBytes ? formatBytes(totalBytes, i18n.language) : null;
@@ -450,6 +453,13 @@ export function SettingsPage() {
         icon: <ArrowUpCircle size={17} />,
         title: t("app:updates.availableTitle", { version: availableVersion }),
         description: t("app:updates.availableMessage"),
+      };
+    }
+    if (updateStatus === "downloaded") {
+      return {
+        icon: <CheckCircle2 size={17} />,
+        title: t("app:settingsPage.about.downloadedTitle"),
+        description: t("app:settingsPage.about.downloadedDescription"),
       };
     }
     if (updateStatus === "downloading") {
@@ -1561,6 +1571,32 @@ export function SettingsPage() {
                   </span>
                 </SettingsRow>
                 <SettingsRow
+                  icon={<Clock3 size={17} />}
+                  title={t("app:settingsPage.about.autoCheckIntervalTitle")}
+                  description={t("app:settingsPage.about.autoCheckIntervalDescription")}
+                >
+                  <div className="usp-stepper usp-auto-update-interval">
+                    <button
+                      type="button"
+                      aria-label={t("app:settingsPage.about.autoCheckIntervalDecrease")}
+                      disabled={autoUpdateIntervalMinutes <= 0}
+                      onClick={() => setAutoUpdateIntervalMinutes(autoUpdateIntervalMinutes - 1)}
+                    >
+                      <Minus size={13} />
+                    </button>
+                    <span>
+                      {autoUpdateIntervalMinutes}{t("app:settingsPage.about.minutes")}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={t("app:settingsPage.about.autoCheckIntervalIncrease")}
+                      onClick={() => setAutoUpdateIntervalMinutes(autoUpdateIntervalMinutes + 1)}
+                    >
+                      <Plus size={13} />
+                    </button>
+                  </div>
+                </SettingsRow>
+                <SettingsRow
                   icon={updateStatusContent.icon}
                   title={updateStatusContent.title}
                   description={updateStatusContent.description}
@@ -1573,6 +1609,15 @@ export function SettingsPage() {
                     >
                       <Download size={13} />
                       {t("app:updates.install")}
+                    </button>
+                  ) : updateStatus === "downloaded" ? (
+                    <button
+                      type="button"
+                      className="usp-button usp-button-primary"
+                      onClick={() => void installDownloadedUpdate()}
+                    >
+                      <Download size={13} />
+                      {t("app:settingsPage.about.updateButton")}
                     </button>
                   ) : updateStatus === "downloading" ? (
                     <div className="usp-update-progress">

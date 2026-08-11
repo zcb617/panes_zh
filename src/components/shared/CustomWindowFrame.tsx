@@ -2,6 +2,7 @@ import { Dropdown } from "./Dropdown";
 import { cycleWorkspaceTerminalLayout } from "../../lib/workspacePaneNavigation";
 import { runEditMenuAction } from "../../lib/nativeEditActions";
 import { useOnboardingStore } from "../../stores/onboardingStore";
+import { useUpdateStore } from "../../stores/updateStore";
 import { useUiStore } from "../../stores/uiStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTranslation } from "react-i18next";
@@ -35,6 +36,54 @@ const MENU_TRIGGER_STYLE = {
   fontWeight: 500,
   gap: 6,
 } as const;
+
+function WindowUpdateControl() {
+  const { t } = useTranslation("app");
+  const updateStatus = useUpdateStore((state) => state.status);
+  const downloadSource = useUpdateStore((state) => state.downloadSource);
+  const downloadPhase = useUpdateStore((state) => state.downloadPhase);
+  const downloadedBytes = useUpdateStore((state) => state.downloadedBytes);
+  const totalBytes = useUpdateStore((state) => state.totalBytes);
+  const installDownloadedUpdate = useUpdateStore((state) => state.installDownloadedUpdate);
+
+  const automaticUpdateDownloading =
+    downloadSource === "automatic" && updateStatus === "downloading";
+  const automaticUpdateDownloaded =
+    downloadSource === "automatic" && updateStatus === "downloaded";
+  const automaticDownloadPercent = totalBytes && totalBytes > 0
+    ? Math.min(99, Math.max(0, Math.round((downloadedBytes / totalBytes) * 100)))
+    : 0;
+
+  if (automaticUpdateDownloaded) {
+    return (
+      <button
+        type="button"
+        className="linux-window-update-control"
+        title={t("settingsPage.about.downloadedDescription")}
+        aria-label={t("settingsPage.about.updateButton")}
+        onClick={() => void installDownloadedUpdate()}
+      >
+        {t("settingsPage.about.updateButton")}
+      </button>
+    );
+  }
+
+  if (!automaticUpdateDownloading) return null;
+
+  return (
+    <div
+      className="linux-window-update-control linux-window-update-control--progress"
+      role="status"
+      aria-live="polite"
+      aria-label={t("settingsPage.about.downloadingTitle")}
+      title={t("settingsPage.about.downloadingTitle")}
+    >
+      {downloadPhase === "installing"
+        ? t("settingsPage.about.installing")
+        : `${automaticDownloadPercent}%`}
+    </div>
+  );
+}
 
 export function CustomWindowFrame({ frameState }: CustomWindowFrameProps) {
   const { t } = useTranslation(["app", "native"]);
@@ -145,6 +194,7 @@ export function CustomWindowFrame({ frameState }: CustomWindowFrameProps) {
             />
           </div>
           <div className="linux-window-chrome-drag-region" />
+          <WindowUpdateControl />
           <div className="linux-window-chrome-controls no-drag">
             <button
               type="button"

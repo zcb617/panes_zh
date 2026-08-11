@@ -1064,6 +1064,43 @@ button, input, textarea, select {
   padding-right: 4px;
 }
 
+.linux-window-update-control {
+  height: 24px;
+  min-width: 42px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--success-indicator);
+  background: var(--success-surface);
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
+}
+
+button.linux-window-update-control {
+  cursor: pointer;
+}
+
+button.linux-window-update-control:hover {
+  color: var(--success);
+  background: var(--success-surface-strong);
+  border-color: var(--success);
+}
+
+.linux-window-update-control:focus-visible {
+  outline: 2px solid var(--success-indicator);
+  outline-offset: 2px;
+}
+
+.linux-window-update-control--progress {
+  min-width: 48px;
+}
+
 .linux-window-control {
   width: var(--linux-window-control-size);
   height: var(--linux-window-control-size);
@@ -12938,6 +12975,30 @@ button.chat-context-section:hover {
   font-family: var(--font-mono);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.usp-auto-update-interval {
+  padding: 0;
+  gap: 0;
+}
+
+.usp-auto-update-interval span {
+  min-width: 64px;
+}
+
+.usp-auto-update-interval:focus-within {
+  border-color: var(--focus-ring);
+}
+
+.usp-auto-update-interval input {
+  width: 46px;
+  color: var(--text-1);
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
   text-align: right;
 }
 
