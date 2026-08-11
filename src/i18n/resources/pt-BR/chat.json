@@ -389,6 +389,18 @@
     "dropFiles": "Solte arquivos para anexar",
     "attachFiles": "Anexar arquivos",
     "sendMessage": "Enviar mensagem",
+    "cacheMessage": "Reter mensagem",
+    "sessionMessageSendMode": "Modo de envio de mensagens da sessão",
+    "messageSendModes": {
+      "classic": "Clássico",
+      "flexible": "Flexível"
+    },
+    "flexibleMessageGroup": {
+      "label": "Mensagens prontas para envio",
+      "confirm": "Pode enviar",
+      "confirmDescription": "Enviar todas as mensagens retidas ao modelo de uma só vez",
+      "waitForResponse": "Aguarde a resposta atual antes de enviar"
+    },
     "sendingMessage": "Enviando mensagem",
     "workingFor": "Processando há {{duration}}",
     "sendFollowUp": "Enviar acompanhamento",

@@ -655,6 +655,12 @@
         "default": "默认",
         "classic": "经典"
       },
+      "messageSendMode": "消息发送模式",
+      "messageSendModeDescription": "经典模式会立即发送给模型；灵活模式会暂存连续消息，点击“可以了”后一次发送。",
+      "messageSendModes": {
+        "classic": "经典",
+        "flexible": "灵活"
+      },
       "shortcuts": {
         "shiftEnter": "Enter 换行 · Shift+Enter 发送",
         "enter": "Enter 发送 · Shift+Enter 换行"

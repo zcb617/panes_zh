@@ -55,6 +55,7 @@ import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { useChatStore } from "../../stores/chatStore";
 import { useChatComposerStore } from "../../stores/chatComposerStore";
+import type { PendingFlexibleMessage } from "../../stores/chatComposerStore";
 import { useEngineStore } from "../../stores/engineStore";
 import { useFileStore } from "../../stores/fileStore";
 import { useOnboardingStore } from "../../stores/onboardingStore";
@@ -136,6 +137,7 @@ import { OpenCodeAgentPicker } from "./OpenCodeAgentPicker";
 import { ChatSlashMenu, type SlashCommand } from "./ChatSlashMenu";
 import { ChatCommandPanel, type ActiveSlashCommand } from "./ChatCommandPanel";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
+import { Dropdown } from "../shared/Dropdown";
 import { handleDragMouseDown, handleDragDoubleClick } from "../../lib/windowDrag";
 import { shouldSubmitChatInput } from "./chatInputShortcuts";
 import type {
@@ -166,6 +168,7 @@ const MESSAGE_ROW_GAP = 12;
 const EMPTY_CHAT_ATTACHMENTS: ChatAttachment[] = [];
 const EMPTY_CHAT_INPUT_REFERENCES: ChatInputReference[] = [];
 const EMPTY_CHAT_TEXT_ANNOTATIONS: ChatTextAnnotation[] = [];
+const EMPTY_PENDING_FLEXIBLE_MESSAGES: PendingFlexibleMessage[] = [];
 
 type ClassicSlashCommand = SlashCommand & {
   reference?: ChatInputReference;
@@ -1705,6 +1708,43 @@ interface ChatPanelProps {
   embedded?: boolean;
 }
 
+function FlexibleMessageGroup({
+  messages,
+  confirmDisabled,
+  confirmTitle,
+  onConfirm,
+}: {
+  messages: PendingFlexibleMessage[];
+  confirmDisabled: boolean;
+  confirmTitle: string;
+  onConfirm: () => void;
+}) {
+  const { t } = useTranslation("chat");
+
+  return (
+    <div className="flexible-message-group" role="group" aria-label={t("panel.flexibleMessageGroup.label")}>
+      <div className="flexible-message-group-content">
+        {messages.map((message) => (
+          <div key={message.id} className="flexible-message-group-item">
+            {message.text}
+          </div>
+        ))}
+      </div>
+      <div className="flexible-message-group-actions">
+        <button
+          type="button"
+          className="flexible-message-group-confirm"
+          disabled={confirmDisabled}
+          title={confirmTitle}
+          onClick={onConfirm}
+        >
+          {t("panel.flexibleMessageGroup.confirm")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const { t } = useTranslation("chat");
   const renderStartedAtRef = useRef(performance.now());
@@ -1876,6 +1916,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       renameThread: state.renameThread,
     })),
   );
+  const activeChatSessionId = threadId ?? activeThread?.id ?? null;
   const gitStatus = useGitStore((s) => s.status);
   const input = useChatComposerStore((state) =>
     activeWorkspaceId ? state.draftByWorkspace[activeWorkspaceId] ?? "" : "",
@@ -1907,6 +1948,37 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   );
   const sendShortcut = useChatComposerStore((state) => state.sendShortcut);
   const chatInputMode = useChatComposerStore((state) => state.chatInputMode);
+  const sessionMessageSendMode = useChatComposerStore((state) => {
+    if (activeChatSessionId) {
+      return state.messageSendModeByThread[activeChatSessionId] ?? state.messageSendMode;
+    }
+    if (activeWorkspaceId) {
+      return (
+        state.pendingMessageSendModeByWorkspace[activeWorkspaceId] ?? state.messageSendMode
+      );
+    }
+    return state.messageSendMode;
+  });
+  const pendingFlexibleMessages = useChatComposerStore((state) =>
+    activeWorkspaceId
+      ? state.pendingFlexibleMessagesByWorkspace[activeWorkspaceId] ?? EMPTY_PENDING_FLEXIBLE_MESSAGES
+      : EMPTY_PENDING_FLEXIBLE_MESSAGES,
+  );
+  const addPendingFlexibleMessage = useChatComposerStore(
+    (state) => state.addPendingFlexibleMessage,
+  );
+  const clearPendingFlexibleMessages = useChatComposerStore(
+    (state) => state.clearPendingFlexibleMessages,
+  );
+  const setPendingMessageSendMode = useChatComposerStore(
+    (state) => state.setPendingMessageSendMode,
+  );
+  const clearPendingMessageSendMode = useChatComposerStore(
+    (state) => state.clearPendingMessageSendMode,
+  );
+  const setThreadMessageSendMode = useChatComposerStore(
+    (state) => state.setThreadMessageSendMode,
+  );
   const setComposerRuntime = useChatComposerStore((state) => state.setWorkspaceRuntime);
   const clearComposerRuntime = useChatComposerStore((state) => state.clearWorkspaceRuntime);
   const setInput = useCallback(
@@ -3564,6 +3636,22 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     scrollViewportToBottom("auto");
   }, [autoScrollLocked, pendingSubmission, scrollViewportToBottom]);
 
+  const hasPendingFlexibleMessages = pendingFlexibleMessages.length > 0;
+  const flexibleMessageConfirmDisabled =
+    isSubmitting || (streaming && !canSteerActiveTurn);
+  const flexibleMessageConfirmTitle = isSubmitting
+    ? t("panel.sendingMessage")
+    : streaming && !canSteerActiveTurn
+      ? t("panel.flexibleMessageGroup.waitForResponse")
+      : t("panel.flexibleMessageGroup.confirmDescription");
+
+  useEffect(() => {
+    if (!hasPendingFlexibleMessages || autoScrollLocked) {
+      return;
+    }
+    scrollViewportToBottom("auto");
+  }, [autoScrollLocked, hasPendingFlexibleMessages, pendingFlexibleMessages, scrollViewportToBottom]);
+
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport || !threadId || !hasOlderMessages || loadingOlderMessages) {
@@ -4460,13 +4548,25 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     }
   }
 
-  async function submitMessage(): Promise<boolean> {
-    if ((!input.trim() && textAnnotations.length === 0) || !activeWorkspaceId) return false;
+  // async function submitMessage(): Promise<boolean> {
+  async function submitMessage(
+    submittedText: string,
+    submittedAttachments: ChatAttachment[],
+    submittedTextAnnotations: ChatTextAnnotation[],
+    submittedReferences: ChatInputReference[],
+    submittedPlanMode: boolean,
+  ): Promise<boolean> {
+    // if ((!input.trim() && textAnnotations.length === 0) || !activeWorkspaceId) return false;
+    if ((!submittedText.trim() && submittedTextAnnotations.length === 0) || !activeWorkspaceId) return false;
     const preflightStartedAt = performance.now();
-    const text = formatTextAnnotationsForSubmission(input, textAnnotations);
-    const currentAttachments = [...attachments];
-    const currentTextAnnotations = [...textAnnotations];
-    const currentReferences = [...references];
+    // const text = formatTextAnnotationsForSubmission(input, textAnnotations);
+    const text = formatTextAnnotationsForSubmission(submittedText, submittedTextAnnotations);
+    // const currentAttachments = [...attachments];
+    const currentAttachments = [...submittedAttachments];
+    // const currentTextAnnotations = [...textAnnotations];
+    const currentTextAnnotations = [...submittedTextAnnotations];
+    // const currentReferences = [...references];
+    const currentReferences = [...submittedReferences];
 
     if (streaming) {
       if (!canSteerActiveTurn) {
@@ -4483,10 +4583,11 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         threadIdOverride: activeThreadId,
         attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
         inputItems,
-        planMode,
+        planMode: submittedPlanMode,
       });
       if (steered) {
-        const trimmed = input.trim();
+        // const trimmed = input.trim();
+        const trimmed = submittedText.trim();
         if (trimmed) {
           const hist = inputHistoryRef.current;
           if (hist[0] !== trimmed) {
@@ -4495,10 +4596,10 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         }
         inputHistCursorRef.current = -1;
         inputLiveDraftRef.current = "";
-        setInput("");
-        setAttachments([]);
-        setTextAnnotations([]);
-        setReferences([]);
+        // setInput("");
+        // setAttachments([]);
+        // setTextAnnotations([]);
+        // setReferences([]);
       }
       return steered;
     }
@@ -4510,7 +4611,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     const submitEngineId = composerRuntime.engineId;
     const submitModelId = composerRuntime.modelId;
     const submitReasoningEffort = composerRuntime.reasoningEffort;
-    const submitPlanMode = submitEngineId === "opencode" ? false : planMode;
+    // const submitPlanMode = submitEngineId === "opencode" ? false : planMode;
+    const submitPlanMode = submitEngineId === "opencode" ? false : submittedPlanMode;
 
     const activeScopeRepoId = activeRepo?.id ?? null;
     const activeThreadInScope = activeThread
@@ -4565,6 +4667,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       }
     }
 
+    setThreadMessageSendMode(targetThreadId, sessionMessageSendMode);
+    clearPendingMessageSendMode(activeWorkspaceId);
+
     const inputItems = await resolveCodexInputItems(text, submitEngineId, currentReferences);
 
     const currentThread =
@@ -4591,8 +4696,10 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
           threadId: targetThreadId,
           threadPaths: availableRepoPaths,
           text,
-          draftText: input.trim(),
-          attachments: [...attachments],
+          // draftText: input.trim(),
+          draftText: submittedText.trim(),
+          // attachments: [...attachments],
+          attachments: currentAttachments,
           textAnnotations: currentTextAnnotations,
           references: currentReferences,
           inputItems: inputItems ?? null,
@@ -4658,7 +4765,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     });
     if (sent) {
       pendingPlanImplementationThreadIdRef.current = submitPlanMode ? targetThreadId : null;
-      const trimmed = input.trim();
+      // const trimmed = input.trim();
+      const trimmed = submittedText.trim();
       if (trimmed) {
         const hist = inputHistoryRef.current;
         if (hist[0] !== trimmed) {
@@ -4667,10 +4775,10 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       }
       inputHistCursorRef.current = -1;
       inputLiveDraftRef.current = "";
-      setInput("");
-      setAttachments([]);
-      setTextAnnotations([]);
-      setReferences([]);
+      // setInput("");
+      // setAttachments([]);
+      // setTextAnnotations([]);
+      // setReferences([]);
     }
     return sent;
   }
@@ -4693,6 +4801,24 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       submittedText,
       submittedTextAnnotations,
     );
+    if (sessionMessageSendMode === "flexible") {
+      if (activeChatSessionId) {
+        setThreadMessageSendMode(activeChatSessionId, sessionMessageSendMode);
+      } else {
+        setPendingMessageSendMode(activeWorkspaceId, sessionMessageSendMode);
+      }
+      addPendingFlexibleMessage(activeWorkspaceId, {
+        id: crypto.randomUUID(),
+        text: submittedMessage,
+        attachments: submittedAttachments,
+        references: submittedReferences,
+      });
+      setInput("");
+      setAttachments([]);
+      setTextAnnotations([]);
+      setReferences([]);
+      return;
+    }
     if (!streaming) {
       setPendingSubmission(
         createPendingSubmissionMessage(
@@ -4707,7 +4833,14 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
 
     isSubmittingRef.current = true;
     setIsSubmitting(true);
-    const submission = submitMessage();
+    // const submission = submitMessage();
+    const submission = submitMessage(
+      submittedText,
+      submittedAttachments,
+      submittedTextAnnotations,
+      submittedReferences,
+      planMode,
+    );
     setInput("");
     setAttachments([]);
     setTextAnnotations([]);
@@ -4726,6 +4859,55 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       setTextAnnotations(submittedTextAnnotations);
       setReferences(submittedReferences);
       throw error;
+    } finally {
+      setPendingSubmission(null);
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+    }
+  }
+
+  async function submitFlexibleMessages() {
+    if (
+      !activeWorkspaceId ||
+      pendingFlexibleMessages.length === 0 ||
+      isSubmittingRef.current ||
+      (streaming && !canSteerActiveTurn)
+    ) {
+      return;
+    }
+
+    const submittedText = pendingFlexibleMessages
+      .map((message) => message.text)
+      .join("\n\n");
+    const submittedAttachments = pendingFlexibleMessages.flatMap(
+      (message) => message.attachments,
+    );
+    const submittedReferences = pendingFlexibleMessages.flatMap(
+      (message) => message.references,
+    );
+    setPendingSubmission(
+      createPendingSubmissionMessage(
+        threadId ?? activeThread?.id ?? "pending",
+        submittedText,
+        submittedAttachments,
+        submittedReferences,
+        planMode,
+      ),
+    );
+
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
+    try {
+      const accepted = await submitMessage(
+        submittedText,
+        submittedAttachments,
+        [],
+        submittedReferences,
+        planMode,
+      );
+      if (accepted) {
+        clearPendingFlexibleMessages(activeWorkspaceId);
+      }
     } finally {
       setPendingSubmission(null);
       isSubmittingRef.current = false;
@@ -6026,6 +6208,23 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
           </div>
         )}
 
+        {hasPendingFlexibleMessages && !pendingSubmission && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              marginTop: messages.length > 0 ? MESSAGE_ROW_GAP : 0,
+            }}
+          >
+            <FlexibleMessageGroup
+              messages={pendingFlexibleMessages}
+              confirmDisabled={flexibleMessageConfirmDisabled}
+              confirmTitle={flexibleMessageConfirmTitle}
+              onConfirm={() => void submitFlexibleMessages()}
+            />
+          </div>
+        )}
+
         {pendingSubmission && !streaming && (
           <div
             style={{
@@ -6755,7 +6954,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                       isComposing: e.nativeEvent.isComposing,
                     }, sendShortcut)) {
                       e.preventDefault();
-                      if (streaming && !canSteerActiveTurn) {
+                      if (streaming && !canSteerActiveTurn && sessionMessageSendMode !== "flexible") {
                         return;
                       }
                       void onSubmit(e);
@@ -6853,6 +7052,43 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                     <span style={{ fontSize: 11 }}>{t("panel.planShort")}</span>
                   </button>
                 )
+              )}
+
+              {!showSpecialInputComposer && (
+                <Dropdown
+                  options={[
+                    {
+                      value: "classic",
+                      label: t("panel.messageSendModes.classic"),
+                    },
+                    {
+                      value: "flexible",
+                      label: t("panel.messageSendModes.flexible"),
+                    },
+                  ]}
+                  value={sessionMessageSendMode}
+                  onChange={(nextMessageSendMode) => {
+                    if (
+                      nextMessageSendMode !== "classic" &&
+                      nextMessageSendMode !== "flexible"
+                    ) {
+                      return;
+                    }
+                    if (activeChatSessionId) {
+                      setThreadMessageSendMode(
+                        activeChatSessionId,
+                        nextMessageSendMode,
+                      );
+                      return;
+                    }
+                    if (activeWorkspaceId) {
+                      setPendingMessageSendMode(activeWorkspaceId, nextMessageSendMode);
+                    }
+                  }}
+                  disabled={!activeWorkspaceId}
+                  title={t("panel.sessionMessageSendMode")}
+                  selectedLabel={t(`panel.messageSendModes.${sessionMessageSendMode}`)}
+                />
               )}
 
               {!showSpecialInputComposer && <div className="chat-toolbar-divider" />}
@@ -7096,7 +7332,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                   </button>
                 )}
 
-                {(!streaming || canSteerActiveTurn) && !showSpecialInputComposer && (
+                {(!streaming || canSteerActiveTurn || sessionMessageSendMode === "flexible") && !showSpecialInputComposer && (
                 <button
                   type="submit"
                   className={`chat-send-btn${activeWorkspaceId && input.trim() ? " chat-send-btn--ready" : ""}`}
@@ -7106,6 +7342,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                       ? t("panel.sendingMessage")
                       : streaming
                         ? t("panel.sendFollowUp")
+                      : sessionMessageSendMode === "flexible"
+                        ? t("panel.cacheMessage")
                         : t("panel.sendMessage")
                   }
                   aria-label={
@@ -7113,6 +7351,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                       ? t("panel.sendingMessage")
                       : streaming
                         ? t("panel.sendFollowUp")
+                      : sessionMessageSendMode === "flexible"
+                        ? t("panel.cacheMessage")
                         : t("panel.sendMessage")
                   }
                   aria-busy={isSubmitting}

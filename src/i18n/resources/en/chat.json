@@ -390,6 +390,18 @@
     "dropFiles": "Drop files to attach",
     "attachFiles": "Attach files",
     "sendMessage": "Send message",
+    "cacheMessage": "Hold message",
+    "sessionMessageSendMode": "Session message send mode",
+    "messageSendModes": {
+      "classic": "Classic",
+      "flexible": "Flexible"
+    },
+    "flexibleMessageGroup": {
+      "label": "Messages ready to send",
+      "confirm": "That's all",
+      "confirmDescription": "Send all held messages to the model together",
+      "waitForResponse": "Wait for the current response before sending"
+    },
     "sendingMessage": "Sending message",
     "workingFor": "Working for {{duration}}",
     "sendFollowUp": "Send follow-up",

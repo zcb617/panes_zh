@@ -656,6 +656,12 @@
         "default": "Default",
         "classic": "Classic"
       },
+      "messageSendMode": "Message send mode",
+      "messageSendModeDescription": "Classic sends immediately. Flexible holds consecutive messages until you confirm sending them together.",
+      "messageSendModes": {
+        "classic": "Classic",
+        "flexible": "Flexible"
+      },
       "shortcuts": {
         "shiftEnter": "New line with Enter · Send with Shift+Enter",
         "enter": "Send with Enter · New line with Shift+Enter"

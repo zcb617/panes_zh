@@ -390,6 +390,18 @@
     "dropFiles": "拖放文件以附加",
     "attachFiles": "附加文件",
     "sendMessage": "发送消息",
+    "cacheMessage": "暂存消息",
+    "sessionMessageSendMode": "会话级消息发送模式",
+    "messageSendModes": {
+      "classic": "经典",
+      "flexible": "灵活"
+    },
+    "flexibleMessageGroup": {
+      "label": "待发送的消息",
+      "confirm": "可以了",
+      "confirmDescription": "将暂存消息一起发送给模型",
+      "waitForResponse": "当前回复结束后再发送"
+    },
     "sendingMessage": "正在发送消息",
     "workingFor": "已执行 {{duration}}",
     "sendFollowUp": "发送后续消息",

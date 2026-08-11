@@ -3,6 +3,7 @@ import {
   DEFAULT_CHAT_INPUT_MODE,
   DEFAULT_CHAT_INPUT_SEND_SHORTCUT,
 } from "../lib/chatInputSettings";
+import { DEFAULT_MESSAGE_SEND_MODE } from "../lib/chatInputSettings";
 import { useChatComposerStore } from "./chatComposerStore";
 import { DEFAULT_LINK_OPEN_GESTURE } from "../lib/linkOpenSettings";
 
@@ -12,9 +13,14 @@ describe("chatComposerStore", () => {
       runtimeByWorkspace: {},
       draftByWorkspace: {},
       attachmentsByWorkspace: {},
+      textAnnotationsByWorkspace: {},
       referencesByWorkspace: {},
+      pendingFlexibleMessagesByWorkspace: {},
+      pendingMessageSendModeByWorkspace: {},
       sendShortcut: DEFAULT_CHAT_INPUT_SEND_SHORTCUT,
       chatInputMode: DEFAULT_CHAT_INPUT_MODE,
+      messageSendMode: DEFAULT_MESSAGE_SEND_MODE,
+      messageSendModeByThread: {},
       linkOpenGesture: DEFAULT_LINK_OPEN_GESTURE,
     });
   });
@@ -86,6 +92,55 @@ describe("chatComposerStore", () => {
     useChatComposerStore.getState().setChatInputMode("classic");
 
     expect(useChatComposerStore.getState().chatInputMode).toBe("classic");
+  });
+
+  it("updates the configured message send mode", () => {
+    useChatComposerStore.getState().setMessageSendMode("flexible");
+
+    expect(useChatComposerStore.getState().messageSendMode).toBe("flexible");
+  });
+
+  it("keeps a message send mode override for an existing thread", () => {
+    useChatComposerStore.getState().setThreadMessageSendMode("thread-a", "flexible");
+
+    expect(useChatComposerStore.getState().messageSendModeByThread).toEqual({
+      "thread-a": "flexible",
+    });
+  });
+
+  it("keeps the selected message send mode until a new thread is created", () => {
+    useChatComposerStore
+      .getState()
+      .setPendingMessageSendMode("workspace-a", "flexible");
+
+    expect(useChatComposerStore.getState().pendingMessageSendModeByWorkspace).toEqual({
+      "workspace-a": "flexible",
+    });
+
+    useChatComposerStore.getState().clearPendingMessageSendMode("workspace-a");
+
+    expect(useChatComposerStore.getState().pendingMessageSendModeByWorkspace).toEqual({});
+  });
+
+  it("keeps pending flexible messages while the chat panel is unmounted", () => {
+    const message = {
+      id: "pending-message",
+      text: "Wait until I finish the details.",
+      attachments: [],
+      references: [],
+    };
+
+    useChatComposerStore
+      .getState()
+      .addPendingFlexibleMessage("workspace-a", message);
+
+    expect(useChatComposerStore.getState().pendingFlexibleMessagesByWorkspace).toEqual({
+      "workspace-a": [message],
+    });
+
+    useChatComposerStore.getState().clearPendingFlexibleMessages("workspace-a");
+
+    expect(useChatComposerStore.getState().pendingFlexibleMessagesByWorkspace).toEqual({});
   });
 
   it("updates the configured link open gesture", () => {

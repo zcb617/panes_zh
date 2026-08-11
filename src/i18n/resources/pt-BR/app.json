@@ -656,6 +656,12 @@
         "default": "Padrão",
         "classic": "Clássico"
       },
+      "messageSendMode": "Modo de envio de mensagens",
+      "messageSendModeDescription": "O modo clássico envia imediatamente. O modo flexível mantém mensagens consecutivas até você confirmar o envio conjunto.",
+      "messageSendModes": {
+        "classic": "Clássico",
+        "flexible": "Flexível"
+      },
       "shortcuts": {
         "shiftEnter": "Nova linha com Enter · Enviar com Shift+Enter",
         "enter": "Enviar com Enter · Nova linha com Shift+Enter"

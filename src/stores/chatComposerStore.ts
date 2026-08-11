@@ -7,6 +7,10 @@ import {
   type ChatInputMode,
   type ChatInputSendShortcut,
 } from "../lib/chatInputSettings";
+import {
+  isMessageSendMode,
+  type MessageSendMode,
+} from "../lib/chatInputSettings";
 import type { ComposerRuntimeSnapshot } from "../lib/newThreadRuntime";
 import type {
   ChatAttachment,
@@ -23,7 +27,18 @@ const CHAT_INPUT_SEND_SHORTCUT_STORAGE_KEY = "panes:chatInputSendShortcut";
 
 const CHAT_INPUT_MODE_STORAGE_KEY = "panes:chatInputMode";
 
+const MESSAGE_SEND_MODE_STORAGE_KEY = "panes:messageSendMode";
+
+const THREAD_MESSAGE_SEND_MODES_STORAGE_KEY = "panes:threadMessageSendModes";
+
 const LINK_OPEN_GESTURE_STORAGE_KEY = "panes:linkOpenGesture";
+
+export interface PendingFlexibleMessage {
+  id: string;
+  text: string;
+  attachments: ChatAttachment[];
+  references: ChatInputReference[];
+}
 function readChatInputSendShortcut(): ChatInputSendShortcut {
   try {
     const stored = localStorage.getItem(CHAT_INPUT_SEND_SHORTCUT_STORAGE_KEY);
@@ -62,6 +77,60 @@ function persistChatInputMode(chatInputMode: ChatInputMode): void {
   }
 }
 
+function readMessageSendMode(): MessageSendMode {
+  try {
+    const stored = localStorage.getItem(MESSAGE_SEND_MODE_STORAGE_KEY);
+    return stored && isMessageSendMode(stored) ? stored : "classic";
+  } catch {
+    return "classic";
+  }
+}
+
+function persistMessageSendMode(messageSendMode: MessageSendMode): void {
+  try {
+    localStorage.setItem(MESSAGE_SEND_MODE_STORAGE_KEY, messageSendMode);
+  } catch {
+    // The mode still applies to this session if storage is unavailable.
+  }
+}
+
+function readThreadMessageSendModes(): Record<string, MessageSendMode> {
+  try {
+    const stored = localStorage.getItem(THREAD_MESSAGE_SEND_MODES_STORAGE_KEY);
+    if (!stored) {
+      return {};
+    }
+
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+
+    const messageSendModes: Record<string, MessageSendMode> = {};
+    for (const [threadId, messageSendMode] of Object.entries(parsed)) {
+      if (isMessageSendMode(messageSendMode)) {
+        messageSendModes[threadId] = messageSendMode;
+      }
+    }
+    return messageSendModes;
+  } catch {
+    return {};
+  }
+}
+
+function persistThreadMessageSendModes(
+  messageSendModesByThread: Record<string, MessageSendMode>,
+): void {
+  try {
+    localStorage.setItem(
+      THREAD_MESSAGE_SEND_MODES_STORAGE_KEY,
+      JSON.stringify(messageSendModesByThread),
+    );
+  } catch {
+    // The thread override still applies to this session if storage is unavailable.
+  }
+}
+
 function readLinkOpenGesture(): LinkOpenGesture {
   try {
     const stored = localStorage.getItem(LINK_OPEN_GESTURE_STORAGE_KEY);
@@ -87,8 +156,12 @@ interface ChatComposerState {
   attachmentsByWorkspace: Record<string, ChatAttachment[]>;
   textAnnotationsByWorkspace: Record<string, ChatTextAnnotation[]>;
   referencesByWorkspace: Record<string, ChatInputReference[]>;
+  pendingFlexibleMessagesByWorkspace: Record<string, PendingFlexibleMessage[]>;
+  pendingMessageSendModeByWorkspace: Record<string, MessageSendMode>;
   sendShortcut: ChatInputSendShortcut;
   chatInputMode: ChatInputMode;
+  messageSendMode: MessageSendMode;
+  messageSendModeByThread: Record<string, MessageSendMode>;
   linkOpenGesture: LinkOpenGesture;
   setWorkspaceRuntime: (
     workspaceId: string,
@@ -109,8 +182,17 @@ interface ChatComposerState {
     references: ChatInputReference[],
   ) => void;
   clearWorkspaceReferences: (workspaceId: string) => void;
+  addPendingFlexibleMessage: (
+    workspaceId: string,
+    message: PendingFlexibleMessage,
+  ) => void;
+  clearPendingFlexibleMessages: (workspaceId: string) => void;
+  setPendingMessageSendMode: (workspaceId: string, messageSendMode: MessageSendMode) => void;
+  clearPendingMessageSendMode: (workspaceId: string) => void;
   setSendShortcut: (sendShortcut: ChatInputSendShortcut) => void;
   setChatInputMode: (chatInputMode: ChatInputMode) => void;
+  setMessageSendMode: (messageSendMode: MessageSendMode) => void;
+  setThreadMessageSendMode: (threadId: string, messageSendMode: MessageSendMode) => void;
   setLinkOpenGesture: (linkOpenGesture: LinkOpenGesture) => void;
 }
 
@@ -120,8 +202,12 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
   attachmentsByWorkspace: {},
   textAnnotationsByWorkspace: {},
   referencesByWorkspace: {},
+  pendingFlexibleMessagesByWorkspace: {},
+  pendingMessageSendModeByWorkspace: {},
   sendShortcut: readChatInputSendShortcut(),
   chatInputMode: readChatInputMode(),
+  messageSendMode: readMessageSendMode(),
+  messageSendModeByThread: readThreadMessageSendModes(),
   linkOpenGesture: readLinkOpenGesture(),
   setWorkspaceRuntime: (workspaceId, runtime) =>
     set((state) => ({
@@ -209,6 +295,33 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
       const { [workspaceId]: _removed, ...rest } = state.referencesByWorkspace;
       return { referencesByWorkspace: rest };
     }),
+  addPendingFlexibleMessage: (workspaceId, message) =>
+    set((state) => ({
+      pendingFlexibleMessagesByWorkspace: {
+        ...state.pendingFlexibleMessagesByWorkspace,
+        [workspaceId]: [
+          ...(state.pendingFlexibleMessagesByWorkspace[workspaceId] ?? []),
+          message,
+        ],
+      },
+    })),
+  clearPendingFlexibleMessages: (workspaceId) =>
+    set((state) => {
+      const { [workspaceId]: _removed, ...rest } = state.pendingFlexibleMessagesByWorkspace;
+      return { pendingFlexibleMessagesByWorkspace: rest };
+    }),
+  setPendingMessageSendMode: (workspaceId, messageSendMode) =>
+    set((state) => ({
+      pendingMessageSendModeByWorkspace: {
+        ...state.pendingMessageSendModeByWorkspace,
+        [workspaceId]: messageSendMode,
+      },
+    })),
+  clearPendingMessageSendMode: (workspaceId) =>
+    set((state) => {
+      const { [workspaceId]: _removed, ...rest } = state.pendingMessageSendModeByWorkspace;
+      return { pendingMessageSendModeByWorkspace: rest };
+    }),
   setSendShortcut: (sendShortcut) => {
     persistChatInputSendShortcut(sendShortcut);
     set({ sendShortcut });
@@ -217,6 +330,19 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
     persistChatInputMode(chatInputMode);
     set({ chatInputMode });
   },
+  setMessageSendMode: (messageSendMode) => {
+    persistMessageSendMode(messageSendMode);
+    set({ messageSendMode });
+  },
+  setThreadMessageSendMode: (threadId, messageSendMode) =>
+    set((state) => {
+      const messageSendModeByThread = {
+        ...state.messageSendModeByThread,
+        [threadId]: messageSendMode,
+      };
+      persistThreadMessageSendModes(messageSendModeByThread);
+      return { messageSendModeByThread };
+    }),
   setLinkOpenGesture: (linkOpenGesture) => {
     persistLinkOpenGesture(linkOpenGesture);
     set({ linkOpenGesture });

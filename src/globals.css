@@ -1770,6 +1770,62 @@ button, input, textarea, select {
   white-space: pre-wrap; word-break: break-word;
 }
 
+.flexible-message-group {
+  align-self: flex-end;
+  width: min(100%, 720px);
+  border: 1px solid rgba(234, 179, 8, 0.72);
+  border-radius: 12px;
+  background: rgba(250, 204, 21, 0.1);
+  box-shadow: 0 8px 24px rgba(234, 179, 8, 0.08);
+  overflow: hidden;
+}
+
+.flexible-message-group-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+}
+
+.flexible-message-group-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-1);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.flexible-message-group-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 10px 10px;
+}
+
+.flexible-message-group-confirm {
+  border: 1px solid rgba(161, 98, 7, 0.48);
+  border-radius: 7px;
+  padding: 4px 9px;
+  background: rgba(250, 204, 21, 0.82);
+  color: #422006;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out);
+}
+
+.flexible-message-group-confirm:hover:not(:disabled) {
+  background: rgba(250, 204, 21, 0.98);
+  transform: translateY(-1px);
+}
+
+.flexible-message-group-confirm:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 /* ── Assistant turn header ── */
 .msg-turn-header {
   display: flex; align-items: center; gap: 7px;
