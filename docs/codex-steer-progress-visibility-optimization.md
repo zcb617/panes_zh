@@ -264,3 +264,36 @@ Codex 引擎的 `steer_message` 在 `turn/steer` 成功后返回实际使用的 
 - 已为 `.msg-notice--steer` 增加组件内靠右规则，普通通知、工具和助手正文不受影响。
 - 靠右修正后的验收版生成时间：2026-08-11 19:24:44。
 - 应用内 Browser 验证未执行成功，连接阶段返回 `Cannot redefine property: process`；未擅自切换到外部浏览器。
+
+## 15. Hooks 跟随事件位置展示
+
+人工验收继续发现：`Hooks (n)` 被固定在助手消息最上方，无法反映 Hook 实际发生在第几段内容之间。根因有两层：前后端存储都把 Notice 插入块数组头部；渲染组件又把所有 Hook Notice 从事件序列中抽出，统一放到消息顶部。
+
+修正规则如下：
+
+1. `hook_` 和兼容的 `codex_hook_` Notice 按收到时的位置追加，普通 Notice 继续置顶。
+2. 渲染时不再全局抽取 Hook，而是在原始块序列中把连续 Hook 合并成局部 `Hooks (n)` 折叠组。
+3. 文本、工具或其他内容会切断 Hook 分组，因此一条助手消息中可以出现多组 Hooks，每组都位于真实事件边界。
+4. 已经持久化且顺序被旧版本改写的历史消息无法可靠恢复原始 Hook 位置；修正后新产生的事件可以准确展示。
+
+新增顺序验收场景：
+
+```text
+助手文本 → Hooks (2) → 工具动作 → Hooks (1) → 助手文本
+```
+
+普通 Notice 的回归场景仍为：
+
+```text
+普通 Notice → 助手文本
+```
+
+本轮验证结果：
+
+- TypeScript 类型检查通过。
+- `chatStore` 39 项测试与 Hooks 分组 1 项测试通过，共 40 项。
+- Rust 普通 Notice 置顶与 Hook Notice 保序测试通过，共 2 项。
+- Rust 格式检查通过。
+- Tauri 无安装包构建通过，新验收版生成时间为 2026-08-11 19:50:33。
+- 新验收版路径：`D:\work\panes_zh\.worktree\steer-progress-visibility\src-tauri\target\release\Panes.exe`。
+- 应用内 Browser 连接仍返回 `Cannot redefine property: process`，未擅自改用外部 Playwright；实际 Hooks 交互渲染等待人工验收。

@@ -291,6 +291,7 @@ type InnerSegment =
 
 type BlockSegment =
   | InnerSegment
+  | { kind: "hook-group"; blocks: NoticeBlock[]; indices: number[] }
   | { kind: "action-card"; segments: InnerSegment[] };
 
 function isCardSegment(seg: BlockSegment): seg is InnerSegment {
@@ -369,12 +370,34 @@ function getActionCardAnchorId(
   return getMessageBlockKey(segment.block, segment.index, safeBlocks);
 }
 
-function buildBlockSegments(blocks: ContentBlock[], isStreaming?: boolean): BlockSegment[] {
+export function buildBlockSegments(blocks: ContentBlock[], isStreaming?: boolean): BlockSegment[] {
   // Phase 1: build flat inner segments
   const flat: BlockSegment[] = [];
   let i = 0;
   while (i < blocks.length) {
     const block = blocks[i];
+    if (
+      block.type === "notice" &&
+      (block.kind.startsWith("hook_") || block.kind.startsWith("codex_hook_"))
+    ) {
+      const hookBlocks: NoticeBlock[] = [];
+      const indices: number[] = [];
+      while (i < blocks.length) {
+        const hookBlock = blocks[i];
+        if (
+          hookBlock.type !== "notice" ||
+          (!hookBlock.kind.startsWith("hook_") &&
+            !hookBlock.kind.startsWith("codex_hook_"))
+        ) {
+          break;
+        }
+        hookBlocks.push(hookBlock);
+        indices.push(i);
+        i++;
+      }
+      flat.push({ kind: "hook-group", blocks: hookBlocks, indices });
+      continue;
+    }
     if (block.type !== "action") {
       flat.push({ kind: "single", block, index: i });
       i++;
@@ -1756,7 +1779,7 @@ function MessageBlocksView({
 }: Props) {
   const { t } = useTranslation("chat");
   const [expandedActionGroups, setExpandedActionGroups] = useState<Record<string, boolean>>({});
-  const [hooksExpanded, setHooksExpanded] = useState(false);
+  const [expandedHookGroups, setExpandedHookGroups] = useState<Record<string, boolean>>({});
 
   const toggleActionGroup = useCallback((groupId: string) => {
     setExpandedActionGroups((current) => ({
@@ -1773,58 +1796,55 @@ function MessageBlocksView({
   );
 
   const isStreaming = status === "streaming";
-  const { hookNotices, visibleBlocks } = useMemo(() => {
-    const hookNotices: Array<{ block: NoticeBlock; index: number }> = [];
-    const visibleBlocks: ContentBlock[] = [];
-
-    safeBlocks.forEach((block, index) => {
-      if (
-        block.type === "notice" &&
-        (block.kind.startsWith("hook_") || block.kind.startsWith("codex_hook_"))
-      ) {
-        hookNotices.push({ block, index });
-        return;
-      }
-      visibleBlocks.push(block);
-    });
-
-    return { hookNotices, visibleBlocks };
-  }, [safeBlocks]);
   const blockSegments = useMemo(
-    () => buildBlockSegments(visibleBlocks, isStreaming),
-    [visibleBlocks, isStreaming],
+    () => buildBlockSegments(safeBlocks, isStreaming),
+    [safeBlocks, isStreaming],
   );
-  const hookNoticeRegionId = `message-hooks-${messageId}`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      {hookNotices.length > 0 && (
-        <div className="msg-hook-notices">
-          <button
-            type="button"
-            className="msg-hooks-toggle"
-            aria-expanded={hooksExpanded}
-            aria-controls={hookNoticeRegionId}
-            onClick={() => setHooksExpanded((expanded) => !expanded)}
-          >
-            <span>{t("messageBlocks.hooks", { count: hookNotices.length })}</span>
-            {hooksExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-          </button>
-          {hooksExpanded && (
-            <div id={hookNoticeRegionId} className="msg-hooks-content">
-              {hookNotices.map(({ block, index }) => (
-                <NoticeBlockView
-                  key={getMessageBlockKey(block, index, safeBlocks)}
-                  block={block}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
       {blockSegments.map((segment, segIdx) => {
+        if (segment.kind === "hook-group") {
+          const groupKey = getMessageBlockKey(
+            segment.blocks[0],
+            segment.indices[0],
+            safeBlocks,
+          );
+          const groupId = `message-hooks-${messageId}-${encodeURIComponent(groupKey)}`;
+          const hooksExpanded = expandedHookGroups[groupId] ?? false;
+          return (
+            <div key={groupId} className="msg-hook-notices">
+              <button
+                type="button"
+                className="msg-hooks-toggle"
+                aria-expanded={hooksExpanded}
+                aria-controls={groupId}
+                onClick={() =>
+                  setExpandedHookGroups((current) => ({
+                    ...current,
+                    [groupId]: !(current[groupId] ?? false),
+                  }))
+                }
+              >
+                <span>{t("messageBlocks.hooks", { count: segment.blocks.length })}</span>
+                {hooksExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              </button>
+              {hooksExpanded && (
+                <div id={groupId} className="msg-hooks-content">
+                  {segment.blocks.map((block, index) => (
+                    <NoticeBlockView
+                      key={getMessageBlockKey(block, segment.indices[index], safeBlocks)}
+                      block={block}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        }
+
         if (segment.kind === "action-card") {
-          const groupAnchorId = getActionCardAnchorId(segment.segments[0], visibleBlocks);
+          const groupAnchorId = getActionCardAnchorId(segment.segments[0], safeBlocks);
           return (
             <div key={`action-card-${segIdx}`} className="msg-action-card">
               {segment.segments.map((inner, innerIdx) => {
@@ -1842,11 +1862,11 @@ function MessageBlocksView({
                 }
                 if (inner.block.type === "thinking") {
                   const thinkingBlock = inner.block as ThinkingBlock;
-                  const isLastBlock = inner.index === visibleBlocks.length - 1;
+                  const isLastBlock = inner.index === safeBlocks.length - 1;
                   const thinkingActive = status === "streaming" && isLastBlock;
                   return (
                     <ThinkingBlockView
-                      key={getMessageBlockKey(inner.block, inner.index, visibleBlocks)}
+                      key={getMessageBlockKey(inner.block, inner.index, safeBlocks)}
                       block={thinkingBlock}
                       isStreaming={thinkingActive}
                     />
@@ -1865,7 +1885,7 @@ function MessageBlocksView({
                 if (inner.block.type === "diff") {
                   return (
                     <MessageDiffBlock
-                      key={getMessageBlockKey(inner.block, inner.index, visibleBlocks)}
+                      key={getMessageBlockKey(inner.block, inner.index, safeBlocks)}
                       block={inner.block as DiffBlock}
                       onOpenDiffFile={onOpenDiffFile}
                     />
@@ -1902,7 +1922,7 @@ function MessageBlocksView({
         return renderSingleBlock(
           segment.block,
           segment.index,
-          visibleBlocks,
+          safeBlocks,
           status,
           engineId,
           onApproval,

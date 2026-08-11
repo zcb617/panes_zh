@@ -4432,6 +4432,11 @@ fn upsert_notice_block(
         }
     }
 
+    if kind.starts_with("hook_") || kind.starts_with("codex_hook_") {
+        blocks.push(block);
+        return true;
+    }
+
     blocks.insert(0, block);
     rebuild_block_indexes(blocks, action_index, approval_index);
     true
@@ -5985,6 +5990,15 @@ mod tests {
         let mut action_index = HashMap::new();
         let mut approval_index = HashMap::new();
 
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::TextDelta {
+                content: "Visible assistant text.".to_string(),
+            },
+            1000,
+        );
         let first = apply_event_to_blocks(
             &mut blocks,
             &mut action_index,
@@ -6012,11 +6026,101 @@ mod tests {
             1000,
         );
         assert!(second.blocks_changed);
-        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks.len(), 2);
         assert!(matches!(
             &blocks[0],
             ContentBlock::Notice { message, .. } if message == "Use the newer permissions API."
         ));
+        assert!(matches!(
+            &blocks[1],
+            ContentBlock::Text { content, .. } if content == "Visible assistant text."
+        ));
+    }
+
+    #[test]
+    fn hook_notice_blocks_preserve_stream_position() {
+        let mut blocks = Vec::new();
+        let mut action_index = HashMap::new();
+        let mut approval_index = HashMap::new();
+
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::TextDelta {
+                content: "before hooks".to_string(),
+            },
+            1000,
+        );
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::Notice {
+                kind: "hook_started_first".to_string(),
+                level: "info".to_string(),
+                title: "Hook started".to_string(),
+                message: "first hook started".to_string(),
+            },
+            1000,
+        );
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::ActionStarted {
+                action_id: "action-1".to_string(),
+                engine_action_id: Some("item-1".to_string()),
+                action_type: crate::engines::events::ActionType::Other,
+                summary: "Tool call".to_string(),
+                details: serde_json::json!({}),
+            },
+            1000,
+        );
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::Notice {
+                kind: "hook_completed_first".to_string(),
+                level: "info".to_string(),
+                title: "Hook completed".to_string(),
+                message: "first hook completed".to_string(),
+            },
+            1000,
+        );
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::TextDelta {
+                content: "after hooks".to_string(),
+            },
+            1000,
+        );
+
+        assert_eq!(blocks.len(), 5);
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::Text { content, .. } if content == "before hooks"
+        ));
+        assert!(matches!(
+            &blocks[1],
+            ContentBlock::Notice { kind, .. } if kind == "hook_started_first"
+        ));
+        assert!(matches!(
+            &blocks[2],
+            ContentBlock::Action { action_id, .. } if action_id == "action-1"
+        ));
+        assert!(matches!(
+            &blocks[3],
+            ContentBlock::Notice { kind, .. } if kind == "hook_completed_first"
+        ));
+        assert!(matches!(
+            &blocks[4],
+            ContentBlock::Text { content, .. } if content == "after hooks"
+        ));
+        assert_eq!(action_index.get("action-1"), Some(&2));
     }
 
     #[test]

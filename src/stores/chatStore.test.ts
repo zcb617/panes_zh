@@ -293,6 +293,10 @@ describe("chatStore send", () => {
     ).resolves.toBe(true);
 
     streamHandler!({
+      type: "TextDelta",
+      content: "Visible assistant text.",
+    });
+    streamHandler!({
       type: "Notice",
       kind: "deprecation_notice",
       level: "warning",
@@ -313,6 +317,77 @@ describe("chatStore send", () => {
         title: "Deprecation notice",
         message: "Use the newer approval API.",
       },
+      {
+        type: "text",
+        content: "Visible assistant text.",
+      },
+    ]);
+
+    vi.useRealTimers();
+  });
+
+  it("keeps hook notices at their stream positions", async () => {
+    vi.useFakeTimers();
+
+    let streamHandler: ((event: StreamEvent) => void) | null = null;
+    mockListenThreadEvents.mockImplementationOnce(async (_threadId, onEvent) => {
+      streamHandler = onEvent;
+      return () => {};
+    });
+
+    await useChatStore.getState().setActiveThread("thread-1");
+    useChatStore.setState({
+      threadId: "thread-1",
+      messages: [
+        {
+          id: "assistant-hook-order",
+          threadId: "thread-1",
+          role: "assistant",
+          status: "streaming",
+          schemaVersion: 1,
+          blocks: [],
+          createdAt: new Date().toISOString(),
+          hydration: "full",
+          hasDeferredContent: false,
+        },
+      ],
+      status: "streaming",
+      streaming: true,
+    });
+
+    streamHandler!({ type: "TextDelta", content: "before hooks" });
+    streamHandler!({
+      type: "Notice",
+      kind: "hook_started_first",
+      level: "info",
+      title: "Hook started",
+      message: "first hook started",
+    });
+    streamHandler!({
+      type: "ActionStarted",
+      action_id: "action-1",
+      engine_action_id: "item-1",
+      action_type: "other",
+      summary: "Tool call",
+      details: {},
+    });
+    streamHandler!({
+      type: "Notice",
+      kind: "hook_completed_first",
+      level: "info",
+      title: "Hook completed",
+      message: "first hook completed",
+    });
+    streamHandler!({ type: "TextDelta", content: "after hooks" });
+
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(useChatStore.getState().messages[0]?.blocks).toMatchObject([
+      { type: "text", content: "before hooks" },
+      { type: "notice", kind: "hook_started_first" },
+      { type: "action", actionId: "action-1" },
+      { type: "notice", kind: "hook_completed_first" },
+      { type: "text", content: "after hooks" },
     ]);
 
     vi.useRealTimers();

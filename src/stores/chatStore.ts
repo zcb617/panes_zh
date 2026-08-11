@@ -1030,6 +1030,10 @@ function upsertNoticeBlock(blocks: ContentBlock[], block: NoticeBlock): ContentB
     return next;
   }
 
+  if (block.kind.startsWith("hook_") || block.kind.startsWith("codex_hook_")) {
+    return [...blocks, block];
+  }
+
   return [block, ...blocks];
 }
 
