@@ -48,7 +48,7 @@ import type {
   ThinkingBlock,
 } from "../../types";
 import {
-  buildMcpElicitationApprovalResponse,
+  // buildMcpElicitationApprovalResponse, // MCP 决策统一由 ChatPanel 底部授权栏提交。
   buildDynamicToolCallResponse,
   defaultAdvancedApprovalPayload,
   isDynamicToolCallApproval,
@@ -1346,6 +1346,9 @@ function ApprovalCard({
     );
   }
 
+  // MCP 授权决策已统一由输入框上方的固定授权栏处理，避免同一 approvalId
+  // 在消息卡片和固定授权栏中各出现一组“拒绝/批准”按钮。
+  /*
   function respondMcpElicitation(
     action: "accept" | "decline",
   ) {
@@ -1354,6 +1357,7 @@ function ApprovalCard({
       buildMcpElicitationApprovalResponse(details, action),
     );
   }
+  */
 
   return (
     <div className="msg-approval-block">
@@ -1520,6 +1524,7 @@ function ApprovalCard({
           <p className="acard-reason">
             {t("messageBlocks.approval.mcpElicitationPrompt")}
           </p>
+          {/* MCP 授权按钮统一显示在底部固定授权栏；卡片继续承载请求详情和高级 JSON。
           <div className="acard-advanced-footer">
             <button
               type="button"
@@ -1536,6 +1541,7 @@ function ApprovalCard({
               {t("panel.approvalActions.approve")}
             </button>
           </div>
+          */}
           <button
             type="button"
             className="acard-toggle"
