@@ -8001,6 +8001,141 @@ button, input, textarea, select {
   padding: 8px 12px 0;
 }
 
+.chat-text-annotation-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: min(260px, 100%);
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-3));
+  color: var(--text-2);
+  font-size: 11px;
+  animation: fade-in var(--duration-fast) var(--ease-out) both;
+}
+
+.chat-text-annotation-chip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-text-annotation-chip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.chat-text-annotation-chip-selection,
+.chat-text-annotation-chip-comment {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-text-annotation-chip-selection {
+  color: var(--text-1);
+}
+
+.chat-text-annotation-chip-comment {
+  color: var(--text-3);
+}
+
+.chat-text-annotation-popover {
+  position: fixed;
+  z-index: 80;
+  min-width: 156px;
+  padding: 5px;
+  border: 1px solid var(--border-active);
+  border-radius: var(--radius-md);
+  background: var(--supporting-bg);
+  box-shadow: var(--shadow-lg);
+  animation: fade-in var(--duration-fast) var(--ease-out) both;
+}
+
+.chat-text-annotation-add-button,
+.chat-text-annotation-confirm-button,
+.chat-text-annotation-cancel-button {
+  border: none;
+  border-radius: var(--radius-xs);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chat-text-annotation-add-button {
+  width: 100%;
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+}
+
+.chat-text-annotation-add-button:hover {
+  background: var(--hover-bg);
+}
+
+.chat-text-annotation-comment-form {
+  display: grid;
+  gap: 6px;
+  width: 266px;
+  padding: 4px;
+}
+
+.chat-text-annotation-comment-form input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  outline: none;
+  background: var(--bg-2);
+  color: var(--text-1);
+  font: inherit;
+  font-size: 11px;
+}
+
+.chat-text-annotation-comment-form input:focus {
+  border-color: var(--focus-ring);
+  box-shadow: var(--focus-ring-shadow);
+}
+
+.chat-text-annotation-comment-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.chat-text-annotation-confirm-button,
+.chat-text-annotation-cancel-button {
+  padding: 5px 8px;
+}
+
+.chat-text-annotation-confirm-button {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.chat-text-annotation-confirm-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.chat-text-annotation-cancel-button {
+  background: transparent;
+  color: var(--text-2);
+}
+
+.chat-text-annotation-cancel-button:hover {
+  background: var(--hover-bg);
+}
+
 .chat-attachment-chip {
   display: inline-flex;
   align-items: center;

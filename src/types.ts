@@ -1536,6 +1536,12 @@ export interface BrowserAnnotationAttachment {
   mimeType: string;
 }
 
+export interface ChatTextAnnotation {
+  id: string;
+  selectedText: string;
+  comment: string;
+}
+
 export interface ChatAttachment {
   id: string;
   fileName: string;

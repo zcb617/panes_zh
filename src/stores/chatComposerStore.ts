@@ -8,7 +8,11 @@ import {
   type ChatInputSendShortcut,
 } from "../lib/chatInputSettings";
 import type { ComposerRuntimeSnapshot } from "../lib/newThreadRuntime";
-import type { ChatAttachment, ChatInputReference } from "../types";
+import type {
+  ChatAttachment,
+  ChatInputReference,
+  ChatTextAnnotation,
+} from "../types";
 import {
   DEFAULT_LINK_OPEN_GESTURE,
   isLinkOpenGesture,
@@ -81,6 +85,7 @@ interface ChatComposerState {
   runtimeByWorkspace: Record<string, ComposerRuntimeSnapshot>;
   draftByWorkspace: Record<string, string>;
   attachmentsByWorkspace: Record<string, ChatAttachment[]>;
+  textAnnotationsByWorkspace: Record<string, ChatTextAnnotation[]>;
   referencesByWorkspace: Record<string, ChatInputReference[]>;
   sendShortcut: ChatInputSendShortcut;
   chatInputMode: ChatInputMode;
@@ -94,6 +99,11 @@ interface ChatComposerState {
   clearWorkspaceDraft: (workspaceId: string) => void;
   setWorkspaceAttachments: (workspaceId: string, attachments: ChatAttachment[]) => void;
   clearWorkspaceAttachments: (workspaceId: string) => void;
+  setWorkspaceTextAnnotations: (
+    workspaceId: string,
+    annotations: ChatTextAnnotation[],
+  ) => void;
+  clearWorkspaceTextAnnotations: (workspaceId: string) => void;
   setWorkspaceReferences: (
     workspaceId: string,
     references: ChatInputReference[],
@@ -108,6 +118,7 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
   runtimeByWorkspace: {},
   draftByWorkspace: {},
   attachmentsByWorkspace: {},
+  textAnnotationsByWorkspace: {},
   referencesByWorkspace: {},
   sendShortcut: readChatInputSendShortcut(),
   chatInputMode: readChatInputMode(),
@@ -161,6 +172,24 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
     set((state) => {
       const { [workspaceId]: _removed, ...rest } = state.attachmentsByWorkspace;
       return { attachmentsByWorkspace: rest };
+    }),
+  setWorkspaceTextAnnotations: (workspaceId, annotations) =>
+    set((state) => {
+      if (annotations.length === 0) {
+        const { [workspaceId]: _removed, ...rest } = state.textAnnotationsByWorkspace;
+        return { textAnnotationsByWorkspace: rest };
+      }
+      return {
+        textAnnotationsByWorkspace: {
+          ...state.textAnnotationsByWorkspace,
+          [workspaceId]: [...annotations],
+        },
+      };
+    }),
+  clearWorkspaceTextAnnotations: (workspaceId) =>
+    set((state) => {
+      const { [workspaceId]: _removed, ...rest } = state.textAnnotationsByWorkspace;
+      return { textAnnotationsByWorkspace: rest };
     }),
   setWorkspaceReferences: (workspaceId, references) =>
     set((state) => {

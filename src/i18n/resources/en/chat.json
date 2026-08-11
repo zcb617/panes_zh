@@ -399,6 +399,15 @@
     "disablePlanModeCodex": "Disable plan mode for Codex (Shift+Tab)",
     "planMode": "Plan Mode",
     "planShort": "Plan",
+    "textAnnotations": {
+      "dialogLabel": "Add chat annotation",
+      "addToChat": "Add to chat",
+      "placeholder": "Add an annotation",
+      "confirm": "Confirm",
+      "cancel": "Cancel",
+      "item": "Annotation {{count}}",
+      "remove": "Remove annotation"
+    },
     "planModeBanner": "Plan mode: planning only, no edits or commands.",
     "planModeBannerCodex": "Plan mode: planning only, no edits or commands.",
     "planModeBannerCodexFallback": "Plan mode: planning only, no edits or commands.",

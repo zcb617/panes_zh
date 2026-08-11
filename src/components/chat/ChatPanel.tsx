@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
   type ClipboardEvent as ReactClipboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -105,6 +106,7 @@ import { buildComposerRuntimeSnapshot } from "./composerRuntime";
 import { resolveReasoningEffortForModel } from "./reasoningEffort";
 import { resolveUsageStatusKey } from "./usageStatus";
 import { formatWorkingDuration } from "./workingDuration";
+import { formatTextAnnotationsForSubmission } from "./textAnnotations";
 import { ToolInputQuestionnaire } from "./ToolInputQuestionnaire";
 import {
   buildMcpElicitationApprovalResponse,
@@ -143,6 +145,7 @@ import type {
   ChatAttachment,
   ChatInputItem,
   ChatInputReference,
+  ChatTextAnnotation,
   CodexApprovalsReviewer,
   CodexApp,
   CodexSkill,
@@ -162,12 +165,20 @@ const MESSAGE_ESTIMATED_ROW_HEIGHT = 220;
 const MESSAGE_ROW_GAP = 12;
 const EMPTY_CHAT_ATTACHMENTS: ChatAttachment[] = [];
 const EMPTY_CHAT_INPUT_REFERENCES: ChatInputReference[] = [];
+const EMPTY_CHAT_TEXT_ANNOTATIONS: ChatTextAnnotation[] = [];
 
 type ClassicSlashCommand = SlashCommand & {
   reference?: ChatInputReference;
   panel?: ActiveSlashCommand;
   insertText?: string;
 };
+
+interface TextAnnotationPopover {
+  selectedText: string;
+  left: number;
+  top: number;
+  stage: "actions" | "comment";
+}
 
 function createPendingSubmissionMessage(
   threadId: string,
@@ -1878,6 +1889,14 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const setWorkspaceAttachments = useChatComposerStore(
     (state) => state.setWorkspaceAttachments,
   );
+  const textAnnotations = useChatComposerStore((state) =>
+    activeWorkspaceId
+      ? state.textAnnotationsByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_TEXT_ANNOTATIONS
+      : EMPTY_CHAT_TEXT_ANNOTATIONS,
+  );
+  const setWorkspaceTextAnnotations = useChatComposerStore(
+    (state) => state.setWorkspaceTextAnnotations,
+  );
   const references = useChatComposerStore((state) =>
     activeWorkspaceId
       ? state.referencesByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_INPUT_REFERENCES
@@ -1920,6 +1939,28 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     },
     [activeWorkspaceId, setWorkspaceAttachments],
   );
+  const setTextAnnotations = useCallback(
+    (
+      nextAnnotations:
+        | ChatTextAnnotation[]
+        | ((currentAnnotations: ChatTextAnnotation[]) => ChatTextAnnotation[]),
+    ) => {
+      if (!activeWorkspaceId) {
+        return;
+      }
+
+      const currentAnnotations =
+        useChatComposerStore.getState().textAnnotationsByWorkspace[activeWorkspaceId] ??
+        EMPTY_CHAT_TEXT_ANNOTATIONS;
+      setWorkspaceTextAnnotations(
+        activeWorkspaceId,
+        typeof nextAnnotations === "function"
+          ? nextAnnotations(currentAnnotations)
+          : nextAnnotations,
+      );
+    },
+    [activeWorkspaceId, setWorkspaceTextAnnotations],
+  );
   const setReferences = useCallback(
     (
       nextReferences:
@@ -1953,6 +1994,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const chatSectionRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const textAnnotationPopoverRef = useRef<HTMLDivElement>(null);
+  const annotationCommentInputRef = useRef<HTMLInputElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const effortSyncKeyRef = useRef<string | null>(null);
   const manuallyOverrodeThreadSelectionRef = useRef(false);
@@ -1968,6 +2011,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const [listLayoutVersion, setListLayoutVersion] = useState(0);
   const [viewportScrollTop, setViewportScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
+  const [textAnnotationPopover, setTextAnnotationPopover] =
+    useState<TextAnnotationPopover | null>(null);
+  const [textAnnotationComment, setTextAnnotationComment] = useState("");
   const [autoScrollLocked, setAutoScrollLocked] = useState(false);
   const [hasExplicitComposerRuntime, setHasExplicitComposerRuntime] = useState(false);
   const [workspaceOptInPrompt, setWorkspaceOptInPrompt] = useState<{
@@ -1976,7 +2022,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     threadId: string;
     threadPaths: string[];
     text: string;
+    draftText: string;
     attachments: ChatAttachment[];
+    textAnnotations: ChatTextAnnotation[];
     references: ChatInputReference[];
     inputItems: ChatInputItem[] | null;
     planMode: boolean;
@@ -2002,6 +2050,16 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     customApprovalPolicyText: string;
     openCodeAgent: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (textAnnotationPopover?.stage !== "comment") {
+      return;
+    }
+    const animationFrame = requestAnimationFrame(() => {
+      annotationCommentInputRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(animationFrame);
+  }, [textAnnotationPopover?.stage]);
 
   const trustLevelOptions = useMemo(() => getTrustLevelOptions(t), [t]);
   const codexThreadApprovalPolicyOptions = useMemo(
@@ -4403,10 +4461,11 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }
 
   async function submitMessage(): Promise<boolean> {
-    if (!input.trim() || !activeWorkspaceId) return false;
+    if ((!input.trim() && textAnnotations.length === 0) || !activeWorkspaceId) return false;
     const preflightStartedAt = performance.now();
-    const text = input.trim();
+    const text = formatTextAnnotationsForSubmission(input, textAnnotations);
     const currentAttachments = [...attachments];
+    const currentTextAnnotations = [...textAnnotations];
     const currentReferences = [...references];
 
     if (streaming) {
@@ -4438,6 +4497,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         inputLiveDraftRef.current = "";
         setInput("");
         setAttachments([]);
+        setTextAnnotations([]);
         setReferences([]);
       }
       return steered;
@@ -4531,7 +4591,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
           threadId: targetThreadId,
           threadPaths: availableRepoPaths,
           text,
+          draftText: input.trim(),
           attachments: [...attachments],
+          textAnnotations: currentTextAnnotations,
           references: currentReferences,
           inputItems: inputItems ?? null,
           planMode: submitPlanMode,
@@ -4607,6 +4669,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       inputLiveDraftRef.current = "";
       setInput("");
       setAttachments([]);
+      setTextAnnotations([]);
       setReferences([]);
     }
     return sent;
@@ -4614,18 +4677,27 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
-    if (!input.trim() || !activeWorkspaceId || isSubmittingRef.current) {
+    if (
+      (!input.trim() && textAnnotations.length === 0) ||
+      !activeWorkspaceId ||
+      isSubmittingRef.current
+    ) {
       return;
     }
 
     const submittedText = input.trim();
     const submittedAttachments = [...attachments];
+    const submittedTextAnnotations = [...textAnnotations];
     const submittedReferences = [...references];
+    const submittedMessage = formatTextAnnotationsForSubmission(
+      submittedText,
+      submittedTextAnnotations,
+    );
     if (!streaming) {
       setPendingSubmission(
         createPendingSubmissionMessage(
           threadId ?? activeThread?.id ?? "pending",
-          submittedText,
+          submittedMessage,
           submittedAttachments,
           submittedReferences,
           planMode,
@@ -4638,17 +4710,20 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     const submission = submitMessage();
     setInput("");
     setAttachments([]);
+    setTextAnnotations([]);
     setReferences([]);
     try {
       const accepted = await submission;
       if (!accepted) {
         setInput(submittedText);
         setAttachments(submittedAttachments);
+        setTextAnnotations(submittedTextAnnotations);
         setReferences(submittedReferences);
       }
     } catch (error) {
       setInput(submittedText);
       setAttachments(submittedAttachments);
+      setTextAnnotations(submittedTextAnnotations);
       setReferences(submittedReferences);
       throw error;
     } finally {
@@ -4686,8 +4761,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         outputSchemaText: prompt.outputSchemaText,
         customApprovalPolicyText: prompt.customApprovalPolicyText,
       }))) {
-        setInput(prompt.text);
+        setInput(prompt.draftText);
         setAttachments(prompt.attachments);
+        setTextAnnotations(prompt.textAnnotations);
         setReferences(prompt.references);
         return;
       }
@@ -4695,8 +4771,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         engineId: prompt.engineId,
         agent: prompt.openCodeAgent,
       }))) {
-        setInput(prompt.text);
+        setInput(prompt.draftText);
         setAttachments(prompt.attachments);
+        setTextAnnotations(prompt.textAnnotations);
         setReferences(prompt.references);
         return;
       }
@@ -4713,8 +4790,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         planMode: promptPlanMode,
       });
       if (!sent) {
-        setInput(prompt.text);
+        setInput(prompt.draftText);
         setAttachments(prompt.attachments);
+        setTextAnnotations(prompt.textAnnotations);
         setReferences(prompt.references);
         return;
       }
@@ -4722,12 +4800,14 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       pendingPlanImplementationThreadIdRef.current = promptPlanMode ? prompt.threadId : null;
       setInput("");
       setAttachments([]);
+      setTextAnnotations([]);
       setReferences([]);
 
       await refreshThreads(prompt.workspaceId);
     } catch {
-      setInput(prompt.text);
+      setInput(prompt.draftText);
       setAttachments(prompt.attachments);
+      setTextAnnotations(prompt.textAnnotations);
       setReferences(prompt.references);
     } finally {
       setPendingSubmission(null);
@@ -4770,7 +4850,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
           threadId: currentThread.id,
           threadPaths: availableRepoPaths,
           text: implementationMessage,
+          draftText: implementationMessage,
           attachments: [],
+          textAnnotations: [],
           references: [],
           inputItems: null,
           planMode: false,
@@ -4861,8 +4943,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       setPlanMode(true);
     }
     if (prompt) {
-      setInput(prompt.text);
+      setInput(prompt.draftText);
       setAttachments(prompt.attachments);
+      setTextAnnotations(prompt.textAnnotations);
       setReferences(prompt.references);
     }
     setPendingSubmission(null);
@@ -5745,6 +5828,13 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         <div
           ref={chatSectionRef}
           className="chat-section"
+          onPointerDownCapture={(event) => {
+            if (textAnnotationPopoverRef.current?.contains(event.target as Node)) {
+              return;
+            }
+            setTextAnnotationPopover(null);
+            setTextAnnotationComment("");
+          }}
           style={{
             flex: (layoutMode === "terminal" || layoutMode === "editor") ? "0 0 0px"
                  : layoutMode === "chat" ? "1 1 0px"
@@ -5785,6 +5875,39 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
             )}
             <div
               ref={viewportRef}
+              onMouseUp={(event: ReactMouseEvent<HTMLDivElement>) => {
+                if (!activeWorkspaceId || event.button !== 0) {
+                  return;
+                }
+                const selection = window.getSelection();
+                const selectedText = selection?.toString().trim() ?? "";
+                const viewport = viewportRef.current;
+                const target = event.target instanceof Element ? event.target : null;
+                if (
+                  !selection ||
+                  selection.rangeCount === 0 ||
+                  !selectedText ||
+                  !viewport?.contains(selection.getRangeAt(0).commonAncestorContainer) ||
+                  !target?.closest(".msg-row")
+                ) {
+                  setTextAnnotationPopover(null);
+                  setTextAnnotationComment("");
+                  return;
+                }
+                setTextAnnotationComment("");
+                setTextAnnotationPopover({
+                  selectedText,
+                  left: Math.max(
+                    12,
+                    Math.min(event.clientX + 12, window.innerWidth - 292),
+                  ),
+                  top: Math.max(
+                    12,
+                    Math.min(event.clientY + 12, window.innerHeight - 152),
+                  ),
+                  stage: "actions",
+                });
+              }}
               style={{
                 position: "relative",
                 flex: 1,
@@ -5959,6 +6082,91 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
           </button>
         )}
             </div>
+
+            {textAnnotationPopover && (
+              <div
+                ref={textAnnotationPopoverRef}
+                className="chat-text-annotation-popover"
+                style={{
+                  left: textAnnotationPopover.left,
+                  top: textAnnotationPopover.top,
+                }}
+                role="dialog"
+                aria-label={t("panel.textAnnotations.dialogLabel")}
+              >
+                {textAnnotationPopover.stage === "actions" ? (
+                  <button
+                    type="button"
+                    className="chat-text-annotation-add-button"
+                    onClick={() => {
+                      setTextAnnotationPopover((current) =>
+                        current ? { ...current, stage: "comment" } : null,
+                      );
+                    }}
+                  >
+                    {t("panel.textAnnotations.addToChat")}
+                  </button>
+                ) : (
+                  <form
+                    className="chat-text-annotation-comment-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      const comment = textAnnotationComment.trim();
+                      if (!comment) {
+                        return;
+                      }
+                      setTextAnnotations((current) => [
+                        ...current,
+                        {
+                          id: crypto.randomUUID(),
+                          selectedText: textAnnotationPopover.selectedText,
+                          comment,
+                        },
+                      ]);
+                      setTextAnnotationPopover(null);
+                      setTextAnnotationComment("");
+                      window.getSelection()?.removeAllRanges();
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    <input
+                      ref={annotationCommentInputRef}
+                      value={textAnnotationComment}
+                      onChange={(event) => setTextAnnotationComment(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Escape") {
+                          return;
+                        }
+                        event.preventDefault();
+                        setTextAnnotationPopover(null);
+                        setTextAnnotationComment("");
+                      }}
+                      placeholder={t("panel.textAnnotations.placeholder")}
+                      aria-label={t("panel.textAnnotations.placeholder")}
+                    />
+                    <div className="chat-text-annotation-comment-actions">
+                      <button
+                        type="submit"
+                        className="chat-text-annotation-confirm-button"
+                        disabled={!textAnnotationComment.trim()}
+                      >
+                        {t("panel.textAnnotations.confirm")}
+                      </button>
+                      <button
+                        type="button"
+                        className="chat-text-annotation-cancel-button"
+                        onClick={() => {
+                          setTextAnnotationPopover(null);
+                          setTextAnnotationComment("");
+                        }}
+                      >
+                        {t("panel.textAnnotations.cancel")}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            )}
 
             {/* ── Input Area ── */}
             <div className="chat-composer-surface">
@@ -6342,8 +6550,40 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
             ) : (
               <>
                 {/* Composer references and attachments */}
-                {(references.length > 0 || attachments.length > 0) && (
+                {(references.length > 0 || attachments.length > 0 || textAnnotations.length > 0) && (
                   <div className="chat-attachments-bar">
+                    {textAnnotations.map((annotation, index) => (
+                      <div key={annotation.id} className="chat-text-annotation-chip">
+                        <div className="chat-text-annotation-chip-header">
+                          <span className="chat-text-annotation-chip-label">
+                            <MessageSquare size={11} />
+                            {t("panel.textAnnotations.item", { count: index + 1 })}
+                          </span>
+                          <button
+                            type="button"
+                            className="chat-attachment-chip-remove"
+                            onClick={() =>
+                              setTextAnnotations((current) =>
+                                current.filter((candidate) => candidate.id !== annotation.id),
+                              )
+                            }
+                            title={t("panel.textAnnotations.remove")}
+                            aria-label={t("panel.textAnnotations.remove")}
+                          >
+                            <X size={10} />
+                          </button>
+                        </div>
+                        <span
+                          className="chat-text-annotation-chip-selection"
+                          title={annotation.selectedText}
+                        >
+                          {annotation.selectedText}
+                        </span>
+                        <span className="chat-text-annotation-chip-comment">
+                          {annotation.comment}
+                        </span>
+                      </div>
+                    ))}
                     {references.map((reference) => (
                       <span
                         key={`${reference.type}:${reference.path}`}
