@@ -399,6 +399,15 @@
     "disablePlanModeCodex": "为 Codex 禁用计划模式（Shift+Tab）",
     "planMode": "计划模式",
     "planShort": "计划",
+    "textAnnotations": {
+      "dialogLabel": "添加聊天标注",
+      "addToChat": "添加到对话",
+      "placeholder": "填写标注内容",
+      "confirm": "确定",
+      "cancel": "取消",
+      "item": "标注 {{count}}",
+      "remove": "移除标注"
+    },
     "planModeBanner": "计划模式：仅规划，不编辑或执行命令。",
     "planModeBannerCodex": "计划模式：仅规划，不编辑或执行命令。",
     "planModeBannerCodexFallback": "计划模式：仅规划，不编辑或执行命令。",
