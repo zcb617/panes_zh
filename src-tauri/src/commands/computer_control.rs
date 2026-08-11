@@ -527,10 +527,19 @@ pub async fn respond_computer_control_approval(
     request_id: String,
     allowed: bool,
 ) -> Result<(), String> {
-    state
-        .computer_control_approvals
+    match state
+        .computer_control_service
         .respond(&request_id, allowed)
-        .await
+        .await?
+    {
+        true => Ok(()),
+        false => {
+            state
+                .computer_control_approvals
+                .respond(&request_id, allowed)
+                .await
+        }
+    }
 }
 
 fn request_broker_authorization(

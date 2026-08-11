@@ -1,5 +1,6 @@
 mod commands;
 mod computer_control_sdk;
+mod computer_control_service;
 mod config;
 mod db;
 mod engines;
@@ -108,6 +109,9 @@ pub fn run() {
         db::workspaces::ensure_default_workspace(&db).expect("failed to ensure default workspace");
 
     let computer_control_sdk = Arc::new(computer_control_sdk::CuaDriverSdk::new());
+    let computer_control_service = Arc::new(computer_control_service::ComputerControlService::new(
+        computer_control_sdk.clone(),
+    ));
 
     let app_state = AppState {
         db,
@@ -125,6 +129,7 @@ pub fn run() {
         computer_control_approvals: Arc::new(
             commands::computer_control::ComputerControlApprovalManager::default(),
         ),
+        computer_control_service,
         remote_access: Arc::new(RemoteTunnelManager::default()),
     };
 
@@ -189,6 +194,12 @@ pub fn run() {
             {
                 log::warn!("failed to start computer control approval broker: {error}");
             }
+            state
+                .computer_control_service
+                .bind_app_handle(handle.clone());
+            state
+                .engines
+                .set_computer_control_service(state.computer_control_service.clone());
             state.engines.set_resource_dir(resource_dir);
             tauri::async_runtime::spawn(run_codex_runtime_bridge(handle.clone(), state.clone()));
             spawn_catalog_refresh_scheduler(handle.clone(), state.clone());
@@ -424,11 +435,23 @@ pub fn run() {
             let terminals = app_handle.state::<AppState>().terminals.clone();
             let keep_awake = app_handle.state::<AppState>().keep_awake.clone();
             let remote_access = app_handle.state::<AppState>().remote_access.clone();
+            let computer_control_service = app_handle
+                .state::<AppState>()
+                .computer_control_service
+                .clone();
+            let computer_control_sdk = app_handle
+                .state::<Arc<computer_control_sdk::CuaDriverSdk>>()
+                .inner()
+                .clone();
             tauri::async_runtime::block_on(async move {
                 if let Err(error) = keep_awake.shutdown().await {
                     log::warn!("failed to release keep awake on shutdown: {error}");
                 }
                 terminals.shutdown().await;
+                computer_control_service.revoke_all().await;
+                if let Err(error) = computer_control_sdk.shutdown() {
+                    log::warn!("failed to shut down CUA SDK runtime: {error}");
+                }
                 remote_access.shutdown().await;
             });
         }

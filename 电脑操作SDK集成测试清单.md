@@ -311,3 +311,51 @@ Windows 官方预编译 SDK 已完成“加载 → ABI → runtime 创建 → �
 - Rust 静态检查：通过；新增 runtime 模块没有编译错误。
 - 定向 Rust 单元测试：`1 passed, 0 failed`。
 - 当前仍未启动 Panes GUI，因此设置 UI、授权弹窗和三个引擎用例保持未执行。
+
+## 10. 阶段 2 已执行记录：统一服务和 Codex 工具接入
+
+执行时间：2026-08-11（Asia/Hong_Kong）
+
+执行分支：`codex/computer-control-sdk`，工作树：`.worktree/computer-control-sdk`
+
+### CT-G8-01 / S2-01：Codex 新线程动态工具注册
+
+- 实际改动：新增 `ComputerControlService::dynamic_tools_spec()`；`thread/start` 参数加入 `dynamicTools`，命名空间为 `panes_computer_control`。
+- 实际步骤：执行 Rust 静态检查（包含测试构建），并增加 `thread_start_params_register_panes_computer_control_namespace` 测试。
+- 实际结果：测试代码构建通过；当前 Windows 测试宿主在运行阶段报告系统入口点缺失，未把 GUI 外的单测运行结果记为通过。
+- 最终状态：`阻断（运行时单测宿主）`。
+
+### S2-02：关闭开关时不初始化 SDK
+
+- 实际改动：统一服务先读取 Panes 电脑操作开关，再进入授权和 SDK `invoke`；动态工具目录生成不触发 SDK 初始化。
+- 实际结果：静态检查通过；尚未从设置页切换开关并执行真实 Codex 调用。
+- 最终状态：`未执行（待设置页迁移阶段）`。
+
+### S2-03 / S2-04 / S2-05：授权、拒绝和允许后的调用
+
+- 实际改动：复用 `computer-control-approval-requested` 事件；新增按线程、回合、目标和操作类型隔离的 pending/grant 状态；允许后才调用 CUA SDK，并返回 `contentItems`、`success`。
+- 实际结果：代码构建通过；未启动 Panes GUI，未产生真实 `request_id`、授权窗口或目标应用变化。
+- 最终状态：`未执行（待 Codex 实机调用）`。
+
+### S2-06：范围和目标边界
+
+- 实际步骤：新增边界测试，覆盖 `scope=desktop`、无目标点击和普通应用路径。
+- 实际结果：测试代码构建通过；静态路径明确拒绝全桌面范围、未审核工具和 Panes 自身目标。
+- 最终状态：`代码验证完成，实机未执行`。
+
+### S2-07：取消、回合结束和退出清理
+
+- 实际改动：授权等待监听任务取消；回合结束清理当前回合授权；Codex 连接重置和 Panes 退出撤销全部授权；SDK 在退出阶段显式 shutdown。
+- 实际结果：代码构建通过；未执行真实取消、断开和退出场景。
+- 最终状态：`代码验证完成，实机未执行`。
+
+### S2-08 / CT-G10-01：进程链约束
+
+- 实际改动：本阶段 Codex 电脑操作不再经过 `--panes-computer-control-mcp`，而是直接由 Panes 统一服务调用已纳入 resources 的 CUA SDK runtime；没有新增 Panes 宿主进程。
+- 实际步骤：复用官方 Windows Spike 的 runtime 生命周期和进程计数记录；Spike 创建、调用、shutdown 前后进程数均为 `1`，已有进程未被本轮测试结束。
+- 实际结果：官方 Spike 通过；Panes GUI 进程链未在本阶段启动实测。
+- 最终状态：`Spike 通过，Panes 实机未执行`。
+
+### 阶段 2 总结
+
+统一服务、授权状态和 Codex 动态工具调用链已经完成并通过 Rust 静态检查；Windows GUI、设置页、授权弹窗和 Notepad 点击/输入/截图闭环必须在后续设置页迁移阶段继续执行，不能以本阶段代码构建结果替代。

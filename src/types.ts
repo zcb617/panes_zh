@@ -204,7 +204,12 @@ export interface ComputerControlApprovalRequest {
   requestId: string;
   agent: "codex" | "claude" | "opencode" | string;
   tool: string;
+  callId?: string;
   application: string;
+  operation?: string;
+  scope?: string;
+  threadId?: string;
+  turnId?: string;
 }
 
 export type ScheduledTaskTargetType = "existing_thread" | "new_thread";

@@ -9,6 +9,7 @@ use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    computer_control_service::ComputerControlService,
     engines::{
         claude_sidecar::ClaudeSidecarEngine,
         codex::{CodexEngine, CodexForkedThread, CodexReviewStarted},
@@ -481,6 +482,10 @@ impl EngineManager {
 
     pub fn set_resource_dir(&self, resource_dir: Option<PathBuf>) {
         self.claude.set_resource_dir(resource_dir);
+    }
+
+    pub fn set_computer_control_service(&self, service: Arc<ComputerControlService>) {
+        self.codex.set_computer_control_service(service);
     }
 
     async fn load_codex_models(&self) -> Vec<ModelInfo> {

@@ -363,12 +363,12 @@ Panes 退出时执行同一套清理，但即使异常退出也不会留下 `--p
 
 ### 阶段 1：统一服务和 Codex
 
-当前已完成本阶段前置工作：官方 Windows 资源已纳入 Tauri resources，Panes 主进程已有惰性 CUA runtime、工具目录、桌面状态读取和 shutdown 命令，并已通过定向 Rust 单元测试；授权服务和 Codex 工具适配尚未开始。
+当前阶段已完成：官方 Windows 资源已纳入 Tauri resources，Panes 主进程已有惰性 CUA runtime、统一电脑操作服务、按线程/回合/目标隔离的临时授权状态、Codex 新线程动态工具注册和 `item/tool/call` 回传。设置页产品迁移、Claude/OpenCode 适配和 Windows 实机闭环仍未完成。
 
-- 新建 `ComputerControlService`、授权状态机和统一工具目录。
-- 加入 Codex `dynamicTools` 注册及 `dynamicToolCall` 回传。
-- 实现授权弹窗、拒绝、撤销、超时和任务结束清理。
-- 使用 Notepad 等低风险应用完成点击、输入和截图闭环。
+- 已新建 `ComputerControlService`、授权状态机和统一工具目录。
+- 已加入 Codex 新线程 `dynamicTools` 注册及 `item/tool/call` 回传。
+- 已实现授权事件、拒绝、撤销、超时、任务取消和 Panes 退出清理。
+- 低风险应用点击、输入和截图实机闭环：未执行，待设置页迁移后验收。
 
 ### 阶段 2：Claude 和 OpenCode 适配器
 

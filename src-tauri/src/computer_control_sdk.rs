@@ -168,6 +168,19 @@ impl CuaDriverSdk {
             .map_err(|error| self.remember_error(error))
     }
 
+    pub fn invoke(&self, tool: &str, arguments: &Value) -> Result<Value, String> {
+        self.initialize()?;
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| "CUA SDK runtime state is poisoned".to_string())?;
+        runtime
+            .as_mut()
+            .ok_or_else(|| "CUA SDK runtime is not initialized".to_string())?
+            .invoke(tool, arguments)
+            .map_err(|error| self.remember_error(error))
+    }
+
     pub fn shutdown(&self) -> Result<(), String> {
         let runtime = self
             .runtime
@@ -179,7 +192,9 @@ impl CuaDriverSdk {
             .lock()
             .map_err(|_| "CUA SDK runtime info is poisoned".to_string())? = None;
         if let Some(mut runtime) = runtime {
-            runtime.shutdown().map_err(|error| self.remember_error(error))?;
+            runtime
+                .shutdown()
+                .map_err(|error| self.remember_error(error))?;
         }
         Ok(())
     }
@@ -307,14 +322,15 @@ impl Runtime {
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
-    use super::{CuaDriverSdkRuntimeInfo, Condvar, Duration, Mutex, Path, RuntimeError, ABI_MAJOR, ABI_MINOR};
+    use super::{
+        Condvar, CuaDriverSdkRuntimeInfo, Duration, Mutex, Path, RuntimeError, ABI_MAJOR, ABI_MINOR,
+    };
     use serde_json::Value;
     use std::{
         ffi::{c_char, c_void, OsStr},
         mem,
         os::windows::ffi::OsStrExt,
-        ptr,
-        slice,
+        ptr, slice,
     };
 
     #[repr(C)]
@@ -507,7 +523,11 @@ mod windows_impl {
             .ok_or_else(|| RuntimeError::new("CUA operation completed without a result"))
     }
 
-    unsafe fn call_json(api: &NativeApi, driver: *mut Driver, call: JsonFn) -> Result<Value, RuntimeError> {
+    unsafe fn call_json(
+        api: &NativeApi,
+        driver: *mut Driver,
+        call: JsonFn,
+    ) -> Result<Value, RuntimeError> {
         let mut output = Buffer {
             data: ptr::null_mut(),
             len: 0,
@@ -612,9 +632,7 @@ mod windows_impl {
                         "CUA ABI version call failed with status {status}"
                     )));
                 }
-                if version.major != ABI_MAJOR
-                    || !(api.abi_compatible)(ABI_MAJOR, ABI_MINOR)
-                {
+                if version.major != ABI_MAJOR || !(api.abi_compatible)(ABI_MAJOR, ABI_MINOR) {
                     let _ = FreeLibrary(api.module);
                     return Err(RuntimeError::new(format!(
                         "CUA ABI mismatch: runtime={}.{}.{} expected={}.{}",
@@ -705,19 +723,25 @@ mod windows_impl {
             unsafe { call_json(api, self.driver, api.list_tools) }
         }
 
-        pub(super) fn invoke(&mut self, name: &str, arguments: &Value) -> Result<Value, RuntimeError> {
+        pub(super) fn invoke(
+            &mut self,
+            name: &str,
+            arguments: &Value,
+        ) -> Result<Value, RuntimeError> {
             let api = self
                 .api
                 .as_ref()
                 .ok_or_else(|| RuntimeError::new("CUA runtime library is unloaded"))?;
             let name = name.as_bytes();
-            let arguments = serde_json::to_vec(arguments)
-                .map_err(|error| RuntimeError::new(format!("failed to encode CUA arguments: {error}")))?;
-            let (_, result, error) = unsafe {
-                call_async(api, self.driver, Some(name), Some(&arguments), false)?
-            };
+            let arguments = serde_json::to_vec(arguments).map_err(|error| {
+                RuntimeError::new(format!("failed to encode CUA arguments: {error}"))
+            })?;
+            let (_, result, error) =
+                unsafe { call_async(api, self.driver, Some(name), Some(&arguments), false)? };
             if !error.is_empty() {
-                return Err(RuntimeError::new(format!("CUA tool {name:?} failed: {error}")));
+                return Err(RuntimeError::new(format!(
+                    "CUA tool {name:?} failed: {error}"
+                )));
             }
             serde_json::from_str(&result).map_err(|parse_error| {
                 RuntimeError::new(format!("CUA tool returned invalid JSON: {parse_error}"))
@@ -764,7 +788,10 @@ mod tests {
         assert_eq!(info.abi_version, "1.1.0");
         assert_eq!(info.driver_version.as_deref(), Some("0.19.3"));
         assert!(info.embedded);
-        assert!(sdk.list_tools().expect("tool inventory should load").is_object());
+        assert!(sdk
+            .list_tools()
+            .expect("tool inventory should load")
+            .is_object());
         assert!(sdk
             .get_screen_size()
             .expect("screen size should be readable")

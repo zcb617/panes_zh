@@ -196,6 +196,8 @@ pub struct CodexEngine {
     state: Arc<Mutex<CodexState>>,
     transport_spawn_lock: Arc<Mutex<()>>,
     runtime_events: broadcast::Sender<CodexRuntimeEvent>,
+    computer_control_service:
+        Arc<std::sync::Mutex<Option<Arc<crate::computer_control_service::ComputerControlService>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +255,7 @@ impl Default for CodexEngine {
             state: Arc::new(Mutex::new(CodexState::default())),
             transport_spawn_lock: Arc::new(Mutex::new(())),
             runtime_events,
+            computer_control_service: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -713,6 +716,11 @@ impl Engine for CodexEngine {
                   .interrupt(&thread_id)
                   .await
                   .context("failed to interrupt codex turn on cancellation")?;
+                if let Some(service) = self.computer_control_service() {
+                  service
+                    .revoke_turn(&thread_id, expected_turn_id.as_deref())
+                    .await;
+                }
                 return Ok(());
               }
               response = &mut turn_task, if !turn_request_done => {
@@ -949,6 +957,72 @@ impl Engine for CodexEngine {
                       continue;
                     }
 
+                    if method_signature(&method) == "itemtoolcall" {
+                        let call_thread_id = extract_any_string(
+                            &params,
+                            &["threadId", "thread_id", "engineThreadId", "engine_thread_id"],
+                        )
+                        .unwrap_or_else(|| thread_id.clone());
+                        let call_turn_id = extract_any_string(&params, &["turnId", "turn_id"])
+                            .or_else(|| expected_turn_id.clone())
+                            .unwrap_or_default();
+                        if let Some(namespace) =
+                            extract_any_string(&params, &["namespace", "toolNamespace"])
+                        {
+                            if namespace != "panes_computer_control" {
+                                transport
+                                    .respond_success(
+                                        &raw_id,
+                                        crate::computer_control_service::dynamic_tool_failure(
+                                            format!(
+                                                "tool_not_allowed: 未审核的电脑操作命名空间 {namespace}"
+                                            ),
+                                        ),
+                                    )
+                                    .await
+                                    .ok();
+                                continue;
+                            }
+                        }
+                        let raw_tool = extract_any_string(&params, &["tool", "name"])
+                            .unwrap_or_default();
+                        let tool = raw_tool
+                            .strip_prefix("panes_computer_control.")
+                            .unwrap_or(&raw_tool)
+                            .to_string();
+                        let call_id = extract_any_string(&params, &["callId", "call_id"])
+                            .unwrap_or_else(|| raw_id.to_string());
+                        let arguments = params
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        let response = match self.computer_control_service() {
+                            Some(service) => match service
+                                .invoke_for_codex(
+                                    &call_thread_id,
+                                    &call_turn_id,
+                                    &tool,
+                                    &call_id,
+                                    arguments,
+                                    cancellation.clone(),
+                                )
+                                .await
+                            {
+                                Ok(value) => {
+                                    crate::computer_control_service::dynamic_tool_success(value)
+                                }
+                                Err(error) => {
+                                    crate::computer_control_service::dynamic_tool_failure(error)
+                                }
+                            },
+                            None => crate::computer_control_service::dynamic_tool_failure(
+                                "authorization_required: Panes 电脑操作服务尚未就绪",
+                            ),
+                        };
+                        transport.respond_success(&raw_id, response).await.ok();
+                        continue;
+                    }
+
                     if let Some(approval) =
                         mapper.map_server_request(&id, &raw_id, &method, &params)
                     {
@@ -1145,6 +1219,11 @@ impl Engine for CodexEngine {
             }
         }
 
+        if let Some(service) = self.computer_control_service() {
+            service
+                .revoke_turn(&thread_id, expected_turn_id.as_deref())
+                .await;
+        }
         self.clear_active_turn(&thread_id).await;
         Ok(())
     }
@@ -1285,6 +1364,24 @@ impl Engine for CodexEngine {
 }
 
 impl CodexEngine {
+    pub fn set_computer_control_service(
+        &self,
+        service: Arc<crate::computer_control_service::ComputerControlService>,
+    ) {
+        if let Ok(mut current) = self.computer_control_service.lock() {
+            *current = Some(service);
+        }
+    }
+
+    fn computer_control_service(
+        &self,
+    ) -> Option<Arc<crate::computer_control_service::ComputerControlService>> {
+        self.computer_control_service
+            .lock()
+            .ok()
+            .and_then(|service| service.clone())
+    }
+
     pub async fn usage_limits_snapshot(&self) -> anyhow::Result<UsageLimitsSnapshot> {
         let transport = self.ensure_ready_transport().await?;
         let snapshot = request_with_fallback(
@@ -2570,6 +2667,10 @@ impl CodexEngine {
             state.runtime_monitor_transport_tag = None;
             (transport, active_turns)
         };
+
+        if let Some(service) = self.computer_control_service() {
+            service.revoke_all().await;
+        }
 
         let diagnostics_before = match transport.as_ref() {
             Some(transport) => Some(transport.diagnostics().await),
@@ -4447,6 +4548,10 @@ fn build_thread_start_params(
     params.insert(
         "persistExtendedHistory".to_string(),
         serde_json::Value::Bool(false),
+    );
+    params.insert(
+        "dynamicTools".to_string(),
+        crate::computer_control_service::ComputerControlService::dynamic_tools_spec(),
     );
     serde_json::Value::Object(params)
 }
@@ -7514,6 +7619,30 @@ mod tests {
                 "persistExtendedHistory": false,
             })
         );
+    }
+
+    #[test]
+    fn thread_start_params_register_panes_computer_control_namespace() {
+        let params = build_thread_start_params(
+            "gpt-5-codex",
+            "/tmp/workspace",
+            &json!("on-request"),
+            "workspace-write",
+            &SandboxPolicy {
+                writable_roots: Vec::new(),
+                allow_network: false,
+                approval_policy: None,
+                permission_profile: None,
+                approvals_reviewer: None,
+                reasoning_effort: None,
+                sandbox_mode: None,
+                service_tier: None,
+                personality: None,
+                output_schema: None,
+                opencode_agent: None,
+            },
+        );
+        assert_eq!(params["dynamicTools"][0]["name"], "panes_computer_control");
     }
 
     #[tokio::test]
