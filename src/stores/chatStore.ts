@@ -1651,6 +1651,42 @@ function applyStreamEvent(messages: Message[], event: StreamEvent, threadId: str
     } else {
       assistant.status = "completed";
     }
+
+    const actionSucceeded = status === "completed";
+    const actionError =
+      status === "interrupted"
+        ? "Action did not report completion before the turn was interrupted."
+        : status === "failed"
+          ? "Action did not report completion because the turn failed."
+          : undefined;
+    const blocks = assistant.blocks ?? [];
+    let finalizedAction = false;
+    const finalizedBlocks = blocks.map((block) => {
+      if (
+        block.type !== "action" ||
+        (block.status !== "running" && block.status !== "pending")
+      ) {
+        return block;
+      }
+
+      finalizedAction = true;
+      return {
+        ...block,
+        status: (actionSucceeded ? "done" : "error") as ActionBlock["status"],
+        ...(actionSucceeded
+          ? {}
+          : {
+              result: {
+                success: false,
+                error: actionError,
+                durationMs: 0,
+              },
+            }),
+      };
+    });
+    if (finalizedAction) {
+      assistant.blocks = finalizedBlocks;
+    }
   }
 
   assistant.hydration = "full";

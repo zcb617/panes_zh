@@ -528,6 +528,55 @@ describe("chatStore send", () => {
     vi.useRealTimers();
   });
 
+  it("finishes a running action when the turn completes without an action completion event", async () => {
+    vi.useFakeTimers();
+
+    let streamHandler: ((event: StreamEvent) => void) | null = null;
+    mockListenThreadEvents.mockImplementationOnce(async (_threadId, onEvent) => {
+      streamHandler = onEvent;
+      return () => {};
+    });
+
+    await useChatStore.getState().setActiveThread("thread-1");
+    mockIpc.sendMessage.mockResolvedValueOnce("assistant-message-id");
+    await expect(
+      useChatStore.getState().send("hello", {
+        engineId: "codex",
+        modelId: "gpt-5.3-codex",
+      }),
+    ).resolves.toBe(true);
+
+    expect(streamHandler).not.toBeNull();
+    streamHandler!({
+      type: "ActionStarted",
+      action_id: "web-search-1",
+      engine_action_id: "item-1",
+      action_type: "search",
+      summary: "Web search",
+      details: {},
+    });
+    streamHandler!({
+      type: "TurnCompleted",
+      status: "completed",
+    });
+
+    await vi.advanceTimersByTimeAsync(20);
+
+    const assistant = useChatStore
+      .getState()
+      .messages.find((message) => message.role === "assistant" && message.blocks?.length);
+    expect(assistant).toMatchObject({ status: "completed" });
+    expect(assistant?.blocks).toMatchObject([
+      {
+        type: "action",
+        actionId: "web-search-1",
+        status: "done",
+      },
+    ]);
+
+    vi.useRealTimers();
+  });
+
   it("collapses existing duplicate diff blocks for same-scope stream updates", async () => {
     vi.useFakeTimers();
 

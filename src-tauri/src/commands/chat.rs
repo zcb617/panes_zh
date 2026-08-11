@@ -19,9 +19,10 @@ use crate::{
     db,
     engines::{
         approval_response_route_for_engine, normalize_approval_response_for_engine,
-        trim_action_output_delta_content, validate_engine_sandbox_mode, ApprovalRequestRoute,
-        BrowserAnnotationMetadata, EngineEvent, OutputStream, SandboxPolicy, ThreadScope,
-        TurnAttachment, TurnCompletionStatus, TurnInput, TurnInputItem, STREAMED_DIFF_MAX_CHARS,
+        trim_action_output_delta_content, validate_engine_sandbox_mode, ActionResult,
+        ApprovalRequestRoute, BrowserAnnotationMetadata, EngineEvent, OutputStream, SandboxPolicy,
+        ThreadScope, TurnAttachment, TurnCompletionStatus, TurnInput, TurnInputItem,
+        STREAMED_DIFF_MAX_CHARS,
     },
     models::{
         ActionOutputDto, EngineInfoDto, EngineModelDto, MessageDto, MessageStatusDto,
@@ -213,6 +214,7 @@ struct EventProgress {
     thread_status: Option<ThreadStatusDto>,
     token_usage: Option<(u64, u64)>,
     turn_model_id: Option<String>,
+    finalized_actions: Vec<(String, ActionResult)>,
     blocks_changed: bool,
     force_persist: bool,
 }
@@ -3336,6 +3338,21 @@ async fn process_stream_event(
         &normalized_event,
         max_output_chars,
     );
+    if !progress.finalized_actions.is_empty() {
+        if let Err(error) = run_db(state.db.clone(), {
+            let finalized_actions = progress.finalized_actions.clone();
+            move |db| {
+                for (action_id, result) in finalized_actions {
+                    db::actions::update_action_completed(db, &action_id, &result)?;
+                }
+                Ok(())
+            }
+        })
+        .await
+        {
+            log::warn!("failed to persist action finalization after turn completion: {error}");
+        }
+    }
     let processing_ms = processing_started_at.elapsed().as_millis();
     let record = serde_json::json!({
         "at": chrono::Utc::now().to_rfc3339(),
@@ -3866,6 +3883,68 @@ fn apply_event_to_blocks(
             progress.token_usage = token_usage
                 .as_ref()
                 .map(|usage| (usage.input, usage.output));
+
+            let action_result = match status {
+                TurnCompletionStatus::Completed => ActionResult {
+                    success: true,
+                    output: None,
+                    error: None,
+                    diff: None,
+                    duration_ms: 0,
+                },
+                TurnCompletionStatus::Interrupted => ActionResult {
+                    success: false,
+                    output: None,
+                    error: Some(
+                        "Action did not report completion before the turn was interrupted."
+                            .to_string(),
+                    ),
+                    diff: None,
+                    duration_ms: 0,
+                },
+                TurnCompletionStatus::Failed => ActionResult {
+                    success: false,
+                    output: None,
+                    error: Some(
+                        "Action did not report completion because the turn failed.".to_string(),
+                    ),
+                    diff: None,
+                    duration_ms: 0,
+                },
+            };
+
+            for block in blocks.iter_mut() {
+                let ContentBlock::Action {
+                    action_id,
+                    status,
+                    result,
+                    ..
+                } = block
+                else {
+                    continue;
+                };
+                if status != "running" && status != "pending" {
+                    continue;
+                }
+
+                *status = if action_result.success {
+                    "done"
+                } else {
+                    "error"
+                }
+                .to_string();
+                *result = (!action_result.success).then(|| ActionBlockResult {
+                    success: action_result.success,
+                    output: action_result.output.clone(),
+                    error: action_result.error.clone(),
+                    diff: action_result.diff.clone(),
+                    duration_ms: action_result.duration_ms,
+                });
+                progress
+                    .finalized_actions
+                    .push((action_id.clone(), action_result.clone()));
+                progress.blocks_changed = true;
+            }
         }
         EngineEvent::TextDelta { content } => {
             progress.blocks_changed = append_text_delta(blocks, content);
@@ -5579,6 +5658,52 @@ mod tests {
             }
             other => panic!("expected action block, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn turn_completion_finalizes_unfinished_actions() {
+        let mut blocks = Vec::new();
+        let mut action_index = HashMap::new();
+        let mut approval_index = HashMap::new();
+
+        let started = apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::ActionStarted {
+                action_id: "web-search-1".to_string(),
+                engine_action_id: Some("item-1".to_string()),
+                action_type: crate::engines::events::ActionType::Search,
+                summary: "Web search".to_string(),
+                details: serde_json::json!({}),
+            },
+            1000,
+        );
+        assert!(started.blocks_changed);
+
+        let progress = apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::TurnCompleted {
+                token_usage: None,
+                status: TurnCompletionStatus::Completed,
+            },
+            1000,
+        );
+
+        assert!(progress.blocks_changed);
+        assert_eq!(progress.finalized_actions.len(), 1);
+        assert_eq!(progress.finalized_actions[0].0, "web-search-1");
+        assert!(progress.finalized_actions[0].1.success);
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::Action {
+                status,
+                result: None,
+                ..
+            } if status == "done"
+        ));
     }
 
     #[test]
