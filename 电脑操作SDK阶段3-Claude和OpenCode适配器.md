@@ -25,7 +25,7 @@
 
 | 清单编号 | 本阶段处理方式 | 阶段开始结论 |
 | --- | --- | --- |
-| TODO-006 | 重新运行 Windows Rust 测试宿主 | 仍被 `0xc0000139 / STATUS_ENTRYPOINT_NOT_FOUND` 阻断，转由阶段 5 CI/构建环境处理 |
+| TODO-006 | 重新运行 Windows Rust 测试宿主并定位入口点 | 阶段开始时复现；收尾阶段定位为测试宿主缺少 Tauri Common Controls v6 资源清单，并在本阶段补充测试宿主资源链接 |
 | TODO-011 | Claude sidecar 自定义工具转发 | 本阶段实现并完成 sidecar 协议测试 |
 | TODO-012 | OpenCode 自定义工具、隔离目录和进程配置 | 本阶段实现并完成静态契约测试 |
 | TODO-013 | OpenCode 图片 tool-result 合同 | 本阶段保留结构化回传代码；真实 OpenCode 图片运行证据仍待回归 |
@@ -84,31 +84,35 @@ Claude sidecar mock 增加 SDK `tool` / `createSdkMcpServer` 模拟，并新增�
 | 验证项 | 实际过程 | 结果 |
 | --- | --- | --- |
 | Rust 静态编译 | 在 `src-tauri` 运行 Rust 静态检查命令 | 通过；仅有仓库既有 warning 和本阶段 `run_dir` 未读取 warning |
+| Windows 测试宿主入口点 | 复现 `agent_workspace_lib-*.exe` 启动错误，检查其导入和系统 `comctl32.dll` 导出，再补充 `resource.lib` 测试链接 | 原因已确认：`muda` 引入 `TaskDialogIndirect`，测试宿主未带 Common Controls v6 清单；修复后 `--list` 正常退出并列出 559 个测试 |
+| Windows 正式程序清单 | 构建 `Panes.exe` 并提取 PE manifest | 通过；正式程序包含 `Microsoft.Windows.Common-Controls` 6.0 清单 |
+| Rust 全量单元测试 | 运行 Windows Rust 单元测试集合 | 测试宿主启动问题已消失；548 个通过、11 个既有环境敏感用例失败，失败项与本阶段电脑操作代码无关，另列 TODO-023 |
 | Claude sidecar 语法 | 对 `src-tauri/sidecar/claude-agent-sdk-server.mjs` 运行脚本语法检查 | 通过 |
 | Claude sidecar 协议测试 | 运行 `vitest run tests/claudeAgentSidecar.test.ts` | 18 个通过、1 个平台跳过 |
 | Claude SDK API 契约 | 使用已安装 `@anthropic-ai/claude-agent-sdk@0.3.220` 的导出和类型声明核对 `tool`、`createSdkMcpServer`、Zod raw shape | 通过 |
 | OpenCode 工具加载契约 | 检查本机当前 OpenCode 可执行文件，确认其加载 `tools/*.{js,ts}`，工具对象使用 `description`、`parameters`、`execute` | 通过静态契约核对 |
-| OpenCode 工具源生成 | 增加生成路径、一次性 token、工具命名导出和回调入口单元测试 | 代码已覆盖；Windows 测试宿主无法启动 |
-| Windows Rust 单元测试宿主 | 阶段开始重试和阶段实现后重试 | 阻断：`0xc0000139 / STATUS_ENTRYPOINT_NOT_FOUND`，不是测试断言失败 |
+| OpenCode 工具源生成 | 增加生成路径、一次性 token、工具命名导出和回调入口单元测试 | 代码已覆盖；相关测试宿主已恢复启动 |
+| Windows Rust 单元测试宿主 | 阶段开始重试、定位导入入口、补充测试宿主资源清单并重新运行 | 已修复：原错误为 `0xc0000139 / STATUS_ENTRYPOINT_NOT_FOUND`；修复后宿主可启动，未再出现入口点错误 |
 | OpenCode 真实图片回传 | 尚未启动真实 provider/业务窗口执行截图工具 | 未执行，保留 TODO-013 |
 | 全部前端测试 | 运行完整 Vitest 集合 | 76 个测试文件通过，1 个既有 `pt-BR`/`en` 文案键对齐测试失败，与本阶段改动无关 |
 
 ## 6. 未完成项和风险
 
-1. TODO-006：Windows 测试宿主仍缺系统入口点，已明确转阶段 5 CI/构建环境处理。
+1. TODO-006：已定位并修复 Windows 测试宿主入口点问题；正式程序和测试宿主均已验证包含 Common Controls v6 清单。
 2. TODO-013：OpenCode 图片 tool-result 只完成结构化回传入口和静态契约核对，尚未有当前 OpenCode 版本的真实图片结果证据。
 3. TODO-011、TODO-012：已完成代码适配，但尚未在 Panes GUI 中使用真实 Claude/OpenCode 会话完成授权、窗口动作和进程回收；对应实机证据留到阶段 5。
 4. 旧设置页仍可能读取或生成外部 broker/exe 兼容字段；本阶段没有把旧 UI 清理冒充为适配器完成，阶段 4 负责迁移。
 
 ## 7. 阶段收尾清单回看
 
-收尾再次回看 TODO-006、TODO-011、TODO-012、TODO-013、TODO-018：
+收尾再次回看 TODO-006、TODO-011、TODO-012、TODO-013、TODO-018、TODO-023：
 
-- TODO-006 已重新执行，结果不变，状态保持“阻断”，计划改为阶段 5 CI/构建环境处理。
+- TODO-006 已重新执行并定位：`muda` 的 `TaskDialogIndirect` 依赖要求 Common Controls v6；测试宿主原先没有 Tauri 资源清单，现已补充测试专用资源链接并验证 `--list` 正常。
 - TODO-011 已有 sidecar 协议和 Rust 转发代码证据，但真实 GUI 授权仍待阶段 5，因此状态改为“待回归”。
 - TODO-012 已有 OpenCode 隔离目录、进程级配置、回调和工具源生成代码证据，但真实 server 调用仍待阶段 5，因此状态改为“待回归”。
 - TODO-013 没有真实图片结果，状态保持“待回归”。
 - TODO-018 仅完成服务绑定和引擎字段隔离，三引擎并行实机验证留待阶段 5，状态保持“未完成”。
+- TODO-023 已登记 Windows 全量单元测试中剩余的 11 项环境敏感失败，状态改为“待回归”；这些失败不影响测试宿主启动，也不涉及本阶段电脑操作代码。
 
 ## 8. 下一阶段入口
 

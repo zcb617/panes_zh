@@ -59,6 +59,10 @@ use tauri::{
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use terminal::TerminalManager;
 
+#[cfg(all(test, target_os = "windows"))]
+#[link(name = "resource", kind = "static")]
+unsafe extern "C" {}
+
 pub fn maybe_handle_cli_subcommand() -> anyhow::Result<bool> {
     if commands::computer_control::maybe_handle_cli_subcommand()? {
         return Ok(true);

@@ -379,7 +379,7 @@ Windows 官方预编译 SDK 已完成“加载 → ABI → runtime 创建 → �
 
 - 实际改动：每个 OpenCode server 生成独立应用数据临时目录、`.opencode/tools/panes_computer_control.ts` 和随机令牌；进程使用 `OPENCODE_CONFIG_DIR`/`XDG_CONFIG_HOME`，工具通过 `127.0.0.1` 回调进入统一服务。
 - 实际步骤：检查本机当前 OpenCode 可执行文件的工具加载契约，确认 `tools/*.{js,ts}`、`description`、`parameters` 和 `execute` 入口；增加工具源生成和工具名归一化测试。
-- 实际结果：静态契约和 Rust 编译检查通过；Windows 测试宿主运行阶段仍以 `0xc0000139 / STATUS_ENTRYPOINT_NOT_FOUND` 阻断，未把单元测试宿主结果写成通过。
+- 实际结果：静态契约和 Rust 编译检查通过；Windows 测试宿主入口点问题已在本阶段定位并修复，相关工具源测试可正常启动。
 - 最终状态：`代码与静态契约完成，真实 OpenCode 会话待回归`。
 
 ### CT-G8-05 / TODO-013：引擎隔离和 OpenCode 图片结果
@@ -388,8 +388,16 @@ Windows 官方预编译 SDK 已完成“加载 → ABI → runtime 创建 → �
 - 实际结果：代码入口已具备；本阶段未启动真实 OpenCode provider、截图工具和业务窗口，未取得图片 tool-result 证据。
 - 最终状态：`未执行，转阶段 5 全引擎视觉回归`。
 
+### CT-G8-06 / TODO-006：Windows 测试宿主入口点定位与修复
+
+- 实际步骤：直接启动 `agent_workspace_lib-*.exe --list` 复现 `0xc0000139`；检查 PE 导入，确认测试宿主引用 `comctl32.dll!TaskDialogIndirect`；检查系统 DLL，确认当前系统 DLL 不导出该入口；检查 Tauri 构建输出，确认 Common Controls v6 清单只链接到正式程序。
+- 实际改动：在 Windows 测试构建中复用 Tauri 生成的 `resource.lib`，并通过测试专用静态链接把 Common Controls v6 清单带入库单元测试宿主；正式程序仍使用原有 bin 资源链接，避免重复链接。
+- 实际结果：修复后 `agent_workspace_lib-*.exe --list` 退出码为 0，列出 559 个测试；提取到的 manifest 包含 `Microsoft.Windows.Common-Controls` 6.0。正式 `Panes.exe` 构建通过且包含同一清单。
+- 补充结果：Windows Rust 全量单元测试已能启动，548 个通过、11 个既有环境敏感用例失败；这些失败不涉及本阶段电脑操作代码，登记为 TODO-023。
+- 最终状态：`入口点阻断已修复，剩余全量测试环境项待回归`。
+
 ### 阶段 3 总结
 
-Claude 和 OpenCode 已接入同一个 Panes 电脑操作服务，旧 Claude 外部 MCP 配置不再被 sidecar 使用；当前证据限于 Rust 静态检查、sidecar 协议测试和 OpenCode 可执行文件静态契约核对。真实授权窗口、目标应用变化、OpenCode 图片结果、Windows 测试宿主和三引擎并行回收仍未完成。
+Claude 和 OpenCode 已接入同一个 Panes 电脑操作服务，旧 Claude 外部 MCP 配置不再被 sidecar 使用；Windows 测试宿主入口点问题已在本阶段定位并修复。当前仍缺真实授权窗口、目标应用变化、OpenCode 图片结果和三引擎并行回收证据。
 
 补充：完整前端 Vitest 集合本次为 76 个测试文件通过、1 个既有 `pt-BR`/`en` 文案键对齐测试失败；该失败未涉及本阶段文件。
