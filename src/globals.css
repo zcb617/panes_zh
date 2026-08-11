@@ -9266,9 +9266,11 @@ button.chat-context-section:hover {
 }
 
 .slash-menu-item-name {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 42%;
+  /* flex: 0 1 auto; */
+  /* min-width: 0; */
+  /* max-width: 42%; */
+  flex: 0 0 auto;
+  min-width: max-content;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
