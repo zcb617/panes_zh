@@ -13,6 +13,14 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+export function tool(name, description, inputSchema, handler) {
+  return { name, description, inputSchema, handler };
+}
+
+export function createSdkMcpServer({ name, version, tools }) {
+  return { name, version, tools };
+}
+
 function defaultResult(partial = {}) {
   return {
     type: "result",
@@ -54,7 +62,16 @@ export function query({ options }) {
           permissionMode: options?.permissionMode,
           settings: options?.settings,
           allowedTools: options?.allowedTools,
-          mcpServers: options?.mcpServers,
+          mcpServers: Object.fromEntries(
+            Object.entries(options?.mcpServers ?? {}).map(([name, server]) => [
+              name,
+              {
+                name: server?.name,
+                version: server?.version,
+                tools: server?.tools?.map((candidate) => candidate.name),
+              },
+            ]),
+          ),
         }),
       });
     }
@@ -92,6 +109,23 @@ export function query({ options }) {
         observations.push({
           type: "permission_result",
           result: clone(permission),
+        });
+        continue;
+      }
+
+      if (step.type === "computer_control_tool") {
+        const server = options?.mcpServers?.["panes-computer-control"];
+        const definition = server?.tools?.find((candidate) => candidate.name === step.toolName);
+        if (!definition) {
+          throw new Error(`Computer control tool not found: ${step.toolName}`);
+        }
+        const result = await definition.handler(clone(step.input ?? {}), {
+          signal: new AbortController().signal,
+          toolUseID: step.callId ?? `mock-call-${step.toolName}`,
+        });
+        observations.push({
+          type: "computer_control_result",
+          result: clone(result),
         });
         continue;
       }

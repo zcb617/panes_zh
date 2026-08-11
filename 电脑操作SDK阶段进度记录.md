@@ -15,6 +15,7 @@
 1. [阶段 0：官方预编译 SDK Windows Spike](<电脑操作SDK阶段0-官方Windows预编译包Spike.md>)
 2. [阶段 1：Panes 正式运行时与资源接入](<电脑操作SDK阶段1-Panes正式运行时与资源接入.md>)
 3. [阶段 2：统一服务和 Codex 工具接入（代码完成，实机验收待后续）](<电脑操作SDK阶段2-统一服务和Codex工具接入.md>)
+4. [阶段 3：Claude 和 OpenCode 适配器（代码完成，实机验收待后续）](<电脑操作SDK阶段3-Claude和OpenCode适配器.md>)
 
 ## 后续阶段命名规则
 

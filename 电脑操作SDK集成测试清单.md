@@ -22,7 +22,7 @@ Panes 调用 CUA Driver SDK
 
 测试结论必须同时包含：业务结果、授权结果、SDK 调用结果、窗口实际变化、进程状态和日志关联关系。只看到接口返回成功，不能判定电脑操作成功。
 
-当前执行状态：阶段 0、阶段 1、阶段 2 已有分阶段执行记录；Windows GUI 实机、Claude/OpenCode、设置页迁移和跨平台验收仍未完成。跨阶段未完成事项以《[电脑操作 SDK 未完成清单](<电脑操作SDK未完成清单.md>)》为准。
+当前执行状态：阶段 0、阶段 1、阶段 2、阶段 3 已有分阶段执行记录；Windows GUI 实机、Claude/OpenCode 真实会话、设置页迁移和跨平台验收仍未完成。跨阶段未完成事项以《[电脑操作 SDK 未完成清单](<电脑操作SDK未完成清单.md>)》为准。
 
 阶段开始和收尾必须回看该主清单：属于当前阶段且已经具备验证条件的事项，不得继续留在“后续回归”，必须在当前阶段补测并把过程、结果和证据写回本清单。
 
@@ -361,3 +361,35 @@ Windows 官方预编译 SDK 已完成“加载 → ABI → runtime 创建 → �
 ### 阶段 2 总结
 
 统一服务、授权状态和 Codex 动态工具调用链已经完成并通过 Rust 静态检查；Windows GUI、设置页、授权弹窗和 Notepad 点击/输入/截图闭环必须在后续设置页迁移阶段继续执行，不能以本阶段代码构建结果替代。
+
+## 11. 阶段 3 已执行记录：Claude 和 OpenCode 适配器
+
+执行时间：2026-08-11（Asia/Hong_Kong）
+
+执行分支：`codex/computer-control-sdk`，工作树：`.worktree/computer-control-sdk`
+
+### CT-G8-03：Claude 进程内自定义工具转发
+
+- 实际改动：sidecar 使用 Claude Agent SDK 的 `tool` 和 `createSdkMcpServer` 注册 Panes 工具；Rust 收到 `computer_control_tool_call` 后调用统一 `ComputerControlService`，再发送 `computer_control_tool_result`。
+- 实际步骤：使用 sidecar mock 发起 `click` 工具调用，测试桥返回带文本 content 的结果；同时检查工具命名、threadId、turnId 和 callId。
+- 实际结果：sidecar 协议测试 18 个通过、1 个平台跳过。
+- 最终状态：`代码与协议通过，真实 GUI 会话待回归`。
+
+### CT-G8-04：OpenCode 专属工具目录和本机回调
+
+- 实际改动：每个 OpenCode server 生成独立应用数据临时目录、`.opencode/tools/panes_computer_control.ts` 和随机令牌；进程使用 `OPENCODE_CONFIG_DIR`/`XDG_CONFIG_HOME`，工具通过 `127.0.0.1` 回调进入统一服务。
+- 实际步骤：检查本机当前 OpenCode 可执行文件的工具加载契约，确认 `tools/*.{js,ts}`、`description`、`parameters` 和 `execute` 入口；增加工具源生成和工具名归一化测试。
+- 实际结果：静态契约和 Rust 编译检查通过；Windows 测试宿主运行阶段仍以 `0xc0000139 / STATUS_ENTRYPOINT_NOT_FOUND` 阻断，未把单元测试宿主结果写成通过。
+- 最终状态：`代码与静态契约完成，真实 OpenCode 会话待回归`。
+
+### CT-G8-05 / TODO-013：引擎隔离和 OpenCode 图片结果
+
+- 实际改动：授权 grant key 增加引擎标识；Claude 结果映射保留文本和图片 content；OpenCode 回调原样保留 CUA content。
+- 实际结果：代码入口已具备；本阶段未启动真实 OpenCode provider、截图工具和业务窗口，未取得图片 tool-result 证据。
+- 最终状态：`未执行，转阶段 5 全引擎视觉回归`。
+
+### 阶段 3 总结
+
+Claude 和 OpenCode 已接入同一个 Panes 电脑操作服务，旧 Claude 外部 MCP 配置不再被 sidecar 使用；当前证据限于 Rust 静态检查、sidecar 协议测试和 OpenCode 可执行文件静态契约核对。真实授权窗口、目标应用变化、OpenCode 图片结果、Windows 测试宿主和三引擎并行回收仍未完成。
+
+补充：完整前端 Vitest 集合本次为 76 个测试文件通过、1 个既有 `pt-BR`/`en` 文案键对齐测试失败；该失败未涉及本阶段文件。

@@ -363,20 +363,20 @@ Panes 退出时执行同一套清理，但即使异常退出也不会留下 `--p
 - 验证 Windows UIA、屏幕捕获、输入依赖能被官方 archive 正确带起。
 - Spike 未通过时停止，不进入 UI 和引擎适配器开发。
 
-### 阶段 1：统一服务和 Codex
+### 阶段 1：统一服务和 Codex（代码完成，实机闭环待后续）
 
-当前阶段已完成：官方 Windows 资源已纳入 Tauri resources，Panes 主进程已有惰性 CUA runtime、统一电脑操作服务、按线程/回合/目标隔离的临时授权状态、Codex 新线程动态工具注册和 `item/tool/call` 回传。设置页产品迁移、Claude/OpenCode 适配和 Windows 实机闭环仍未完成。
+当前阶段已完成：官方 Windows 资源已纳入 Tauri resources，Panes 主进程已有惰性 CUA runtime、统一电脑操作服务、按线程/回合/目标隔离的临时授权状态、Codex 新线程动态工具注册和 `item/tool/call` 回传。设置页产品迁移和 Windows 实机闭环仍未完成。
 
 - 已新建 `ComputerControlService`、授权状态机和统一工具目录。
 - 已加入 Codex 新线程 `dynamicTools` 注册及 `item/tool/call` 回传。
 - 已实现授权事件、拒绝、撤销、超时、任务取消和 Panes 退出清理。
 - 低风险应用点击、输入和截图实机闭环：未执行，待设置页迁移后验收。
 
-### 阶段 2：Claude 和 OpenCode 适配器
+### 阶段 2：Claude 和 OpenCode 适配器（代码完成，真实图片和 GUI 回归待后续）
 
-- Claude sidecar 改为 SDK 自定义工具转发。
-- OpenCode 改为 Panes 专属运行目录和进程级配置。
-- 完成 OpenCode 图片 tool-result 合同测试；测试不通过不得标记为完成。
+- Claude sidecar 已改为 SDK 自定义工具转发，调用统一 `ComputerControlService`。
+- OpenCode 已改为 Panes 专属运行目录、进程级配置和一次性本机回调。
+- OpenCode 图片 tool-result 只完成结构化回传入口和静态契约核对，真实图片合同测试尚未执行，因此不能宣称视觉闭环完成。
 
 ### 阶段 3：设置页和旧实现迁移
 

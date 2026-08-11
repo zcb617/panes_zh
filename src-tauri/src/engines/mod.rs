@@ -485,7 +485,9 @@ impl EngineManager {
     }
 
     pub fn set_computer_control_service(&self, service: Arc<ComputerControlService>) {
-        self.codex.set_computer_control_service(service);
+        self.codex.set_computer_control_service(Arc::clone(&service));
+        self.claude.set_computer_control_service(Arc::clone(&service));
+        self.opencode.set_computer_control_service(service);
     }
 
     async fn load_codex_models(&self) -> Vec<ModelInfo> {

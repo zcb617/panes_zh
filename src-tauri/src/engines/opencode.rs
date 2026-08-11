@@ -18,7 +18,8 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::TcpListener as AsyncTcpListener,
     process::{Child, Command},
     sync::{broadcast, mpsc, Mutex},
     time::{sleep, timeout},
@@ -29,7 +30,7 @@ use uuid::Uuid;
 use crate::models::{
     OpenCodeAgentDto, OpenCodeCommandDto, OpenCodeMcpServerDto, OpenCodeRuntimeCatalogDto,
 };
-use crate::{process_utils, runtime_env};
+use crate::{computer_control_service::ComputerControlService, process_utils, runtime_env};
 
 use super::{
     normalize_approval_response_for_engine, trim_action_output_delta_content, ActionResult,
@@ -56,6 +57,7 @@ static LAST_OPENCODE_MESSAGE_SORT_VALUE: AtomicU64 = AtomicU64::new(0);
 pub struct OpenCodeEngine {
     state: Arc<Mutex<OpenCodeState>>,
     http: reqwest::Client,
+    computer_control_service: Arc<Mutex<Option<Arc<ComputerControlService>>>>,
 }
 
 #[derive(Default)]
@@ -83,11 +85,14 @@ struct OpenCodeServer {
     child: Mutex<Child>,
     event_bus: broadcast::Sender<Arc<OpenCodeBusEvent>>,
     pump_cancel: CancellationToken,
+    callback_cancel: CancellationToken,
+    run_dir: PathBuf,
 }
 
 impl Drop for OpenCodeServer {
     fn drop(&mut self) {
         self.pump_cancel.cancel();
+        self.callback_cancel.cancel();
     }
 }
 
@@ -597,6 +602,7 @@ impl Default for OpenCodeEngine {
         Self {
             state: Arc::new(Mutex::new(OpenCodeState::default())),
             http: reqwest::Client::new(),
+            computer_control_service: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -987,12 +993,18 @@ impl Engine for OpenCodeEngine {
 }
 
 impl OpenCodeEngine {
+    pub fn set_computer_control_service(&self, service: Arc<ComputerControlService>) {
+        let mut current = self.computer_control_service.blocking_lock();
+        *current = Some(service);
+    }
+
     async fn ensure_server(&self, cwd: &str) -> Result<Arc<OpenCodeServer>> {
         if let Some(server) = self.state.lock().await.servers.get(cwd).cloned() {
             return Ok(server);
         }
 
-        let created = Arc::new(start_server(cwd).await?);
+        let service = self.computer_control_service.lock().await.clone();
+        let created = Arc::new(start_server(cwd, service).await?);
         let existing = {
             let mut state = self.state.lock().await;
             if let Some(server) = state.servers.get(cwd).cloned() {
@@ -2041,6 +2053,14 @@ impl OpenCodeServer {
         if let Err(error) = child.kill().await {
             log::debug!("failed to stop OpenCode server process: {error}");
         }
+        if let Err(error) = std::fs::remove_dir_all(&self.run_dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::debug!(
+                    "failed to remove OpenCode computer-control runtime directory {}: {error}",
+                    self.run_dir.display()
+                );
+            }
+        }
     }
 }
 
@@ -2450,10 +2470,224 @@ fn session_wildcard_permission_action(permission: Option<&Value>) -> Option<&str
     })
 }
 
-async fn start_server(cwd: &str) -> Result<OpenCodeServer> {
+fn write_opencode_computer_control_tool(
+    run_dir: &Path,
+    callback_url: &str,
+    callback_token: &str,
+) -> Result<()> {
+    let tools_dir = run_dir.join(".opencode").join("tools");
+    std::fs::create_dir_all(&tools_dir)
+        .with_context(|| format!("failed to create OpenCode tools directory {}", tools_dir.display()))?;
+
+    let endpoint = serde_json::to_string(callback_url)?;
+    let token = serde_json::to_string(callback_token)?;
+    let schema = r#"{"type":"object","additionalProperties":true}"#;
+    let mut source = format!(
+        "const endpoint = {endpoint};\nconst token = {token};\nconst schema = {schema};\nasync function invoke(tool, args, context) {{\n  const response = await fetch(endpoint, {{\n    method: \"POST\",\n    headers: {{ \"content-type\": \"application/json\", \"x-panes-computer-control-token\": token }},\n    body: JSON.stringify({{\n      tool,\n      arguments: args ?? {{}},\n      threadId: context?.sessionID ?? context?.sessionId ?? context?.session_id,\n      turnId: context?.messageID ?? context?.messageId ?? context?.callID ?? context?.callId,\n      callId: context?.callID ?? context?.callId,\n    }}),\n  }});\n  const result = await response.json();\n  if (!response.ok) throw new Error(result?.error || `Panes computer control callback failed (HTTP ${{response.status}})`);\n  return result;\n}}\n",
+    );
+
+    let mut tool_specs = ComputerControlService::dynamic_tools_spec()[0]["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for spec in tool_specs.drain(..) {
+        let Some(name) = spec["name"].as_str() else {
+            continue;
+        };
+        let description = serde_json::to_string(
+            spec["description"].as_str().unwrap_or("Panes 电脑操作工具"),
+        )?;
+        let tool_name = serde_json::to_string(name)?;
+        source.push_str(&format!(
+            "export const {name} = {{ description: {description}, parameters: schema, execute: (args, context) => invoke({tool_name}, args, context) }};\n",
+        ));
+    }
+
+    let tool_file = tools_dir.join("panes_computer_control.ts");
+    std::fs::write(&tool_file, source)
+        .with_context(|| format!("failed to write OpenCode tool file {}", tool_file.display()))?;
+    Ok(())
+}
+
+async fn run_opencode_callback_server(
+    listener: AsyncTcpListener,
+    callback_token: String,
+    computer_control_service: Option<Arc<ComputerControlService>>,
+    cancel: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue };
+                let token = callback_token.clone();
+                let service = computer_control_service.clone();
+                tokio::spawn(async move {
+                    handle_opencode_callback(stream, &token, service).await;
+                });
+            }
+        }
+    }
+}
+
+async fn handle_opencode_callback(
+    mut stream: tokio::net::TcpStream,
+    callback_token: &str,
+    computer_control_service: Option<Arc<ComputerControlService>>,
+) {
+    let mut buffer = Vec::with_capacity(4096);
+    let mut chunk = [0_u8; 4096];
+    let header_end = loop {
+        let read = match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => read,
+        };
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len() > 1024 * 1024 {
+            write_opencode_http_response(&mut stream, 413, json!({"error":"request too large"})).await;
+            return;
+        }
+        if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index;
+        }
+    };
+
+    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    let mut lines = headers.lines();
+    let request_line = lines.next().unwrap_or_default();
+    let mut auth_token = None;
+    let mut content_length = 0_usize;
+    for line in lines {
+        if let Some((key, value)) = line.split_once(':') {
+            match key.trim().to_ascii_lowercase().as_str() {
+                "x-panes-computer-control-token" => auth_token = Some(value.trim().to_string()),
+                "content-length" => content_length = value.trim().parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+    }
+    if !request_line.starts_with("POST /invoke ") || auth_token.as_deref() != Some(callback_token) {
+        write_opencode_http_response(&mut stream, 401, json!({"error":"unauthorized"})).await;
+        return;
+    }
+
+    let body_start = header_end + 4;
+    while buffer.len().saturating_sub(body_start) < content_length {
+        let read = match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => read,
+        };
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.len() > 1024 * 1024 {
+            write_opencode_http_response(&mut stream, 413, json!({"error":"request too large"})).await;
+            return;
+        }
+    }
+
+    let request: Value = match serde_json::from_slice(&buffer[body_start..body_start + content_length]) {
+        Ok(value) => value,
+        Err(error) => {
+            write_opencode_http_response(&mut stream, 400, json!({"error": error.to_string()})).await;
+            return;
+        }
+    };
+    let Some(service) = computer_control_service else {
+        write_opencode_http_response(
+            &mut stream,
+            503,
+            json!({"error":"Panes 电脑操作服务尚未绑定到 OpenCode 引擎"}),
+        )
+        .await;
+        return;
+    };
+    let tool = request
+        .get("tool")
+        .and_then(Value::as_str)
+        .map(normalize_opencode_tool_name)
+        .unwrap_or_default();
+    let thread_id = request
+        .get("threadId")
+        .or_else(|| request.get("sessionId"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let turn_id = request
+        .get("turnId")
+        .or_else(|| request.get("callId"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let call_id = request
+        .get("callId")
+        .and_then(Value::as_str)
+        .unwrap_or(turn_id);
+    let arguments = request.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let result = service
+        .invoke_for_engine(
+            "opencode",
+            thread_id,
+            turn_id,
+            tool,
+            call_id,
+            arguments,
+            CancellationToken::new(),
+        )
+        .await;
+    match result {
+        Ok(value) => write_opencode_http_response(&mut stream, 200, value).await,
+        Err(error) => {
+            write_opencode_http_response(
+                &mut stream,
+                200,
+                json!({
+                    "isError": true,
+                    "error": error,
+                    "content": [{"type":"text","text": error}]
+                }),
+            )
+            .await;
+        }
+    }
+}
+
+fn normalize_opencode_tool_name(tool: &str) -> &str {
+    tool.strip_prefix("panes_computer_control_").unwrap_or(tool)
+}
+
+async fn write_opencode_http_response(stream: &mut tokio::net::TcpStream, status: u16, body: Value) {
+    let payload = serde_json::to_vec(&body).unwrap_or_else(|_| b"{\"error\":\"serialization failed\"}".to_vec());
+    let status_text = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        413 => "Payload Too Large",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
+    let response = format!(
+        "HTTP/1.1 {status} {status_text}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        payload.len()
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.write_all(&payload).await;
+}
+
+async fn start_server(
+    cwd: &str,
+    computer_control_service: Option<Arc<ComputerControlService>>,
+) -> Result<OpenCodeServer> {
     let executable = resolve_opencode_executable().context("`opencode` executable not found")?;
     let port = allocate_loopback_port()?;
     let password = Uuid::new_v4().to_string();
+    let callback_token = Uuid::new_v4().to_string();
+    let run_dir = runtime_env::app_data_dir()
+        .join("computer-control")
+        .join("opencode-runs")
+        .join(Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&run_dir)
+        .with_context(|| format!("failed to create OpenCode runtime directory {}", run_dir.display()))?;
+    let callback_listener = AsyncTcpListener::bind((DEFAULT_HOST, 0)).await?;
+    let callback_url = format!("http://{DEFAULT_HOST}:{}/invoke", callback_listener.local_addr()?.port());
+    write_opencode_computer_control_tool(&run_dir, &callback_url, &callback_token)?;
+    let callback_cancel = CancellationToken::new();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<String>();
 
     let mut command = Command::new(&executable);
@@ -2467,6 +2701,8 @@ async fn start_server(cwd: &str) -> Result<OpenCodeServer> {
         .arg(port.to_string())
         .current_dir(cwd)
         .env("OPENCODE_SERVER_PASSWORD", &password)
+        .env("OPENCODE_CONFIG_DIR", run_dir.join(".opencode"))
+        .env("XDG_CONFIG_HOME", &run_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2531,6 +2767,8 @@ async fn start_server(cwd: &str) -> Result<OpenCodeServer> {
         child: Mutex::new(child),
         event_bus: event_bus.clone(),
         pump_cancel: pump_cancel.clone(),
+        callback_cancel: callback_cancel.clone(),
+        run_dir,
     };
 
     wait_for_server_health(&server).await?;
@@ -2541,6 +2779,13 @@ async fn start_server(cwd: &str) -> Result<OpenCodeServer> {
     tokio::spawn(async move {
         run_event_pump(pump_url, pump_password, pump_http, event_bus, pump_cancel).await;
     });
+
+    tokio::spawn(run_opencode_callback_server(
+        callback_listener,
+        callback_token,
+        computer_control_service,
+        callback_cancel,
+    ));
 
     Ok(server)
 }
@@ -3491,6 +3736,42 @@ opencode/gpt-5-nano
             file_url("/tmp/panes test/file.txt"),
             "file:///tmp/panes%20test/file.txt"
         );
+    }
+
+    #[test]
+    fn generated_computer_control_tools_use_isolated_callback_contract() {
+        let run_dir = std::env::temp_dir().join(format!(
+            "panes-opencode-tools-test-{}",
+            Uuid::new_v4()
+        ));
+        write_opencode_computer_control_tool(
+            &run_dir,
+            "http://127.0.0.1:45678/invoke",
+            "one-time-token",
+        )
+        .expect("OpenCode tool source should be generated");
+
+        let tool_file = run_dir
+            .join(".opencode")
+            .join("tools")
+            .join("panes_computer_control.ts");
+        let source = std::fs::read_to_string(&tool_file).expect("tool source should exist");
+        assert!(source.contains("x-panes-computer-control-token"));
+        assert!(source.contains("http://127.0.0.1:45678/invoke"));
+        assert!(source.contains("export const click"));
+        assert!(source.contains("export const get_screen_size"));
+        assert!(source.contains("export const clipboard_write"));
+
+        let _ = std::fs::remove_dir_all(run_dir);
+    }
+
+    #[test]
+    fn opencode_tool_names_are_normalized_before_authorization() {
+        assert_eq!(
+            normalize_opencode_tool_name("panes_computer_control_click"),
+            "click"
+        );
+        assert_eq!(normalize_opencode_tool_name("click"), "click");
     }
 
     #[test]

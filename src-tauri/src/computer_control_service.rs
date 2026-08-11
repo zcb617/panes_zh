@@ -473,13 +473,36 @@ impl ComputerControlService {
         arguments: Value,
         cancellation: CancellationToken,
     ) -> Result<Value, String> {
+        self.invoke_for_engine(
+            "codex",
+            thread_id,
+            turn_id,
+            tool,
+            call_id,
+            arguments,
+            cancellation,
+        )
+        .await
+    }
+
+    pub async fn invoke_for_engine(
+        &self,
+        agent: &str,
+        thread_id: &str,
+        turn_id: &str,
+        tool: &str,
+        call_id: &str,
+        arguments: Value,
+        cancellation: CancellationToken,
+    ) -> Result<Value, String> {
+        let agent = agent.trim();
         let thread_id = thread_id.trim();
         let turn_id = turn_id.trim();
         let tool = tool.trim();
-        if thread_id.is_empty() || turn_id.is_empty() {
+        if agent.is_empty() || thread_id.is_empty() || turn_id.is_empty() {
             return Err(service_error(
                 "invalid_request",
-                "Codex 电脑操作请求缺少 threadId 或 turnId",
+                "电脑操作请求缺少 agent、threadId 或 turnId",
             ));
         }
         if !Self::is_reviewed_tool(tool) {
@@ -506,9 +529,13 @@ impl ComputerControlService {
             ));
         }
         let operation = operation_kind(tool);
-        let grant_key = format!("{thread_id}\n{turn_id}\n{}\n{operation}", target.key);
+        let grant_key = format!(
+            "{thread_id}\n{turn_id}\n{agent}\n{}\n{operation}",
+            target.key
+        );
         if !self.has_grant(&grant_key).await {
             self.request_authorization(
+                agent,
                 thread_id,
                 turn_id,
                 tool,
@@ -527,6 +554,7 @@ impl ComputerControlService {
 
     async fn request_authorization(
         &self,
+        agent: &str,
         thread_id: &str,
         turn_id: &str,
         tool: &str,
@@ -551,7 +579,7 @@ impl ComputerControlService {
 
         let request = ComputerControlAuthorizationRequest {
             request_id: request_id.clone(),
-            agent: "codex".to_string(),
+            agent: agent.to_string(),
             tool: tool.to_string(),
             call_id: call_id.to_string(),
             application: target.display.clone(),

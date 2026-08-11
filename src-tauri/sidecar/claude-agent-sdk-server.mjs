@@ -30,6 +30,10 @@ if (
 }
 
 let queryFn;
+let toolFn;
+let createSdkMcpServerFn;
+let z;
+let sdkEntryPath = null;
 let sdkVersion = null;
 let bundledClaudeCodeVersion = null;
 const sdkModuleSpecifier = process.env.CLAUDE_AGENT_SDK_MODULE;
@@ -38,13 +42,36 @@ try {
     ? await import(sdkModuleSpecifier)
     : await import("@anthropic-ai/claude-agent-sdk");
   queryFn = sdk.query;
+  toolFn = sdk.tool;
+  createSdkMcpServerFn = sdk.createSdkMcpServer;
+  sdkEntryPath = sdkModuleSpecifier
+    ? sdkModuleSpecifier.startsWith("file:")
+      ? fileURLToPath(sdkModuleSpecifier)
+      : sdkModuleSpecifier
+    : fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"));
+  z = sdk.z;
+  try {
+    if (!z && sdkEntryPath) {
+      const urlModule = await import(
+        String.fromCharCode(
+          110, 111, 100, 101, 58, 117, 114, 108,
+        ),
+      );
+      const sdkZodSpecifier = urlModule.pathToFileURL(
+        path.join(path.dirname(sdkEntryPath), "..", "..", "zod", "index.js"),
+      ).href;
+      ({ z } = await import(sdkZodSpecifier));
+    }
+  } catch {
+    // The SDK package may expose zod only through its own nested dependency.
+  }
+  try {
+    if (!z) ({ z } = await import("zod"));
+  } catch {
+    z = null;
+  }
 
   try {
-    const sdkEntryPath = sdkModuleSpecifier
-      ? sdkModuleSpecifier.startsWith("file:")
-        ? fileURLToPath(sdkModuleSpecifier)
-        : sdkModuleSpecifier
-      : fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"));
     const sdkPackage = JSON.parse(
       await readFile(path.join(path.dirname(sdkEntryPath), "package.json"), "utf8"),
     );
@@ -115,6 +142,70 @@ const IMAGE_ATTACHMENT_MEDIA_TYPES = new Map([
   ["webp", "image/webp"],
 ]);
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(IMAGE_ATTACHMENT_MEDIA_TYPES.values());
+
+const PANES_COMPUTER_CONTROL_TOOLS = [
+  ["start_session", "创建当前任务的电脑操作会话"],
+  ["end_session", "结束当前任务的电脑操作会话"],
+  ["launch_app", "启动指定应用程序"],
+  ["list_apps", "列出可见应用程序"],
+  ["list_windows", "列出可见应用窗口"],
+  ["bring_to_front", "将指定应用窗口置于前台"],
+  ["get_window_state", "读取指定窗口状态"],
+  ["get_accessibility_tree", "读取指定应用的可访问性树"],
+  ["verify_state", "验证指定应用当前状态"],
+  ["get_screen_size", "读取屏幕尺寸元数据"],
+  ["get_cursor_position", "读取当前光标位置"],
+  ["click", "点击指定应用窗口"],
+  ["double_click", "双击指定应用窗口"],
+  ["right_click", "右键点击指定应用窗口"],
+  ["drag", "在指定应用窗口内拖动"],
+  ["type_text", "向指定应用输入文本"],
+  ["press_key", "向指定应用发送按键"],
+  ["hotkey", "向指定应用发送组合键"],
+  ["set_value", "设置指定应用控件值"],
+  ["invoke_menu", "调用指定应用菜单"],
+  ["scroll", "滚动指定应用窗口"],
+  ["move_cursor", "移动指定应用窗口内的光标"],
+  ["zoom", "调整指定应用窗口缩放"],
+  ["clipboard_read", "读取当前任务剪贴板"],
+  ["clipboard_write", "写入当前任务剪贴板"],
+  ["health_report", "读取电脑操作运行状态"],
+  ["get_session_state", "读取当前电脑操作会话状态"],
+];
+
+const PANES_COMPUTER_CONTROL_INPUT_KEYS = [
+  "scope",
+  "capture_scope",
+  "path",
+  "launch_path",
+  "aumid",
+  "application",
+  "name",
+  "window_id",
+  "pid",
+  "x",
+  "y",
+  "width",
+  "height",
+  "text",
+  "key",
+  "keys",
+  "value",
+  "menu",
+  "selector",
+  "control_id",
+  "control_type",
+  "query",
+  "pattern",
+  "amount",
+  "delta",
+  "direction",
+  "factor",
+  "scale",
+  "session_id",
+  "sessionId",
+  "timeout_ms",
+];
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
@@ -406,6 +497,7 @@ function requiresApproval(permissionMode, toolName) {
 function createQueryContext(id) {
   return {
     id,
+    threadId: id,
     query: null,
     actionCounter: 0,
     actionIdsByToolUseId: new Map(),
@@ -417,6 +509,7 @@ function createQueryContext(id) {
     sessionId: null,
     tokenUsage: null,
     stopReason: null,
+    pendingComputerControlCalls: new Map(),
   };
 }
 
@@ -518,6 +611,142 @@ function cleanupPendingApprovalsForQuery(queryId, denialMessage) {
     });
   }
   context.pendingApprovalIds.clear();
+}
+
+function computerControlInputSchema() {
+  if (!z?.any) {
+    return Object.fromEntries(PANES_COMPUTER_CONTROL_INPUT_KEYS.map((key) => [key, {}]));
+  }
+
+  return z.record(z.string(), z.any());
+}
+
+function computerControlCallResultToClaudeContent(value) {
+  const source = Array.isArray(value?.content)
+    ? value.content
+    : Array.isArray(value?.contentItems)
+      ? value.contentItems
+      : null;
+  if (source) {
+    const content = source.flatMap((item) => {
+      if (item?.type === "text" || item?.type === "inputText") {
+        return [{ type: "text", text: String(item.text ?? "") }];
+      }
+      if (item?.type === "image") {
+        return [{
+          type: "image",
+          data: String(item.data ?? ""),
+          mimeType: String(item.mimeType ?? "image/png"),
+        }];
+      }
+      if (item?.type === "inputImage") {
+        const match = String(item.imageUrl ?? "").match(
+          /^data:([^;]+);base64,(.+)$/,
+        );
+        return match
+          ? [{ type: "image", data: match[2], mimeType: match[1] }]
+          : [{ type: "text", text: String(item.imageUrl ?? "") }];
+      }
+      return [];
+    });
+    if (content.length > 0) {
+      return content;
+    }
+  }
+
+  return [{
+    type: "text",
+    text: typeof value === "string" ? value : JSON.stringify(value ?? null),
+  }];
+}
+
+function waitForComputerControlResult(context, callId, toolName, arguments_, signal) {
+  return new Promise((resolve) => {
+    const pending = {
+      resolve,
+      abortHandler: null,
+      signal,
+    };
+    const abortHandler = () => {
+      context.pendingComputerControlCalls.delete(callId);
+      resolve({ ok: false, error: "Claude 电脑操作工具调用已取消。" });
+    };
+    pending.abortHandler = abortHandler;
+    context.pendingComputerControlCalls.set(callId, pending);
+    signal?.addEventListener?.("abort", abortHandler, { once: true });
+    emit({
+      id: context.id,
+      type: "computer_control_tool_call",
+      callId,
+      toolName,
+      arguments: arguments_ ?? {},
+      threadId: context.threadId,
+      turnId: context.id,
+    });
+  });
+}
+
+function createPanesComputerControlServer(context) {
+  if (typeof toolFn !== "function" || typeof createSdkMcpServerFn !== "function") {
+    throw new Error("当前 Claude Agent SDK 不支持进程内自定义工具服务器。");
+  }
+
+  const inputSchema = computerControlInputSchema();
+  const tools = PANES_COMPUTER_CONTROL_TOOLS.map(([name, description]) =>
+    toolFn(name, description, inputSchema, async (arguments_, extra = {}) => {
+      const callId =
+        extra.toolUseID ||
+        extra.toolUseId ||
+        `${context.id}-${name}-${context.pendingComputerControlCalls.size + 1}`;
+      const result = await waitForComputerControlResult(
+        context,
+        callId,
+        name,
+        arguments_,
+        extra.signal,
+      );
+      if (!result.ok) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: result.error }],
+        };
+      }
+      return { content: computerControlCallResultToClaudeContent(result.value) };
+    }),
+  );
+
+  return createSdkMcpServerFn({
+    name: "panes-computer-control",
+    version: "1.0.0",
+    tools,
+  });
+}
+
+function resolveComputerControlToolResult(params = {}) {
+  const requestId = params.requestId || params.request_id || params.id;
+  const callId = params.callId || params.call_id;
+  if (!requestId || !callId) {
+    return;
+  }
+  const context = activeQueries.get(requestId);
+  const pending = context?.pendingComputerControlCalls.get(callId);
+  if (!context || !pending) {
+    return;
+  }
+  context.pendingComputerControlCalls.delete(callId);
+  pending.signal?.removeEventListener?.("abort", pending.abortHandler);
+  if (params.error) {
+    pending.resolve({ ok: false, error: String(params.error) });
+  } else {
+    pending.resolve({ ok: true, value: params.result });
+  }
+}
+
+function cleanupPendingComputerControlCalls(context, errorMessage) {
+  for (const pending of context.pendingComputerControlCalls.values()) {
+    pending.resolve({ ok: false, error: errorMessage });
+  }
+  context.pendingComputerControlCalls.clear();
 }
 
 function emitDeniedToolCompletion(context, toolUseId, errorMessage) {
@@ -1355,9 +1584,11 @@ async function handleQuery(req) {
     writableRoots = [],
     sandboxMode,
     reasoningEffort,
+    threadId,
   } = params;
 
   const context = createQueryContext(id);
+  context.threadId = threadId || sessionId || resume || id;
   activeQueries.set(id, context);
 
   const toolList = allowedTools || [
@@ -1370,32 +1601,13 @@ async function handleQuery(req) {
     ...(allowNetwork ? ["WebFetch"] : []),
   ];
 
-  let panesComputerControlServer = null;
-  const panesComputerControlConfigPath =
-    process.env.PANES_COMPUTER_CONTROL_CONFIG?.trim();
-  if (panesComputerControlConfigPath) {
-    try {
-      const panesComputerControlConfig = JSON.parse(
-        await readFile(panesComputerControlConfigPath, "utf8"),
-      );
-      if (
-        panesComputerControlConfig?.enabled === true &&
-        panesComputerControlConfig?.server &&
-        typeof panesComputerControlConfig.server.command === "string"
-      ) {
-        panesComputerControlServer = panesComputerControlConfig.server;
-        toolList.push("mcp__panes-computer-control__*");
-      }
-    } catch {
-      // Computer control is optional. A missing or invalid Panes-owned file fails closed.
-    }
-  }
-
   const sessionCwd = cwd || process.cwd();
   let actualSessionId = null;
   try {
     const normalizedSandboxMode = normalizeSandboxMode(sandboxMode);
     const normalizedWritableRoots = normalizeWritableRoots(sessionCwd, writableRoots);
+    const panesComputerControlServer = createPanesComputerControlServer(context);
+    toolList.push("mcp__panes-computer-control__*");
 
     const options = applyClaudeRuntime({
       cwd: sessionCwd,
@@ -1406,13 +1618,9 @@ async function handleQuery(req) {
       ),
       permissionMode: planMode ? "plan" : "default",
       allowedTools: toolList,
-      ...(panesComputerControlServer
-        ? {
-            mcpServers: {
-              "panes-computer-control": panesComputerControlServer,
-            },
-          }
-        : {}),
+      mcpServers: {
+        "panes-computer-control": panesComputerControlServer,
+      },
       canUseTool: buildPermissionHandler({
         context,
         cwd: sessionCwd,
@@ -1742,6 +1950,7 @@ async function handleQuery(req) {
     emitTurnCompleted(context, "failed");
   } finally {
     cleanupPendingApprovalsForQuery(id, "Claude query was canceled.");
+    cleanupPendingComputerControlCalls(context, "Claude query was canceled.");
     activeQueries.delete(id);
   }
 }
@@ -1762,6 +1971,10 @@ function handleCancel(params = {}) {
   cleanupPendingApprovalsForQuery(
     requestId,
     "Claude query was canceled before approval was answered.",
+  );
+  cleanupPendingComputerControlCalls(
+    context,
+    "Claude query was canceled before the computer operation completed.",
   );
   context.query?.close();
 }
@@ -1858,6 +2071,11 @@ rl.on("line", (line) => {
 
   if (req.method === "approval_response") {
     handleApprovalResponse(req.params || {});
+    return;
+  }
+
+  if (req.method === "computer_control_tool_result") {
+    resolveComputerControlToolResult(req.params || {});
     return;
   }
 
