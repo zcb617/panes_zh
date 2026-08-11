@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApprovalResponse, ChatProviderUsage, StreamEvent } from "../types";
+import type { ApprovalResponse, ChatProviderUsage, SteerReceipt, StreamEvent } from "../types";
 
 const mockIpc = vi.hoisted(() => ({
   sendMessage: vi.fn(),
@@ -8,6 +8,7 @@ const mockIpc = vi.hoisted(() => ({
   getChatProviderUsage: vi.fn(),
   getActionOutput: vi.fn(),
   respondApproval: vi.fn(),
+  cancelTurn: vi.fn(),
   syncThreadFromEngine: vi.fn(),
 }));
 
@@ -49,7 +50,15 @@ describe("chatStore send", () => {
       outputChunks: [],
       truncated: false,
     });
-    mockIpc.steerMessage.mockResolvedValue(undefined);
+    mockIpc.steerMessage.mockImplementation((...args: unknown[]) => {
+      const clientSteerId = String(args[5]);
+      return Promise.resolve<SteerReceipt>({
+        clientSteerId,
+        expectedTurnId: "turn-1",
+        acceptedAt: "2026-08-11T15:26:57.608Z",
+      });
+    });
+    mockIpc.cancelTurn.mockResolvedValue(undefined);
     mockIpc.syncThreadFromEngine.mockResolvedValue({
       id: "thread-1",
       workspaceId: "workspace-1",
@@ -577,6 +586,205 @@ describe("chatStore send", () => {
     vi.useRealTimers();
   });
 
+  it("settles accepted steer blocks when the active turn completes", async () => {
+    vi.useFakeTimers();
+
+    let streamHandler: ((event: StreamEvent) => void) | null = null;
+    mockListenThreadEvents.mockImplementationOnce(async (_threadId, onEvent) => {
+      streamHandler = onEvent;
+      return () => {};
+    });
+
+    await useChatStore.getState().setActiveThread("thread-1");
+    useChatStore.setState({
+      threadId: "thread-1",
+      messages: [
+        {
+          id: "assistant-steer",
+          threadId: "thread-1",
+          role: "assistant",
+          status: "streaming",
+          schemaVersion: 1,
+          blocks: [
+            {
+              type: "steer",
+              steerId: "steer-1",
+              content: "follow up",
+              deliveryStatus: "accepted",
+              expectedTurnId: "turn-1",
+            },
+          ],
+          createdAt: new Date().toISOString(),
+          hydration: "full",
+          hasDeferredContent: false,
+        },
+      ],
+      status: "streaming",
+      streaming: true,
+    });
+
+    expect(streamHandler).not.toBeNull();
+    streamHandler!({
+      type: "TurnCompleted",
+      status: "completed",
+    });
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(useChatStore.getState().messages[0]).toMatchObject({
+      status: "completed",
+      blocks: [
+        {
+          type: "steer",
+          steerId: "steer-1",
+          deliveryStatus: "settled",
+        },
+      ],
+    });
+
+    vi.useRealTimers();
+  });
+
+  it("fixes a steer at the Codex applied boundary after earlier text and tool output", async () => {
+    vi.useFakeTimers();
+
+    let streamHandler: ((event: StreamEvent) => void) | null = null;
+    mockListenThreadEvents.mockImplementationOnce(async (_threadId, onEvent) => {
+      streamHandler = onEvent;
+      return () => {};
+    });
+
+    await useChatStore.getState().setActiveThread("thread-1");
+    useChatStore.setState({
+      threadId: "thread-1",
+      messages: [
+        {
+          id: "assistant-steer-order",
+          threadId: "thread-1",
+          role: "assistant",
+          status: "streaming",
+          schemaVersion: 1,
+          blocks: [
+            {
+              type: "steer",
+              steerId: "steer-1",
+              content: "那就是整个功能还没开发好",
+              deliveryStatus: "accepted",
+            },
+          ],
+          createdAt: new Date().toISOString(),
+          hydration: "full",
+          hasDeferredContent: false,
+        },
+      ],
+      status: "streaming",
+      streaming: true,
+    });
+
+    streamHandler!({
+      type: "TextDelta",
+      content: "不是能力不行，是当前驱动连接还没恢复。",
+    });
+    streamHandler!({
+      type: "ActionStarted",
+      action_id: "tool-1",
+      engine_action_id: "item-1",
+      action_type: "other",
+      summary: "Tool call",
+      details: {},
+    });
+    streamHandler!({
+      type: "SteerApplied",
+      client_steer_id: "steer-1",
+      content: "那就是整个功能还没开发好",
+      plan_mode: false,
+      attachments: [],
+      input_items: [],
+    });
+    streamHandler!({
+      type: "TextDelta",
+      content: "不能直接判断为整个功能没开发好。",
+    });
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(useChatStore.getState().messages[0]?.blocks).toMatchObject([
+      { type: "text", content: "不是能力不行，是当前驱动连接还没恢复。" },
+      { type: "action", actionId: "tool-1" },
+      {
+        type: "steer",
+        steerId: "steer-1",
+        content: "那就是整个功能还没开发好",
+        deliveryStatus: "applied",
+      },
+      { type: "text", content: "不能直接判断为整个功能没开发好。" },
+    ]);
+
+    vi.useRealTimers();
+  });
+
+  it("keeps multiple pending steers at the tail and fixes them in FIFO order", async () => {
+    vi.useFakeTimers();
+
+    let streamHandler: ((event: StreamEvent) => void) | null = null;
+    mockListenThreadEvents.mockImplementationOnce(async (_threadId, onEvent) => {
+      streamHandler = onEvent;
+      return () => {};
+    });
+
+    await useChatStore.getState().setActiveThread("thread-1");
+    useChatStore.setState({
+      threadId: "thread-1",
+      messages: [
+        {
+          id: "assistant-multiple-steers",
+          threadId: "thread-1",
+          role: "assistant",
+          status: "streaming",
+          schemaVersion: 1,
+          blocks: [
+            { type: "steer", steerId: "steer-1", content: "第一条", deliveryStatus: "accepted" },
+            { type: "steer", steerId: "steer-2", content: "第二条", deliveryStatus: "accepted" },
+          ],
+          createdAt: new Date().toISOString(),
+          hydration: "full",
+          hasDeferredContent: false,
+        },
+      ],
+      status: "streaming",
+      streaming: true,
+    });
+
+    streamHandler!({ type: "TextDelta", content: "第一条之前" });
+    streamHandler!({
+      type: "SteerApplied",
+      client_steer_id: "steer-1",
+      content: "第一条",
+      plan_mode: false,
+      attachments: [],
+      input_items: [],
+    });
+    streamHandler!({ type: "TextDelta", content: "两条之间" });
+    streamHandler!({
+      type: "SteerApplied",
+      client_steer_id: "steer-2",
+      content: "第二条",
+      plan_mode: false,
+      attachments: [],
+      input_items: [],
+    });
+    streamHandler!({ type: "TextDelta", content: "第二条之后" });
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(useChatStore.getState().messages[0]?.blocks).toMatchObject([
+      { type: "text", content: "第一条之前" },
+      { type: "steer", steerId: "steer-1", deliveryStatus: "applied" },
+      { type: "text", content: "两条之间" },
+      { type: "steer", steerId: "steer-2", deliveryStatus: "applied" },
+      { type: "text", content: "第二条之后" },
+    ]);
+
+    vi.useRealTimers();
+  });
+
   it("collapses existing duplicate diff blocks for same-scope stream updates", async () => {
     vi.useFakeTimers();
 
@@ -1062,6 +1270,7 @@ describe("chatStore send", () => {
       null,
       [{ type: "mention", name: "Docs", path: "app://docs" }],
       false,
+      expect.any(String),
     );
     expect(useChatStore.getState().messages).toHaveLength(1);
     expect(useChatStore.getState().messages[0]).toMatchObject({
@@ -1070,13 +1279,113 @@ describe("chatStore send", () => {
         {
           type: "steer",
           content: "follow up",
+          deliveryStatus: "accepted",
+          expectedTurnId: "turn-1",
+          acceptedAt: "2026-08-11T15:26:57.608Z",
           mentions: [{ type: "mention", name: "Docs", path: "app://docs" }],
         },
       ],
     });
   });
 
-  it("rolls back the optimistic steer block when the steer request fails", async () => {
+  it("keeps the steer block in sending state until the backend receipt arrives", async () => {
+    const pendingReceipt = deferred<SteerReceipt>();
+    mockIpc.steerMessage.mockReturnValueOnce(pendingReceipt.promise);
+    useChatStore.setState({
+      threadId: "thread-1",
+      messages: [
+        {
+          id: "assistant-1",
+          threadId: "thread-1",
+          role: "assistant",
+          status: "streaming",
+          schemaVersion: 1,
+          blocks: [],
+          createdAt: new Date().toISOString(),
+          hydration: "full",
+          hasDeferredContent: false,
+        },
+      ],
+      status: "streaming",
+      streaming: true,
+    });
+
+    const steerPromise = useChatStore.getState().steer("follow up");
+    const steerBlock = useChatStore.getState().messages[0]?.blocks?.find(
+      (block) => block.type === "steer",
+    );
+    expect(steerBlock).toMatchObject({ deliveryStatus: "sending" });
+    expect(steerBlock?.type).toBe("steer");
+
+    pendingReceipt.resolve({
+      clientSteerId: steerBlock?.type === "steer" ? steerBlock.steerId : "",
+      expectedTurnId: "turn-1",
+      acceptedAt: "2026-08-11T15:26:57.608Z",
+    });
+    await expect(steerPromise).resolves.toBe(true);
+  });
+
+  it("does not downgrade an applied steer when the RPC receipt arrives afterward", async () => {
+    vi.useFakeTimers();
+    const pendingReceipt = deferred<SteerReceipt>();
+    mockIpc.steerMessage.mockReturnValueOnce(pendingReceipt.promise);
+    let streamHandler: ((event: StreamEvent) => void) | null = null;
+    mockListenThreadEvents.mockImplementationOnce(async (_threadId, onEvent) => {
+      streamHandler = onEvent;
+      return () => {};
+    });
+
+    await useChatStore.getState().setActiveThread("thread-1");
+    useChatStore.setState({
+      threadId: "thread-1",
+      messages: [
+        {
+          id: "assistant-race",
+          threadId: "thread-1",
+          role: "assistant",
+          status: "streaming",
+          schemaVersion: 1,
+          blocks: [],
+          createdAt: new Date().toISOString(),
+          hydration: "full",
+          hasDeferredContent: false,
+        },
+      ],
+      status: "streaming",
+      streaming: true,
+    });
+
+    const steerPromise = useChatStore.getState().steer("follow up");
+    const optimisticBlock = useChatStore.getState().messages[0]?.blocks?.find(
+      (block) => block.type === "steer",
+    );
+    const clientSteerId = optimisticBlock?.type === "steer" ? optimisticBlock.steerId : "";
+
+    streamHandler!({
+      type: "SteerApplied",
+      client_steer_id: clientSteerId,
+      content: "follow up",
+      plan_mode: false,
+      attachments: [],
+      input_items: [],
+    });
+    await vi.advanceTimersByTimeAsync(20);
+
+    pendingReceipt.resolve({
+      clientSteerId,
+      expectedTurnId: "turn-1",
+      acceptedAt: "2026-08-11T15:26:57.608Z",
+    });
+    await expect(steerPromise).resolves.toBe(true);
+
+    expect(useChatStore.getState().messages[0]?.blocks).toMatchObject([
+      { type: "steer", steerId: clientSteerId, deliveryStatus: "applied" },
+    ]);
+
+    vi.useRealTimers();
+  });
+
+  it("retains the optimistic steer block as failed when the steer request fails", async () => {
     useChatStore.setState({
       threadId: "thread-1",
       messages: [
@@ -1109,10 +1418,62 @@ describe("chatStore send", () => {
     expect(useChatStore.getState().messages).toEqual([
       expect.objectContaining({
         role: "assistant",
-        blocks: [],
+        blocks: [
+          expect.objectContaining({
+            type: "steer",
+            content: "follow up",
+            deliveryStatus: "failed",
+            failureReason: expect.stringContaining("steer failed"),
+          }),
+        ],
       }),
     ]);
     expect(useChatStore.getState().error).toContain("steer failed");
+  });
+
+  it("settles and retains an accepted steer block when the turn is canceled", async () => {
+    useChatStore.setState({
+      threadId: "thread-1",
+      messages: [
+        {
+          id: "assistant-1",
+          threadId: "thread-1",
+          role: "assistant",
+          status: "streaming",
+          schemaVersion: 1,
+          blocks: [
+            {
+              type: "steer",
+              steerId: "steer-1",
+              content: "follow up",
+              deliveryStatus: "accepted",
+              expectedTurnId: "turn-1",
+            },
+          ],
+          createdAt: new Date().toISOString(),
+          hydration: "full",
+          hasDeferredContent: false,
+        },
+      ],
+      status: "streaming",
+      streaming: true,
+    });
+
+    await useChatStore.getState().cancel();
+
+    expect(mockIpc.cancelTurn).toHaveBeenCalledWith("thread-1");
+    expect(useChatStore.getState().messages).toMatchObject([
+      {
+        id: "assistant-1",
+        blocks: [
+          {
+            type: "steer",
+            steerId: "steer-1",
+            deliveryStatus: "settled",
+          },
+        ],
+      },
+    ]);
   });
 
   it("folds persisted steer messages into the preceding completed assistant when binding", async () => {
@@ -1165,9 +1526,65 @@ describe("chatStore send", () => {
           type: "steer",
           steerId: "steer-user-1",
           content: "focus on the failing test",
+          deliveryStatus: "settled",
         },
       ],
     });
+  });
+
+  it("keeps a persisted steer at its applied boundary without duplicating it on reload", async () => {
+    mockIpc.getThreadMessagesWindow.mockResolvedValueOnce({
+      messages: [
+        {
+          id: "assistant-applied-steer",
+          threadId: "thread-1",
+          role: "assistant",
+          content: null,
+          blocks: [
+            { type: "text", content: "插话之前" },
+            {
+              type: "steer",
+              steerId: "client-steer-1",
+              content: "插话内容",
+              deliveryStatus: "settled",
+            },
+            { type: "text", content: "插话之后" },
+          ],
+          schemaVersion: 1,
+          status: "completed",
+          tokenUsage: null,
+          createdAt: new Date().toISOString(),
+        },
+        {
+          id: "persisted-user-steer-1",
+          threadId: "thread-1",
+          role: "user",
+          content: "插话内容",
+          blocks: [
+            {
+              type: "text",
+              content: "插话内容",
+              isSteer: true,
+              clientSteerId: "client-steer-1",
+            },
+          ],
+          schemaVersion: 1,
+          status: "completed",
+          tokenUsage: null,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+      nextCursor: null,
+    });
+
+    await useChatStore.getState().setActiveThread("thread-1");
+
+    expect(useChatStore.getState().messages).toHaveLength(1);
+    expect(useChatStore.getState().messages[0]?.blocks).toMatchObject([
+      { type: "text", content: "插话之前" },
+      { type: "steer", steerId: "client-steer-1", content: "插话内容" },
+      { type: "text", content: "插话之后" },
+    ]);
   });
 
   it("keeps regular user turns intact when loading older history", async () => {

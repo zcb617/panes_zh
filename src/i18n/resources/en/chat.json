@@ -545,6 +545,19 @@
     "noChanges": "No changes",
     "thinking": "Thinking",
     "hooks": "Hooks ({{count}})",
+    "steerDelivery": {
+      "sending": "Sending follow-up…",
+      "accepted": "Received; waiting to enter the current processing step",
+      "applied": "Entered the current processing step",
+      "failed": "Failed to send follow-up",
+      "settled": "The current turn has ended"
+    },
+    "turnProgress": {
+      "running": "Codex is still running",
+      "runningAction": "Running: {{summary}}",
+      "runningWithSteer": "Codex is still running; the follow-up is waiting to enter the current processing step",
+      "waitingForApproval": "Waiting for your confirmation"
+    },
     "actionStatus": {
       "done": "Done",
       "running": "Running",

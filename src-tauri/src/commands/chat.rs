@@ -26,8 +26,8 @@ use crate::{
     },
     models::{
         ActionOutputDto, EngineInfoDto, EngineModelDto, MessageDto, MessageStatusDto,
-        MessageWindowCursorDto, MessageWindowDto, RepoDto, SearchResultDto, ThreadDto,
-        ThreadStatusDto, TrustLevelDto,
+        MessageWindowCursorDto, MessageWindowDto, RepoDto, SearchResultDto, SteerReceiptDto,
+        ThreadDto, ThreadStatusDto, TrustLevelDto,
     },
     runtime_env,
     state::AppState,
@@ -116,6 +116,25 @@ enum ContentBlock {
         plan_mode: Option<bool>,
         #[serde(rename = "isSteer", skip_serializing_if = "Option::is_none")]
         is_steer: Option<bool>,
+        #[serde(rename = "clientSteerId", skip_serializing_if = "Option::is_none")]
+        client_steer_id: Option<String>,
+    },
+
+    #[serde(rename = "steer")]
+    Steer {
+        #[serde(rename = "steerId")]
+        steer_id: String,
+        content: String,
+        #[serde(rename = "deliveryStatus")]
+        delivery_status: String,
+        #[serde(rename = "planMode", skip_serializing_if = "Option::is_none")]
+        plan_mode: Option<bool>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<ContentBlock>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<ContentBlock>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        mentions: Vec<ContentBlock>,
     },
 
     #[serde(rename = "diff")]
@@ -857,6 +876,7 @@ pub(crate) async fn send_message_inner(
                 &attachments,
                 plan_mode_enabled,
                 false,
+                None,
             );
             db::messages::insert_user_message(
                 db,
@@ -1009,7 +1029,7 @@ pub async fn start_codex_review(
                 source_thread.clone()
             };
 
-            let user_blocks = build_user_blocks(&review_message, &[], &[], false, false);
+            let user_blocks = build_user_blocks(&review_message, &[], &[], false, false, None);
             db::messages::insert_user_message(
                 db,
                 &review_thread.id,
@@ -1092,7 +1112,21 @@ pub async fn steer_message(
     attachments: Option<Vec<ChatAttachmentPayload>>,
     input_items: Option<Vec<ChatInputItemPayload>>,
     plan_mode: Option<bool>,
-) -> Result<(), String> {
+    client_steer_id: String,
+) -> Result<SteerReceiptDto, String> {
+    if client_steer_id.trim().is_empty() {
+        return Err("clientSteerId is required for mid-turn steering.".to_string());
+    }
+
+    let steer_started_at = Instant::now();
+    crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+        "at": chrono::Utc::now().to_rfc3339(),
+        "event": "steer_submit_started",
+        "thread_id": thread_id,
+        "client_steer_id": client_steer_id,
+    }))
+    .await;
+
     if state.turns.get(&thread_id).await.is_none() {
         return Err(
             "No active turn is running for this thread yet. Wait for Codex to start the turn before steering."
@@ -1132,7 +1166,14 @@ pub async fn steer_message(
     let effective_model_id = thread_last_model_id(thread.engine_metadata.as_ref())
         .unwrap_or_else(|| thread.model_id.clone());
     let reasoning_effort = thread_reasoning_effort(thread.engine_metadata.as_ref());
-    let user_blocks = build_user_blocks(&message, &input_items, &attachments, plan_mode, true);
+    let user_blocks = build_user_blocks(
+        &message,
+        &input_items,
+        &attachments,
+        plan_mode,
+        true,
+        Some(client_steer_id.as_str()),
+    );
 
     let user_message = run_db(db.clone(), {
         let thread_id = thread.id.clone();
@@ -1155,28 +1196,64 @@ pub async fn steer_message(
     })
     .await?;
 
-    if let Err(error) = state
+    let engine_receipt = match state
         .engines
-        .steer_message(&thread, &engine_thread_id, turn_input)
+        .steer_message(
+            &thread,
+            &engine_thread_id,
+            client_steer_id.as_str(),
+            message.as_str(),
+            turn_input,
+        )
         .await
     {
-        let rollback_result = run_db(db, {
-            let message_id = user_message.id.clone();
-            move |db| db::messages::delete_message(db, &message_id)
-        })
-        .await;
-        if let Err(rollback_error) = rollback_result {
-            log::warn!(
-                "failed to roll back persisted steer message {} after steer error: {}",
-                user_message.id,
-                rollback_error
-            );
+        Ok(receipt) => receipt,
+        Err(error) => {
+            let rollback_result = run_db(db, {
+                let message_id = user_message.id.clone();
+                move |db| db::messages::delete_message(db, &message_id)
+            })
+            .await;
+            if let Err(rollback_error) = rollback_result {
+                log::warn!(
+                    "failed to roll back persisted steer message {} after steer error: {}",
+                    user_message.id,
+                    rollback_error
+                );
+            }
+
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "event": "steer_rpc_failed",
+                "thread_id": thread.id,
+                "engine_thread_id": engine_thread_id,
+                "client_steer_id": client_steer_id,
+                "elapsed_ms": steer_started_at.elapsed().as_millis(),
+                "error": error.to_string(),
+            }))
+            .await;
+
+            return Err(err_to_string(error));
         }
+    };
 
-        return Err(err_to_string(error));
-    }
+    let accepted_at = chrono::Utc::now().to_rfc3339();
+    crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+        "at": accepted_at,
+        "event": "steer_rpc_accepted",
+        "thread_id": thread.id,
+        "engine_thread_id": engine_thread_id,
+        "client_steer_id": client_steer_id,
+        "expected_turn_id": engine_receipt.expected_turn_id,
+        "elapsed_ms": steer_started_at.elapsed().as_millis(),
+    }))
+    .await;
 
-    Ok(())
+    Ok(SteerReceiptDto {
+        client_steer_id,
+        expected_turn_id: engine_receipt.expected_turn_id,
+        accepted_at,
+    })
 }
 
 fn build_user_blocks(
@@ -1185,6 +1262,7 @@ fn build_user_blocks(
     attachments: &[TurnAttachment],
     plan_mode: bool,
     is_steer: bool,
+    client_steer_id: Option<&str>,
 ) -> Vec<ContentBlock> {
     let mut user_blocks = Vec::with_capacity(
         input_items
@@ -1234,6 +1312,7 @@ fn build_user_blocks(
         content: final_text,
         plan_mode: if plan_mode { Some(true) } else { None },
         is_steer: if is_steer { Some(true) } else { None },
+        client_steer_id: client_steer_id.map(str::to_string),
     });
 
     user_blocks
@@ -3932,12 +4011,72 @@ fn apply_event_to_blocks(
                     .push((action_id.clone(), action_result.clone()));
                 progress.blocks_changed = true;
             }
+
+            for block in blocks.iter_mut() {
+                let ContentBlock::Steer {
+                    delivery_status, ..
+                } = block
+                else {
+                    continue;
+                };
+                if delivery_status == "failed" || delivery_status == "settled" {
+                    continue;
+                }
+                *delivery_status = "settled".to_string();
+                progress.blocks_changed = true;
+            }
         }
         EngineEvent::TextDelta { content } => {
             progress.blocks_changed = append_text_delta(blocks, content);
         }
         EngineEvent::ThinkingDelta { content } => {
             progress.blocks_changed = append_thinking_delta(blocks, content);
+        }
+        EngineEvent::SteerApplied {
+            client_steer_id,
+            content,
+            plan_mode,
+            attachments,
+            input_items,
+        } => {
+            let attachment_blocks = attachments
+                .iter()
+                .map(|attachment| ContentBlock::Attachment {
+                    file_name: attachment.file_name.clone(),
+                    file_path: attachment.file_path.clone(),
+                    size_bytes: attachment.size_bytes,
+                    mime_type: attachment.mime_type.clone(),
+                    browser_annotation: attachment.browser_annotation.clone(),
+                })
+                .collect();
+            let mut skill_blocks = Vec::new();
+            let mut mention_blocks = Vec::new();
+            for item in input_items {
+                match item {
+                    TurnInputItem::Skill { name, path } => skill_blocks.push(ContentBlock::Skill {
+                        name: name.clone(),
+                        path: path.clone(),
+                    }),
+                    TurnInputItem::Mention { name, path } => {
+                        mention_blocks.push(ContentBlock::Mention {
+                            name: name.clone(),
+                            path: path.clone(),
+                        })
+                    }
+                    TurnInputItem::Text { .. } => {}
+                }
+            }
+            blocks.push(ContentBlock::Steer {
+                steer_id: client_steer_id.clone(),
+                content: content.clone(),
+                delivery_status: "applied".to_string(),
+                plan_mode: plan_mode.then_some(true),
+                attachments: attachment_blocks,
+                skills: skill_blocks,
+                mentions: mention_blocks,
+            });
+            progress.blocks_changed = true;
+            progress.force_persist = true;
         }
         EngineEvent::ActionStarted {
             action_id,
@@ -4173,6 +4312,7 @@ fn append_text_delta(blocks: &mut Vec<ContentBlock>, content: &str) -> bool {
         content: content.to_string(),
         plan_mode: None,
         is_steer: None,
+        client_steer_id: None,
     });
     true
 }
@@ -4885,6 +5025,24 @@ mod tests {
     use rusqlite::params;
     use uuid::Uuid;
 
+    #[test]
+    fn steer_receipt_serializes_with_frontend_field_names() {
+        let receipt = SteerReceiptDto {
+            client_steer_id: "steer-1".to_string(),
+            expected_turn_id: "turn-1".to_string(),
+            accepted_at: "2026-08-11T15:26:57.608Z".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(receipt).expect("steer receipt should serialize"),
+            serde_json::json!({
+                "clientSteerId": "steer-1",
+                "expectedTurnId": "turn-1",
+                "acceptedAt": "2026-08-11T15:26:57.608Z",
+            })
+        );
+    }
+
     fn test_app_state() -> AppState {
         let root = std::env::temp_dir().join(format!("panes-chat-cmd-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("failed to create temp root");
@@ -4997,6 +5155,7 @@ mod tests {
             &[attachment.clone()],
             false,
             false,
+            None,
         );
         let visible_text = blocks
             .iter()
@@ -5226,11 +5385,13 @@ mod tests {
                 content: "hidden steer".to_string(),
                 plan_mode: None,
                 is_steer: Some(true),
+                client_steer_id: Some("steer-preview".to_string()),
             },
             ContentBlock::Text {
                 content: "  First line\n\nSecond line  ".to_string(),
                 plan_mode: None,
                 is_steer: None,
+                client_steer_id: None,
             },
         ]);
 
@@ -5559,6 +5720,79 @@ mod tests {
     }
 
     #[test]
+    fn steer_applied_persists_at_the_exact_stream_boundary_and_settles_on_completion() {
+        let mut blocks = Vec::new();
+        let mut action_index = HashMap::new();
+        let mut approval_index = HashMap::new();
+
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::TextDelta {
+                content: "插话之前".to_string(),
+            },
+            1000,
+        );
+        let applied = apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::SteerApplied {
+                client_steer_id: "client-steer-1".to_string(),
+                content: "插话内容".to_string(),
+                plan_mode: true,
+                attachments: Vec::new(),
+                input_items: vec![
+                    TurnInputItem::Skill {
+                        name: "测试技能".to_string(),
+                        path: "skill://test".to_string(),
+                    },
+                    TurnInputItem::Mention {
+                        name: "说明".to_string(),
+                        path: "app://docs".to_string(),
+                    },
+                ],
+            },
+            1000,
+        );
+        assert!(applied.blocks_changed);
+        assert!(applied.force_persist);
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::TextDelta {
+                content: "插话之后".to_string(),
+            },
+            1000,
+        );
+
+        let serialized = serde_json::to_value(&blocks).expect("blocks should serialize");
+        assert_eq!(serialized[0]["content"], "插话之前");
+        assert_eq!(serialized[1]["type"], "steer");
+        assert_eq!(serialized[1]["steerId"], "client-steer-1");
+        assert_eq!(serialized[1]["deliveryStatus"], "applied");
+        assert_eq!(serialized[1]["planMode"], true);
+        assert_eq!(serialized[1]["skills"][0]["name"], "测试技能");
+        assert_eq!(serialized[1]["mentions"][0]["name"], "说明");
+        assert_eq!(serialized[2]["content"], "插话之后");
+
+        apply_event_to_blocks(
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            &EngineEvent::TurnCompleted {
+                token_usage: None,
+                status: TurnCompletionStatus::Completed,
+            },
+            1000,
+        );
+        let settled = serde_json::to_value(&blocks).expect("settled blocks should serialize");
+        assert_eq!(settled[1]["deliveryStatus"], "settled");
+    }
+
+    #[test]
     fn trim_action_output_chunks_keeps_tail_of_oversized_chunk() {
         let mut chunks = vec![ActionOutputChunk {
             stream: "stdout".to_string(),
@@ -5704,6 +5938,7 @@ mod tests {
                 content: "kept".to_string(),
                 plan_mode: None,
                 is_steer: None,
+                client_steer_id: None,
             },
             ContentBlock::Diff {
                 diff: "old diff 2".to_string(),

@@ -591,10 +591,12 @@ function NoticeBlockView({ block }: { block: NoticeBlock }) {
 }
 
 function SteerBlockView({ block }: { block: SteerBlock }) {
+  const { t } = useTranslation("chat");
   const attachmentBlocks = block.attachments ?? [];
   const skillBlocks = block.skills ?? [];
   const mentionBlocks = block.mentions ?? [];
   const hasContent = block.content.trim().length > 0;
+  const deliveryStatus = block.deliveryStatus ?? "settled";
 
   return (
     <div className="msg-notice msg-notice--steer">
@@ -638,6 +640,23 @@ function SteerBlockView({ block }: { block: SteerBlock }) {
                 />
               );
             })}
+          </div>
+        )}
+        {deliveryStatus !== "settled" && (
+          <div
+            className={`msg-steer-delivery${deliveryStatus === "failed" ? " msg-steer-delivery--failed" : ""}`}
+            role="status"
+            aria-live="polite"
+            title={block.failureReason}
+          >
+            {deliveryStatus === "sending" ? (
+              <Loader2 size={11} className="chat-send-spinner" />
+            ) : deliveryStatus === "failed" ? (
+              <XCircle size={11} />
+            ) : (
+              <CheckCircle2 size={11} />
+            )}
+            <span>{t(`messageBlocks.steerDelivery.${deliveryStatus}`)}</span>
           </div>
         )}
       </div>

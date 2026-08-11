@@ -543,6 +543,19 @@
     "noChanges": "Sem alterações",
     "thinking": "Raciocínio",
     "hooks": "Hooks ({{count}})",
+    "steerDelivery": {
+      "sending": "Enviando acompanhamento…",
+      "accepted": "Recebido; aguardando entrar na etapa de processamento atual",
+      "applied": "Entrou na etapa de processamento atual",
+      "failed": "Falha ao enviar o acompanhamento",
+      "settled": "O turno atual terminou"
+    },
+    "turnProgress": {
+      "running": "O Codex ainda está em execução",
+      "runningAction": "Executando: {{summary}}",
+      "runningWithSteer": "O Codex ainda está em execução; o acompanhamento aguarda entrar na etapa de processamento atual",
+      "waitingForApproval": "Aguardando sua confirmação"
+    },
     "actionStatus": {
       "done": "Concluído",
       "running": "Em andamento",

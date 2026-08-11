@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::{TurnAttachment, TurnInputItem};
+
 pub const ACTION_OUTPUT_DELTA_MAX_CHARS: usize = 16 * 1024;
 pub const STREAMED_DIFF_MAX_CHARS: usize = 128 * 1024;
 const ACTION_OUTPUT_DELTA_TRUNCATED_PREFIX: &str = "... [output truncated; showing tail]\n";
@@ -126,6 +128,13 @@ pub enum EngineEvent {
     },
     ThinkingDelta {
         content: String,
+    },
+    SteerApplied {
+        client_steer_id: String,
+        content: String,
+        plan_mode: bool,
+        attachments: Vec<TurnAttachment>,
+        input_items: Vec<TurnInputItem>,
     },
     ActionStarted {
         action_id: String,

@@ -66,6 +66,7 @@ import type {
   ResolvedEditorFileReference,
   Repo,
   SearchResult,
+  SteerReceipt,
   StreamEvent,
   TerminalNotificationClearedEvent,
   TerminalNotification,
@@ -511,13 +512,15 @@ export const ipc = {
     attachments?: ChatAttachment[] | null,
     inputItems?: ChatInputItem[] | null,
     planMode?: boolean | null,
+    clientSteerId?: string | null,
   ) =>
-    invoke<void>("steer_message", {
+    invoke<SteerReceipt>("steer_message", {
       threadId,
       message,
       attachments: attachments ?? null,
       inputItems: inputItems ?? null,
       planMode: planMode ?? null,
+      clientSteerId: clientSteerId ?? null,
     }),
   startCodexReview: (
     threadId: string,
