@@ -15,7 +15,7 @@ use crate::{
         AgentNotificationSettingsStatusDto,
     },
 };
-use tauri::State;
+use tauri::{State, WebviewWindow};
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
@@ -180,6 +180,51 @@ pub async fn set_app_theme(state: State<'_, AppState>, theme: String) -> Result<
     })
     .await
     .map_err(err_to_string)?
+}
+
+#[tauri::command]
+pub async fn get_display_scale(webview_window: WebviewWindow) -> Result<u32, String> {
+    let display_scale = tokio::task::spawn_blocking(move || {
+        let config = AppConfig::load_or_create().map_err(err_to_string)?;
+        Ok::<u32, String>(config.display_scale())
+    })
+    .await
+    .map_err(err_to_string)??;
+
+    webview_window
+        .set_zoom(display_scale as f64 / 100.0)
+        .map_err(err_to_string)?;
+
+    Ok(display_scale)
+}
+
+#[tauri::command]
+pub async fn set_display_scale(
+    state: State<'_, AppState>,
+    webview_window: WebviewWindow,
+    display_scale: u32,
+) -> Result<u32, String> {
+    let config_write_lock = state.config_write_lock.clone();
+    let _guard = config_write_lock.lock_owned().await;
+
+    let display_scale = tokio::task::spawn_blocking(move || {
+        if !crate::config::app_config::VALID_DISPLAY_SCALES.contains(&display_scale) {
+            return Err(format!("unsupported display scale: {display_scale}"));
+        }
+        AppConfig::mutate(|config| {
+            config.ui.display_scale = display_scale;
+            Ok(display_scale)
+        })
+        .map_err(err_to_string)
+    })
+    .await
+    .map_err(err_to_string)??;
+
+    webview_window
+        .set_zoom(display_scale as f64 / 100.0)
+        .map_err(err_to_string)?;
+
+    Ok(display_scale)
 }
 
 #[tauri::command]

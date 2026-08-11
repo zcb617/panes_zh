@@ -6,6 +6,7 @@ import { AppErrorBoundary } from "./components/shared/AppErrorBoundary";
 import { initializeI18n } from "./i18n";
 import { ipc } from "./lib/ipc";
 import { getBrowserLocaleFallback } from "./lib/locale";
+import { useDisplayScaleStore } from "./stores/displayScaleStore";
 import { useThemeStore } from "./stores/themeStore";
 import "./globals.css";
 
@@ -20,7 +21,10 @@ async function bootstrap() {
 
   // Stamp data-theme before first paint so returning users never see a flash
   // of the wrong theme.
-  await useThemeStore.getState().load();
+  await Promise.all([
+    useThemeStore.getState().load(),
+    useDisplayScaleStore.getState().load(),
+  ]);
 
   await initializeI18n(locale);
 

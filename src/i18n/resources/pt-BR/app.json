@@ -640,6 +640,9 @@
       "interface": "Interface",
       "interfaceDescription": "Mudanças de tema se aplicam ao chat, terminal, Git e editor.",
       "themeDescription": "Use um tema fixo ou acompanhe o sistema operacional.",
+      "displayScale": "Escala da interface",
+      "displayScaleDescription": "Ajuste toda a interface do Panes. As mudanças são aplicadas imediatamente.",
+      "displayScaleFailed": "Não foi possível salvar a escala da interface.",
       "languageDescription": "Usado na navegação, diálogos e mensagens de status."
     },
     "chat": {

@@ -218,6 +218,8 @@ pub fn run() {
             commands::app::set_app_locale,
             commands::app::get_app_theme,
             commands::app::set_app_theme,
+            commands::app::get_display_scale,
+            commands::app::set_display_scale,
             commands::computer_control::get_computer_control_status,
             commands::computer_control::set_computer_control,
             commands::computer_control::respond_computer_control_approval,

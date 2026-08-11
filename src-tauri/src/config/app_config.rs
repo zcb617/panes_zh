@@ -13,11 +13,22 @@ use crate::runtime_env;
 pub const DEFAULT_TERMINAL_FONT_SIZE: u32 = 12;
 pub const MIN_TERMINAL_FONT_SIZE: u32 = 8;
 pub const MAX_TERMINAL_FONT_SIZE: u32 = 32;
+pub const DEFAULT_DISPLAY_SCALE: u32 = 100;
+pub const VALID_DISPLAY_SCALES: [u32; 6] = [100, 110, 120, 130, 140, 150];
 pub const VALID_AUTONOMY_PRESETS: [&str; 4] = ["read-only", "ask", "auto", "full"];
 
 /// Clamp a requested terminal font size into the supported range.
 pub fn clamp_terminal_font_size(font_size: u32) -> u32 {
     font_size.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE)
+}
+
+/// Resolve a persisted display scale to a supported value.
+pub fn normalize_display_scale(display_scale: u32) -> u32 {
+    if VALID_DISPLAY_SCALES.contains(&display_scale) {
+        display_scale
+    } else {
+        DEFAULT_DISPLAY_SCALE
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +79,7 @@ pub struct UiConfig {
     pub sidebar_width: u32,
     pub git_panel_width: u32,
     pub font_size: u32,
+    pub display_scale: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +234,7 @@ impl Default for UiConfig {
             sidebar_width: 260,
             git_panel_width: 380,
             font_size: 13,
+            display_scale: DEFAULT_DISPLAY_SCALE,
         }
     }
 }
@@ -275,6 +288,10 @@ impl AppConfig {
             .unwrap_or(DEFAULT_TERMINAL_FONT_SIZE)
     }
 
+    pub fn display_scale(&self) -> u32 {
+        normalize_display_scale(self.ui.display_scale)
+    }
+
     pub fn chat_notifications_enabled(&self) -> bool {
         self.general.chat_notifications.unwrap_or(false)
     }
@@ -319,6 +336,28 @@ impl AppConfig {
         Ok(result)
     }
 
+    /*
+    pub fn set_display_scale(display_scale: u32) -> anyhow::Result<u32> {
+        if normalize_display_scale(display_scale) != display_scale {
+            anyhow::bail!("unsupported display scale: {display_scale}");
+        }
+
+        let _guard = lock_config()?;
+        let mut config = Self::load_or_create_unlocked()?;
+        config.ui.display_scale = display_scale;
+        config.save_unlocked()?;
+
+        let persisted_display_scale = Self::load_or_create_unlocked()?.display_scale();
+        if persisted_display_scale != display_scale {
+            anyhow::bail!(
+                "display scale did not persist: expected {display_scale}, got {persisted_display_scale}"
+            );
+        }
+
+        Ok(persisted_display_scale)
+    }
+    */
+
     fn load_or_create_unlocked() -> anyhow::Result<Self> {
         runtime_env::migrate_legacy_app_data_dir()
             .context("failed to migrate legacy app data dir")?;
@@ -332,6 +371,30 @@ impl AppConfig {
 
         let raw = fs::read_to_string(&path)?;
         let config = toml::from_str::<Self>(&raw).unwrap_or_default();
+
+        /*
+        let mut config = toml::from_str::<Self>(&raw).unwrap_or_default();
+
+        // Existing installations can have a config file created before
+        // `display_scale` existed. Reading a missing field falls back to 100, but
+        // the config must also be migrated so the field is explicitly persisted.
+        let persisted_display_scale = toml::from_str::<toml::Value>(&raw)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("ui")
+                    .and_then(toml::Value::as_table)
+                    .and_then(|ui| ui.get("display_scale"))
+                    .and_then(toml::Value::as_integer)
+            })
+            .and_then(|value| u32::try_from(value).ok());
+        let normalized_display_scale = config.display_scale();
+        if persisted_display_scale != Some(normalized_display_scale) {
+            config.ui.display_scale = normalized_display_scale;
+            config.save_unlocked()?;
+        }
+        */
+
         Ok(config)
     }
 
@@ -602,6 +665,87 @@ max_action_output_chars = 20000
         assert_eq!(loaded.general.terminal_font_size, Some(16));
         assert_eq!(loaded.terminal_font_size(), 16);
     }
+
+    #[test]
+    fn display_scale_defaults_and_normalizes_unknown_values() {
+        let config = AppConfig::default();
+        assert_eq!(config.display_scale(), super::DEFAULT_DISPLAY_SCALE);
+
+        let mut invalid = AppConfig::default();
+        invalid.ui.display_scale = 125;
+        assert_eq!(invalid.display_scale(), super::DEFAULT_DISPLAY_SCALE);
+    }
+
+    #[test]
+    fn display_scale_serialize_roundtrip() {
+        let mut config = AppConfig::default();
+        config.ui.display_scale = 150;
+
+        let raw = toml::to_string_pretty(&config).expect("config should serialize");
+        let loaded = toml::from_str::<AppConfig>(&raw).expect("config should deserialize");
+
+        assert_eq!(loaded.display_scale(), 150);
+    }
+
+    #[test]
+    fn display_scale_mutation_persists_across_config_reload() {
+        with_temp_app_data_env(|| {
+            AppConfig::mutate(|config| {
+                config.ui.display_scale = 120;
+                Ok(())
+            })
+            .expect("display scale should save");
+
+            let reloaded = AppConfig::load_or_create().expect("display scale should reload");
+            assert_eq!(reloaded.display_scale(), 120);
+        });
+    }
+
+    /*
+        #[test]
+        fn load_or_create_backfills_missing_display_scale_into_config_file() {
+            with_temp_app_data_env(|| {
+                let path = AppConfig::path();
+                fs::create_dir_all(path.parent().expect("config path has a parent"))
+                    .expect("create config directory");
+                fs::write(
+                    &path,
+                    r#"
+    [ui]
+    sidebar_width = 260
+    git_panel_width = 380
+    font_size = 13
+    "#,
+                )
+                .expect("write legacy config");
+
+                let config = AppConfig::load_or_create().expect("load legacy config");
+                assert_eq!(config.display_scale(), super::DEFAULT_DISPLAY_SCALE);
+
+                let persisted = fs::read_to_string(path).expect("read migrated config");
+                assert!(persisted.contains("display_scale = 100"));
+            });
+        }
+
+        #[test]
+        fn set_display_scale_persists_the_selected_value_in_config_file() {
+            with_temp_app_data_env(|| {
+                assert_eq!(
+                    AppConfig::set_display_scale(120).expect("set display scale"),
+                    120
+                );
+
+                let persisted = fs::read_to_string(AppConfig::path()).expect("read saved config");
+                assert!(persisted.contains("display_scale = 120"));
+                assert_eq!(
+                    AppConfig::load_or_create()
+                        .expect("reload saved config")
+                        .display_scale(),
+                    120
+                );
+            });
+        }
+        */
 
     #[test]
     fn terminal_accelerated_rendering_defaults_to_enabled() {

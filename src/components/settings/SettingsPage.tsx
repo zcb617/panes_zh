@@ -34,7 +34,12 @@ import {
   Smartphone,
   Volume2,
   Zap,
+  ZoomIn,
 } from "lucide-react";
+import {
+  DISPLAY_SCALE_PREFERENCES,
+  isDisplayScale,
+} from "../../lib/displayScale";
 import { ipc } from "../../lib/ipc";
 import {
   emitTerminalAcceleratedRenderingChanged,
@@ -58,6 +63,7 @@ import { THEME_PREFERENCES, type ThemePreference } from "../../lib/theme";
 import { useKeepAwakeStore, canToggleKeepAwake } from "../../stores/keepAwakeStore";
 import { useChatComposerStore } from "../../stores/chatComposerStore";
 import { useTerminalNotificationSettingsStore } from "../../stores/terminalNotificationSettingsStore";
+import { useDisplayScaleStore } from "../../stores/displayScaleStore";
 import { useThemeStore } from "../../stores/themeStore";
 import { toast } from "../../stores/toastStore";
 import { useUiStore, type SettingsSection } from "../../stores/uiStore";
@@ -190,6 +196,8 @@ export function SettingsPage() {
   const activeRepos = useWorkspaceStore((state) => state.repos);
   const themePreference = useThemeStore((state) => state.preference);
   const setThemePreference = useThemeStore((state) => state.setPreference);
+  const displayScale = useDisplayScaleStore((state) => state.displayScale);
+  const setDisplayScale = useDisplayScaleStore((state) => state.setDisplayScale);
   const chatSendShortcut = useChatComposerStore((state) => state.sendShortcut);
   const setChatSendShortcut = useChatComposerStore((state) => state.setSendShortcut);
   const chatInputMode = useChatComposerStore((state) => state.chatInputMode);
@@ -875,6 +883,27 @@ export function SettingsPage() {
                       );
                     })}
                   </div>
+                </SettingsRow>
+                <SettingsRow
+                  icon={<ZoomIn size={17} />}
+                  title={t("app:settingsPage.appearance.displayScale")}
+                  description={t("app:settingsPage.appearance.displayScaleDescription")}
+                >
+                  <Dropdown
+                    value={String(displayScale)}
+                    options={DISPLAY_SCALE_PREFERENCES.map((scale) => ({
+                      value: String(scale),
+                      label: `${scale}%`,
+                    }))}
+                    onChange={(value) => {
+                      const nextScale = Number(value);
+                      if (!isDisplayScale(nextScale) || nextScale === displayScale) return;
+                      void setDisplayScale(nextScale).then((saved) => {
+                        if (!saved) toast.error(t("app:settingsPage.appearance.displayScaleFailed"));
+                      });
+                    }}
+                    triggerStyle={{ minWidth: 112, height: 32 }}
+                  />
                 </SettingsRow>
                 <SettingsRow icon={<Globe2 size={17} />} title={t("common:language.label")} description={t("app:settingsPage.appearance.languageDescription")}>
                   <Dropdown

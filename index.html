@@ -21,6 +21,10 @@
                     : "dark")
                 : "dark";
           document.documentElement.dataset.theme = mode;
+          // var displayScale = localStorage.getItem("panes:display-scale");
+          // if (["100", "110", "120", "130", "140", "150"].includes(displayScale)) {
+          //   document.documentElement.style.setProperty("zoom", displayScale + "%");
+          // }
         } catch (e) {
           document.documentElement.dataset.theme = "dark";
         }
