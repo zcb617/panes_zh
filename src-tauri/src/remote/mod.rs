@@ -1508,7 +1508,8 @@ impl RemoteTunnelManager {
                                                     .and_then(|result| result.map_err(|error| error.to_string()));
                                                     match messages {
                                                         Ok(messages) => {
-                                                            // 历史查询不参与实时消息投递，直接返回消息列表。
+                                                            // 历史查询不参与实时消息投递。消息本身全部来自数据库；附件仅暴露
+                                                            // 手机显示需要的元数据，桌面绝对路径不发送到远端设备。
                                                             /*
                                                             let versions = messages.iter()
                                                                 .map(|message| serde_json::to_string(message)
@@ -1523,12 +1524,141 @@ impl RemoteTunnelManager {
                                                                 Err(error) => Err(error),
                                                             }
                                                             */
-                                                            Ok(json!({ "messages": messages }))
+                                                            let mobile_messages = messages
+                                                                .into_iter()
+                                                                .map(|message| {
+                                                                    let attachments = message
+                                                                        .blocks
+                                                                        .as_ref()
+                                                                        .and_then(Value::as_array)
+                                                                        .map(|blocks| {
+                                                                            blocks
+                                                                                .iter()
+                                                                                .enumerate()
+                                                                                .filter_map(|(index, block)| {
+                                                                                    (block
+                                                                                        .get("type")
+                                                                                        .and_then(Value::as_str)
+                                                                                        == Some("attachment"))
+                                                                                        .then(|| {
+                                                                                            let file_name = block
+                                                                                                .get("fileName")
+                                                                                                .and_then(Value::as_str)
+                                                                                                .unwrap_or("附件");
+                                                                                            let mime_type = block
+                                                                                                .get("mimeType")
+                                                                                                .and_then(Value::as_str)
+                                                                                                .unwrap_or_default();
+                                                                                            json!({
+                                                                                                "id": format!("{}:attachment:{index}", message.id),
+                                                                                                "fileName": file_name,
+                                                                                                // 历史附件只能由桌面端读取；手机端不能取得或使用桌面绝对路径。
+                                                                                                "filePath": "",
+                                                                                                "sizeBytes": block.get("sizeBytes").and_then(Value::as_u64).unwrap_or(0),
+                                                                                                "mimeType": mime_type,
+                                                                                                "source": if mime_type.starts_with("image/") { "image" } else { "file" },
+                                                                                                "remoteAttachmentIndex": index,
+                                                                                            })
+                                                                                        })
+                                                                                })
+                                                                                .collect::<Vec<_>>()
+                                                                        })
+                                                                        .unwrap_or_default();
+                                                                    let mut value = serde_json::to_value(message)
+                                                                        .map_err(|error| error.to_string())?;
+                                                                    // blocks 仍供手机渲染文本，但其中的桌面附件路径不能泄露到远端设备。
+                                                                    if let Some(blocks) = value
+                                                                        .get_mut("blocks")
+                                                                        .and_then(Value::as_array_mut)
+                                                                    {
+                                                                        for block in blocks {
+                                                                            if block.get("type").and_then(Value::as_str)
+                                                                                == Some("attachment")
+                                                                            {
+                                                                                if let Some(object) = block.as_object_mut() {
+                                                                                    object.insert(
+                                                                                        "filePath".to_string(),
+                                                                                        Value::String(String::new()),
+                                                                                    );
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    if !attachments.is_empty() {
+                                                                        if let Some(object) = value.as_object_mut() {
+                                                                            object.insert(
+                                                                                "attachments".to_string(),
+                                                                                Value::Array(attachments),
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                    Ok::<Value, String>(value)
+                                                                })
+                                                                .collect::<Result<Vec<_>, _>>();
+                                                            mobile_messages.map(|messages| json!({ "messages": messages }))
                                                         }
                                                         Err(error) => Err(error),
                                                     }
                                                 }
                                                 Err(error) => Err(error),
+                                            }
+                                        }
+                                        "message.attachment.preview" => {
+                                            let thread_id = request.payload.get("thread_id")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty())
+                                                .map(str::to_string)
+                                                .ok_or_else(|| "thread_id is required".to_string());
+                                            let message_id = request.payload.get("message_id")
+                                                .and_then(Value::as_str)
+                                                .map(str::trim)
+                                                .filter(|value| !value.is_empty())
+                                                .map(str::to_string)
+                                                .ok_or_else(|| "message_id is required".to_string());
+                                            let attachment_index = request.payload.get("attachment_index")
+                                                .and_then(Value::as_u64)
+                                                .and_then(|value| usize::try_from(value).ok())
+                                                .ok_or_else(|| "attachment_index is required".to_string());
+                                            match (thread_id, message_id, attachment_index) {
+                                                (Ok(thread_id), Ok(message_id), Ok(attachment_index)) => {
+                                                    let db = state.db.clone();
+                                                    let query_message_id = message_id.clone();
+                                                    let message = tokio::task::spawn_blocking(move || {
+                                                        crate::db::messages::get_message(&db, &query_message_id)
+                                                    })
+                                                    .await
+                                                    .map_err(|error| error.to_string())
+                                                    .and_then(|result| result.map_err(|error| error.to_string()));
+                                                    match message {
+                                                        Ok(Some(message)) if message.thread_id == thread_id => {
+                                                            let attachment = message.blocks.as_ref()
+                                                                .and_then(Value::as_array)
+                                                                .and_then(|blocks| blocks.get(attachment_index))
+                                                                .filter(|block| block.get("type").and_then(Value::as_str) == Some("attachment"));
+                                                            let file_path = attachment
+                                                                .and_then(|block| block.get("filePath"))
+                                                                .and_then(Value::as_str)
+                                                                .map(str::trim)
+                                                                .filter(|value| !value.is_empty())
+                                                                .map(str::to_string);
+                                                            let mime_type = attachment
+                                                                .and_then(|block| block.get("mimeType"))
+                                                                .and_then(Value::as_str)
+                                                                .map(str::to_string);
+                                                            match file_path {
+                                                                Some(file_path) => crate::commands::chat::read_attachment_preview(file_path, mime_type)
+                                                                    .await
+                                                                    .and_then(|preview| serde_json::to_value(preview).map_err(|error| error.to_string())),
+                                                                None => Err("history attachment was not found".to_string()),
+                                                            }
+                                                        }
+                                                        Ok(Some(_)) => Err("message does not belong to thread".to_string()),
+                                                        Ok(None) => Err("message was not found".to_string()),
+                                                        Err(error) => Err(error),
+                                                    }
+                                                }
+                                                (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
                                             }
                                         }
                                         "attachment.upload" => {

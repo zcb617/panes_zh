@@ -716,7 +716,7 @@ onUnload(() => {
             <view v-if="message.attachments?.length" class="message-attachments">
               <view class="message-images">
                 <template v-for="attachment in message.attachments" :key="`image-${attachment.id}`">
-                  <image v-if="attachment.source === 'image'" class="message-image" :src="attachment.localPath || attachment.filePath" mode="aspectFill" :aria-label="attachment.fileName" />
+                  <image v-if="attachment.source === 'image' && (attachment.previewUrl || attachment.localPath || attachment.filePath)" class="message-image" :src="attachment.previewUrl || attachment.localPath || attachment.filePath" mode="aspectFill" :aria-label="attachment.fileName" />
                 </template>
               </view>
               <view class="message-files">

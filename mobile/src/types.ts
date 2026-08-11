@@ -70,8 +70,12 @@ export interface ChatAttachment {
   attachmentKey?: string;
   /** 手机端选择后保留的可读本地路径或 content URI。 */
   localPath?: string;
+  /** 已由桌面 Panes 读取并返回的历史图片 data URL；只用于消息展示，不参与发送。 */
+  previewUrl?: string;
   /** 选择入口来源；不参与远端 message.send 序列化。 */
   source?: ChatAttachmentSource;
+  /** 服务端历史附件在消息 blocks 中的原始位置；仅用于再次请求对应图片预览。 */
+  remoteAttachmentIndex?: number;
   /** 文件字节数；选择阶段无法读取时为 0。 */
   sizeBytes: number;
   /** 文件 MIME 类型。 */

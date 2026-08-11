@@ -295,6 +295,10 @@ export const conversationStore = {
       // message.list 是进入会话后清除未读的全量同步边界。
       const result = await panesConnectionManager.request<{ messages: Message[] }>(panesId, "message.list", { thread_id: threadId });
       const incoming = Array.isArray(result.messages) ? result.messages : [];
+      /*
+      旧实现把本地回显混入重新打开时的服务端完整历史。message.send 的响应不返回用户消息，
+      因而本地回显的临时 ID 不会出现在 incomingIds 中，同一条用户消息会重复显示；本地图片
+      也会错误地掩盖服务端历史没有可访问预览的问题。保留旧逻辑以便追溯，不再执行。
       const incomingIds = new Set(incoming.map((message) => message.id));
       const preserved = state.messages.filter((message) => !incomingIds.has(message.id));
       const localById = new Map(state.messages.map((message) => [message.id, message]));
@@ -308,8 +312,42 @@ export const conversationStore = {
       // 后台已经按 created_at、rowid 返回稳定顺序；手机端必须原样显示，不能用 UUID 或其他字段二次排序。
       // preserved 只可能是本次请求期间新收到、尚未出现在返回结果中的消息，应追加在后台列表之后。
       state.messages = [...mergedIncoming, ...preserved];
+      */
+      // 重新进入会话时，消息列表只采用本次 message.list 返回的服务端历史；不拼接任何本地回显。
+      state.messages = incoming;
       state.messageRevision += 1;
       this.clearUnreadAfterSync(panesId, threadId);
+      // 图片预览由桌面 Panes 按消息附件返回；两路并发限制可避免包含大量历史图片时占满手机和隧道内存。
+      const previewTargets = incoming.flatMap((message) => (message.attachments || [])
+        .filter((attachment) => attachment.source === "image" && Number.isInteger(attachment.remoteAttachmentIndex))
+        .map((attachment) => ({
+          messageId: message.id,
+          attachmentId: attachment.id,
+          attachmentIndex: attachment.remoteAttachmentIndex as number,
+        })));
+      for (let start = 0; start < previewTargets.length; start += 2) {
+        await Promise.all(previewTargets.slice(start, start + 2).map(async (target) => {
+          try {
+            const preview = await panesConnectionManager.request<{ mimeType?: string; dataBase64?: string } | null>(
+              panesId,
+              "message.attachment.preview",
+              {
+                thread_id: threadId,
+                message_id: target.messageId,
+                attachment_index: target.attachmentIndex,
+              },
+            );
+            if (!preview?.mimeType || !preview.dataBase64) return;
+            const currentMessage = state.messages.find((message) => message.id === target.messageId);
+            const currentAttachment = currentMessage?.attachments?.find((attachment) => attachment.id === target.attachmentId);
+            if (!currentAttachment || currentAttachment.remoteAttachmentIndex !== target.attachmentIndex) return;
+            currentAttachment.previewUrl = `data:${preview.mimeType};base64,${preview.dataBase64}`;
+            state.messageRevision += 1;
+          } catch {
+            // 单个历史文件已不存在或无法读取时，仍保留其文字和附件名称，不中断整个会话加载。
+          }
+        }));
+      }
       /*
       const loadedCursors = new Set<string>();
       while (state.nextCursor) {
