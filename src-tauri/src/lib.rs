@@ -1,4 +1,5 @@
 mod commands;
+mod computer_control_sdk;
 mod config;
 mod db;
 mod engines;
@@ -106,6 +107,8 @@ pub fn run() {
     let _ =
         db::workspaces::ensure_default_workspace(&db).expect("failed to ensure default workspace");
 
+    let computer_control_sdk = Arc::new(computer_control_sdk::CuaDriverSdk::new());
+
     let app_state = AppState {
         db,
         config: Arc::new(app_config),
@@ -133,6 +136,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(app_state)
+        .manage(computer_control_sdk)
         .menu(move |handle| build_app_menu(handle, app_locale))
         .setup(|app| {
             let main_window = create_main_window(app.handle())?;
@@ -169,6 +173,8 @@ pub fn run() {
 
             let handle = app.handle().clone();
             let resource_dir = app.path().resource_dir().ok();
+            app.state::<Arc<computer_control_sdk::CuaDriverSdk>>()
+                .set_resource_dir(resource_dir.clone());
             let state = app.state::<AppState>().inner().clone();
             if let Err(error) =
                 tauri::async_runtime::block_on(state.notifications.start(handle.clone()))
@@ -223,6 +229,11 @@ pub fn run() {
             commands::computer_control::get_computer_control_status,
             commands::computer_control::set_computer_control,
             commands::computer_control::respond_computer_control_approval,
+            computer_control_sdk::get_computer_control_sdk_status,
+            computer_control_sdk::initialize_computer_control_sdk,
+            computer_control_sdk::get_computer_control_sdk_tools,
+            computer_control_sdk::get_computer_control_sdk_screen_size,
+            computer_control_sdk::shutdown_computer_control_sdk,
             commands::power::get_keep_awake_state,
             commands::power::set_keep_awake_enabled,
             commands::power::get_power_settings,

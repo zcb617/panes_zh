@@ -1,0 +1,12 @@
+{
+  "source": "trycua/cua",
+  "releaseTag": "cua-driver-rs-v0.19.3",
+  "archive": "cua-driver-rs-0.19.3-windows-x86_64.zip",
+  "releaseUrl": "https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.19.3",
+  "archiveSha256": "e48b0117e343cec2577fc12693c741e094f389f8d4aef91e06284960bb03bce1",
+  "librarySha256": "d7e67baef87fac1a315d86113eeb485fbf8e03e5906797f0bf79d24a990fa38b",
+  "requiredFiles": [
+    "windows-x86_64/cua_driver_sdk.dll",
+    "windows-x86_64/cua_driver_abi.h"
+  ]
+}
