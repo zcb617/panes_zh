@@ -48,7 +48,7 @@ import type {
   ThinkingBlock,
 } from "../../types";
 import {
-  buildMcpElicitationApprovalResponse,
+  // buildMcpElicitationApprovalResponse, // MCP 决策统一由 ChatPanel 底部授权栏提交。
   buildDynamicToolCallResponse,
   defaultAdvancedApprovalPayload,
   isDynamicToolCallApproval,
@@ -291,6 +291,7 @@ type InnerSegment =
 
 type BlockSegment =
   | InnerSegment
+  | { kind: "hook-group"; blocks: NoticeBlock[]; indices: number[] }
   | { kind: "action-card"; segments: InnerSegment[] };
 
 function isCardSegment(seg: BlockSegment): seg is InnerSegment {
@@ -369,12 +370,34 @@ function getActionCardAnchorId(
   return getMessageBlockKey(segment.block, segment.index, safeBlocks);
 }
 
-function buildBlockSegments(blocks: ContentBlock[], isStreaming?: boolean): BlockSegment[] {
+export function buildBlockSegments(blocks: ContentBlock[], isStreaming?: boolean): BlockSegment[] {
   // Phase 1: build flat inner segments
   const flat: BlockSegment[] = [];
   let i = 0;
   while (i < blocks.length) {
     const block = blocks[i];
+    if (
+      block.type === "notice" &&
+      (block.kind.startsWith("hook_") || block.kind.startsWith("codex_hook_"))
+    ) {
+      const hookBlocks: NoticeBlock[] = [];
+      const indices: number[] = [];
+      while (i < blocks.length) {
+        const hookBlock = blocks[i];
+        if (
+          hookBlock.type !== "notice" ||
+          (!hookBlock.kind.startsWith("hook_") &&
+            !hookBlock.kind.startsWith("codex_hook_"))
+        ) {
+          break;
+        }
+        hookBlocks.push(hookBlock);
+        indices.push(i);
+        i++;
+      }
+      flat.push({ kind: "hook-group", blocks: hookBlocks, indices });
+      continue;
+    }
     if (block.type !== "action") {
       flat.push({ kind: "single", block, index: i });
       i++;
@@ -591,10 +614,12 @@ function NoticeBlockView({ block }: { block: NoticeBlock }) {
 }
 
 function SteerBlockView({ block }: { block: SteerBlock }) {
+  const { t } = useTranslation("chat");
   const attachmentBlocks = block.attachments ?? [];
   const skillBlocks = block.skills ?? [];
   const mentionBlocks = block.mentions ?? [];
   const hasContent = block.content.trim().length > 0;
+  const deliveryStatus = block.deliveryStatus ?? "settled";
 
   return (
     <div className="msg-notice msg-notice--steer">
@@ -638,6 +663,23 @@ function SteerBlockView({ block }: { block: SteerBlock }) {
                 />
               );
             })}
+          </div>
+        )}
+        {deliveryStatus !== "settled" && (
+          <div
+            className={`msg-steer-delivery${deliveryStatus === "failed" ? " msg-steer-delivery--failed" : ""}`}
+            role="status"
+            aria-live="polite"
+            title={block.failureReason}
+          >
+            {deliveryStatus === "sending" ? (
+              <Loader2 size={11} className="chat-send-spinner" />
+            ) : deliveryStatus === "failed" ? (
+              <XCircle size={11} />
+            ) : (
+              <CheckCircle2 size={11} />
+            )}
+            <span>{t(`messageBlocks.steerDelivery.${deliveryStatus}`)}</span>
           </div>
         )}
       </div>
@@ -1304,6 +1346,9 @@ function ApprovalCard({
     );
   }
 
+  // MCP 授权决策已统一由输入框上方的固定授权栏处理，避免同一 approvalId
+  // 在消息卡片和固定授权栏中各出现一组“拒绝/批准”按钮。
+  /*
   function respondMcpElicitation(
     action: "accept" | "decline",
   ) {
@@ -1312,6 +1357,7 @@ function ApprovalCard({
       buildMcpElicitationApprovalResponse(details, action),
     );
   }
+  */
 
   return (
     <div className="msg-approval-block">
@@ -1478,6 +1524,7 @@ function ApprovalCard({
           <p className="acard-reason">
             {t("messageBlocks.approval.mcpElicitationPrompt")}
           </p>
+          {/* MCP 授权按钮统一显示在底部固定授权栏；卡片继续承载请求详情和高级 JSON。
           <div className="acard-advanced-footer">
             <button
               type="button"
@@ -1494,6 +1541,7 @@ function ApprovalCard({
               {t("panel.approvalActions.approve")}
             </button>
           </div>
+          */}
           <button
             type="button"
             className="acard-toggle"
@@ -1737,7 +1785,7 @@ function MessageBlocksView({
 }: Props) {
   const { t } = useTranslation("chat");
   const [expandedActionGroups, setExpandedActionGroups] = useState<Record<string, boolean>>({});
-  const [hooksExpanded, setHooksExpanded] = useState(false);
+  const [expandedHookGroups, setExpandedHookGroups] = useState<Record<string, boolean>>({});
 
   const toggleActionGroup = useCallback((groupId: string) => {
     setExpandedActionGroups((current) => ({
@@ -1754,58 +1802,55 @@ function MessageBlocksView({
   );
 
   const isStreaming = status === "streaming";
-  const { hookNotices, visibleBlocks } = useMemo(() => {
-    const hookNotices: Array<{ block: NoticeBlock; index: number }> = [];
-    const visibleBlocks: ContentBlock[] = [];
-
-    safeBlocks.forEach((block, index) => {
-      if (
-        block.type === "notice" &&
-        (block.kind.startsWith("hook_") || block.kind.startsWith("codex_hook_"))
-      ) {
-        hookNotices.push({ block, index });
-        return;
-      }
-      visibleBlocks.push(block);
-    });
-
-    return { hookNotices, visibleBlocks };
-  }, [safeBlocks]);
   const blockSegments = useMemo(
-    () => buildBlockSegments(visibleBlocks, isStreaming),
-    [visibleBlocks, isStreaming],
+    () => buildBlockSegments(safeBlocks, isStreaming),
+    [safeBlocks, isStreaming],
   );
-  const hookNoticeRegionId = `message-hooks-${messageId}`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      {hookNotices.length > 0 && (
-        <div className="msg-hook-notices">
-          <button
-            type="button"
-            className="msg-hooks-toggle"
-            aria-expanded={hooksExpanded}
-            aria-controls={hookNoticeRegionId}
-            onClick={() => setHooksExpanded((expanded) => !expanded)}
-          >
-            <span>{t("messageBlocks.hooks", { count: hookNotices.length })}</span>
-            {hooksExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-          </button>
-          {hooksExpanded && (
-            <div id={hookNoticeRegionId} className="msg-hooks-content">
-              {hookNotices.map(({ block, index }) => (
-                <NoticeBlockView
-                  key={getMessageBlockKey(block, index, safeBlocks)}
-                  block={block}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
       {blockSegments.map((segment, segIdx) => {
+        if (segment.kind === "hook-group") {
+          const groupKey = getMessageBlockKey(
+            segment.blocks[0],
+            segment.indices[0],
+            safeBlocks,
+          );
+          const groupId = `message-hooks-${messageId}-${encodeURIComponent(groupKey)}`;
+          const hooksExpanded = expandedHookGroups[groupId] ?? false;
+          return (
+            <div key={groupId} className="msg-hook-notices">
+              <button
+                type="button"
+                className="msg-hooks-toggle"
+                aria-expanded={hooksExpanded}
+                aria-controls={groupId}
+                onClick={() =>
+                  setExpandedHookGroups((current) => ({
+                    ...current,
+                    [groupId]: !(current[groupId] ?? false),
+                  }))
+                }
+              >
+                <span>{t("messageBlocks.hooks", { count: segment.blocks.length })}</span>
+                {hooksExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              </button>
+              {hooksExpanded && (
+                <div id={groupId} className="msg-hooks-content">
+                  {segment.blocks.map((block, index) => (
+                    <NoticeBlockView
+                      key={getMessageBlockKey(block, segment.indices[index], safeBlocks)}
+                      block={block}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        }
+
         if (segment.kind === "action-card") {
-          const groupAnchorId = getActionCardAnchorId(segment.segments[0], visibleBlocks);
+          const groupAnchorId = getActionCardAnchorId(segment.segments[0], safeBlocks);
           return (
             <div key={`action-card-${segIdx}`} className="msg-action-card">
               {segment.segments.map((inner, innerIdx) => {
@@ -1823,11 +1868,11 @@ function MessageBlocksView({
                 }
                 if (inner.block.type === "thinking") {
                   const thinkingBlock = inner.block as ThinkingBlock;
-                  const isLastBlock = inner.index === visibleBlocks.length - 1;
+                  const isLastBlock = inner.index === safeBlocks.length - 1;
                   const thinkingActive = status === "streaming" && isLastBlock;
                   return (
                     <ThinkingBlockView
-                      key={getMessageBlockKey(inner.block, inner.index, visibleBlocks)}
+                      key={getMessageBlockKey(inner.block, inner.index, safeBlocks)}
                       block={thinkingBlock}
                       isStreaming={thinkingActive}
                     />
@@ -1846,7 +1891,7 @@ function MessageBlocksView({
                 if (inner.block.type === "diff") {
                   return (
                     <MessageDiffBlock
-                      key={getMessageBlockKey(inner.block, inner.index, visibleBlocks)}
+                      key={getMessageBlockKey(inner.block, inner.index, safeBlocks)}
                       block={inner.block as DiffBlock}
                       onOpenDiffFile={onOpenDiffFile}
                     />
@@ -1883,7 +1928,7 @@ function MessageBlocksView({
         return renderSingleBlock(
           segment.block,
           segment.index,
-          visibleBlocks,
+          safeBlocks,
           status,
           engineId,
           onApproval,

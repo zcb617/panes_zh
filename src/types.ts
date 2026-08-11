@@ -385,6 +385,7 @@ export interface TextBlock {
   content: string;
   planMode?: boolean;
   isSteer?: boolean;
+  clientSteerId?: string;
 }
 
 export interface CodeBlock {
@@ -550,10 +551,22 @@ export interface MentionBlock {
   path: string;
 }
 
+export type SteerDeliveryStatus = "sending" | "accepted" | "applied" | "failed" | "settled";
+
+export interface SteerReceipt {
+  clientSteerId: string;
+  expectedTurnId: string;
+  acceptedAt: string;
+}
+
 export interface SteerBlock {
   type: "steer";
   steerId: string;
   content: string;
+  deliveryStatus?: SteerDeliveryStatus;
+  expectedTurnId?: string;
+  acceptedAt?: string;
+  failureReason?: string;
   planMode?: boolean;
   attachments?: AttachmentBlock[];
   skills?: SkillBlock[];
@@ -1477,6 +1490,15 @@ export interface NoticeEvent {
   message: string;
 }
 
+export interface SteerAppliedEvent {
+  type: "SteerApplied";
+  client_steer_id: string;
+  content: string;
+  plan_mode: boolean;
+  attachments: ChatAttachment[];
+  input_items: ChatInputItem[];
+}
+
 export type StreamEvent =
   | TurnStartedEvent
   | TurnCompletedEvent
@@ -1491,6 +1513,7 @@ export type StreamEvent =
   | ApprovalResolvedEvent
   | ModelReroutedEvent
   | NoticeEvent
+  | SteerAppliedEvent
   | ErrorEvent
   | UsageLimitsUpdatedEvent;
 

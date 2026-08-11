@@ -1713,7 +1713,21 @@ button.linux-window-update-control:hover {
   max-width: 70ch;
   white-space: pre-wrap; word-break: break-word;
 }
+.msg-notice--steer {
+  align-self: flex-end;
+  max-width: 75%;
+  margin-left: auto;
+}
 .msg-notice--steer .msg-notice-message { color: var(--text-1); font-size: 12.5px; }
+.msg-steer-delivery {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.msg-steer-delivery--failed { color: var(--danger); }
 
 .msg-block-tile--info { background: var(--info-surface); color: var(--info); }
 .msg-block-tile--accent { background: var(--accent-dim); color: var(--accent); }
@@ -9132,6 +9146,16 @@ button.chat-context-section:hover {
   display: flex;
   gap: 3px;
   align-items: center;
+}
+
+.chat-turn-tail-status {
+  margin: 7px 14px 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .chat-streaming-dots span {

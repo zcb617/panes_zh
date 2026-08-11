@@ -224,6 +224,14 @@ pub struct MessageWindowDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SteerReceiptDto {
+    pub client_steer_id: String,
+    pub expected_turn_id: String,
+    pub accepted_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionOutputChunkDto {
     pub stream: String,
     pub content: String,

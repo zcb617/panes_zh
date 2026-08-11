@@ -18,6 +18,7 @@ import type {
   NoticeBlock,
   SkillBlock,
   SteerBlock,
+  SteerDeliveryStatus,
   StreamEvent,
   ThreadStatus
 } from "../types";
@@ -609,6 +610,7 @@ function createSteerBlock(
     inputItems?: ChatInputItem[];
     planMode?: boolean;
     steerId?: string;
+    deliveryStatus?: SteerDeliveryStatus;
   },
 ): SteerBlock {
   const attachments = (options?.attachments ?? []).map<AttachmentBlock>((attachment) => ({
@@ -642,6 +644,7 @@ function createSteerBlock(
     type: "steer",
     steerId: options?.steerId ?? crypto.randomUUID(),
     content: message,
+    deliveryStatus: options?.deliveryStatus ?? "sending",
     planMode: options?.planMode || undefined,
     attachments: attachments.length > 0 ? attachments : undefined,
     skills: skills.length > 0 ? skills : undefined,
@@ -649,7 +652,10 @@ function createSteerBlock(
   };
 }
 
-function createSteerBlockFromMessage(message: Message): SteerBlock {
+function createSteerBlockFromMessage(
+  message: Message,
+  deliveryStatus: SteerDeliveryStatus,
+): SteerBlock {
   const blocks = Array.isArray(message.blocks) ? message.blocks : [];
   const content =
     typeof message.content === "string" && message.content.length > 0
@@ -666,11 +672,18 @@ function createSteerBlockFromMessage(message: Message): SteerBlock {
   const planMode = blocks.some(
     (block) => block.type === "text" && Boolean(block.planMode),
   );
+  const clientSteerId = blocks.find(
+    (block) => block.type === "text" && block.isSteer === true && block.clientSteerId,
+  );
 
   return {
     type: "steer",
-    steerId: message.id,
+    steerId:
+      clientSteerId?.type === "text" && clientSteerId.clientSteerId
+        ? clientSteerId.clientSteerId
+        : message.id,
     content,
+    deliveryStatus,
     planMode: planMode || undefined,
     attachments: attachments.length > 0 ? attachments : undefined,
     skills: skills.length > 0 ? skills : undefined,
@@ -734,15 +747,53 @@ function appendSteerBlockToActiveAssistant(
   ];
 }
 
-function removeSteerBlock(messages: Message[], steerId: string): Message[] {
+/*
+ * 旧逻辑在 steer RPC 失败时直接删除乐观插入的块。保留这段代码作为行为变更记录：
+ * function removeSteerBlock(messages: Message[], steerId: string): Message[] {
+ *   ...通过 filter 删除对应 steer block...
+ * }
+ *
+ * 新逻辑保留用户输入，并把块标记为 failed，避免用户误以为追加消息已经丢失。
+ */
+function updateSteerBlockDelivery(
+  messages: Message[],
+  steerId: string | null,
+  deliveryStatus: SteerDeliveryStatus,
+  details?: {
+    expectedTurnId?: string;
+    acceptedAt?: string;
+    failureReason?: string;
+  },
+): Message[] {
   let nextMessages = messages;
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     const blocks = message.blocks ?? [];
-    const nextBlocks = blocks.filter(
-      (block) => !(block.type === "steer" && block.steerId === steerId),
-    );
-    if (nextBlocks.length === blocks.length) {
+    let blocksChanged = false;
+    const nextBlocks = blocks.map((block) => {
+      if (
+        block.type !== "steer" ||
+        (steerId !== null && block.steerId !== steerId) ||
+        (steerId === null &&
+          (block.deliveryStatus === "failed" || block.deliveryStatus === "settled")) ||
+        (deliveryStatus === "accepted" &&
+          (block.deliveryStatus === "applied" || block.deliveryStatus === "settled")) ||
+        (block.deliveryStatus === "applied" && deliveryStatus === "failed")
+      ) {
+        return block;
+      }
+
+      blocksChanged = true;
+      return {
+        ...block,
+        deliveryStatus,
+        expectedTurnId: details?.expectedTurnId ?? block.expectedTurnId,
+        acceptedAt: details?.acceptedAt ?? block.acceptedAt,
+        failureReason:
+          deliveryStatus === "failed" ? details?.failureReason ?? block.failureReason : undefined,
+      };
+    });
+    if (!blocksChanged) {
       continue;
     }
 
@@ -758,6 +809,26 @@ function removeSteerBlock(messages: Message[], steerId: string): Message[] {
   }
 
   return nextMessages;
+}
+
+function settlePendingSteerBlocks(blocks: ContentBlock[] | undefined): ContentBlock[] | undefined {
+  if (!blocks) {
+    return blocks;
+  }
+
+  let changed = false;
+  const nextBlocks = blocks.map((block) => {
+    if (
+      block.type !== "steer" ||
+      block.deliveryStatus === "failed" ||
+      block.deliveryStatus === "settled"
+    ) {
+      return block;
+    }
+    changed = true;
+    return { ...block, deliveryStatus: "settled" as const };
+  });
+  return changed ? nextBlocks : blocks;
 }
 
 function collapseTrailingSteerMessages(messages: Message[]): Message[] {
@@ -778,7 +849,10 @@ function collapseTrailingSteerMessages(messages: Message[]): Message[] {
     if (isSteerCandidate) {
       collapsed[collapsed.length - 1] = appendSteerBlockToAssistantMessage(
         previous,
-        createSteerBlockFromMessage(message),
+        createSteerBlockFromMessage(
+          message,
+          previous.status === "streaming" ? "accepted" : "settled",
+        ),
       );
       changed = true;
       continue;
@@ -954,6 +1028,10 @@ function upsertNoticeBlock(blocks: ContentBlock[], block: NoticeBlock): ContentB
     const next = [...blocks];
     next[idx] = block;
     return next;
+  }
+
+  if (block.kind.startsWith("hook_") || block.kind.startsWith("codex_hook_")) {
+    return [...blocks, block];
   }
 
   return [block, ...blocks];
@@ -1376,7 +1454,24 @@ function applyStreamEvent(messages: Message[], event: StreamEvent, threadId: str
   const currentAssistant = next[assistantIndex];
   const assistant: Message = { ...currentAssistant };
   const existingBlocks = currentAssistant.blocks ?? [];
-  assistant.blocks = existingBlocks;
+  let trailingPendingSteers: SteerBlock[] = [];
+  if (event.type === "TurnCompleted") {
+    assistant.blocks = existingBlocks;
+  } else {
+    trailingPendingSteers = existingBlocks.filter(
+      (block): block is SteerBlock =>
+        block.type === "steer" &&
+        (block.deliveryStatus === "sending" || block.deliveryStatus === "accepted"),
+    );
+    assistant.blocks =
+      trailingPendingSteers.length > 0
+        ? existingBlocks.filter(
+            (block) =>
+              block.type !== "steer" ||
+              (block.deliveryStatus !== "sending" && block.deliveryStatus !== "accepted"),
+          )
+        : existingBlocks;
+  }
 
   if (event.type === "TurnStarted" && typeof event.client_turn_id === "string") {
     assistant.clientTurnId = event.client_turn_id;
@@ -1431,6 +1526,43 @@ function applyStreamEvent(messages: Message[], event: StreamEvent, threadId: str
       ];
     } else {
       assistant.blocks = [...blocks, { type: "thinking" as const, content: delta, startedAt: Date.now() }];
+    }
+  }
+
+  if (event.type === "SteerApplied") {
+    const clientSteerId = String(event.client_steer_id ?? "");
+    const pendingIndex = trailingPendingSteers.findIndex(
+      (block) => block.steerId === clientSteerId,
+    );
+    const pendingBlock =
+      pendingIndex >= 0 ? trailingPendingSteers[pendingIndex] : undefined;
+    if (pendingIndex >= 0) {
+      trailingPendingSteers = trailingPendingSteers.filter(
+        (_block, index) => index !== pendingIndex,
+      );
+    }
+
+    const blocks = assistant.blocks ?? [];
+    const existingIndex = blocks.findIndex(
+      (block) => block.type === "steer" && block.steerId === clientSteerId,
+    );
+    if (existingIndex >= 0) {
+      assistant.blocks = blocks.map((block, index) =>
+        index === existingIndex && block.type === "steer"
+          ? { ...block, deliveryStatus: "applied" as const }
+          : block,
+      );
+    } else {
+      const appliedBlock = pendingBlock
+        ? { ...pendingBlock, deliveryStatus: "applied" as const }
+        : createSteerBlock(String(event.content ?? ""), {
+            steerId: clientSteerId,
+            deliveryStatus: "applied",
+            planMode: Boolean(event.plan_mode),
+            attachments: Array.isArray(event.attachments) ? event.attachments : [],
+            inputItems: Array.isArray(event.input_items) ? event.input_items : [],
+          });
+      assistant.blocks = [...blocks, appliedBlock];
     }
   }
 
@@ -1636,7 +1768,13 @@ function applyStreamEvent(messages: Message[], event: StreamEvent, threadId: str
 
   if (event.type === "Error") {
     const blocks = assistant.blocks ?? [];
-    assistant.blocks = [...blocks, { type: "error", message: String(event.message ?? "Unknown error") }];
+    const errorBlocks: ContentBlock[] = [
+      ...blocks,
+      { type: "error", message: String(event.message ?? "Unknown error") },
+    ];
+    assistant.blocks = event.recoverable
+      ? errorBlocks
+      : settlePendingSteerBlocks(errorBlocks);
     if (!event.recoverable) {
       assistant.status = "error";
     }
@@ -1659,8 +1797,9 @@ function applyStreamEvent(messages: Message[], event: StreamEvent, threadId: str
         : status === "failed"
           ? "Action did not report completion because the turn failed."
           : undefined;
-    const blocks = assistant.blocks ?? [];
-    let finalizedAction = false;
+    const currentBlocks = assistant.blocks ?? [];
+    const blocks = settlePendingSteerBlocks(currentBlocks) ?? [];
+    let finalizedBlocksChanged = blocks !== currentBlocks;
     const finalizedBlocks = blocks.map((block) => {
       if (
         block.type !== "action" ||
@@ -1669,7 +1808,7 @@ function applyStreamEvent(messages: Message[], event: StreamEvent, threadId: str
         return block;
       }
 
-      finalizedAction = true;
+      finalizedBlocksChanged = true;
       return {
         ...block,
         status: (actionSucceeded ? "done" : "error") as ActionBlock["status"],
@@ -1684,9 +1823,14 @@ function applyStreamEvent(messages: Message[], event: StreamEvent, threadId: str
             }),
       };
     });
-    if (finalizedAction) {
+    if (finalizedBlocksChanged) {
       assistant.blocks = finalizedBlocks;
     }
+  }
+
+
+  if (trailingPendingSteers.length > 0) {
+    assistant.blocks = [...(assistant.blocks ?? []), ...trailingPendingSteers];
   }
 
   assistant.hydration = "full";
@@ -2253,6 +2397,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       attachments,
       inputItems,
       planMode,
+      deliveryStatus: "sending",
     });
 
     set((current) => ({
@@ -2263,17 +2408,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
 
     try {
-      await ipc.steerMessage(
+      const receipt = await ipc.steerMessage(
         threadId,
         message,
         attachments.length > 0 ? attachments : null,
         inputItems.length > 0 ? inputItems : null,
         planMode,
+        steerBlock.steerId,
       );
+      if (receipt.clientSteerId !== steerBlock.steerId) {
+        throw new Error(
+          `Steer receipt mismatch: expected ${steerBlock.steerId}, received ${receipt.clientSteerId}`,
+        );
+      }
+      set((current) => ({
+        messages: applyHydrationWindow(
+          updateSteerBlockDelivery(
+            current.messages,
+            receipt.clientSteerId,
+            "accepted",
+            {
+              expectedTurnId: receipt.expectedTurnId,
+              acceptedAt: receipt.acceptedAt,
+            },
+          ),
+        ),
+      }));
       return true;
     } catch (error) {
       set((current) => ({
-        messages: applyHydrationWindow(removeSteerBlock(current.messages, steerBlock.steerId)),
+        messages: applyHydrationWindow(
+          updateSteerBlockDelivery(current.messages, steerBlock.steerId, "failed", {
+            failureReason: String(error),
+          }),
+        ),
         error: String(error),
       }));
       return false;
@@ -2288,18 +2456,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       await ipc.cancelTurn(threadId);
       pendingTurnMetaByThread.delete(threadId);
+      const currentState = get();
+      if (currentState.threadId !== threadId || !currentState.streaming) {
+        return;
+      }
       // Remove the trailing assistant message if it has no meaningful content
       // (e.g. only thinking blocks with no text, or completely empty)
-      const messages = get().messages;
-      const last = messages[messages.length - 1];
+      const messages = updateSteerBlockDelivery(
+        currentState.messages,
+        null,
+        "settled",
+      );
+      const interruptedMessages = applyStreamEvent(
+        messages,
+        { type: "TurnCompleted", status: "interrupted" },
+        threadId,
+      );
+      const last = interruptedMessages[interruptedMessages.length - 1];
       const lastHasContent = last?.role === "assistant" && (last.blocks ?? []).some((b) => {
         if (b.type === "text") return Boolean(b.content?.trim());
-        if (b.type === "action" || b.type === "diff" || b.type === "code" || b.type === "approval") return true;
+        if (b.type === "action" || b.type === "diff" || b.type === "code" || b.type === "approval" || b.type === "steer") return true;
         return false;
       });
       const nextMessages = last?.role === "assistant" && !lastHasContent
-        ? messages.slice(0, -1)
-        : messages;
+        ? interruptedMessages.slice(0, -1)
+        : interruptedMessages;
       set({ status: "idle", streaming: false, turnStartedAt: null, messages: nextMessages });
     } catch (error) {
       set({ error: String(error) });

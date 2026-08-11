@@ -1401,6 +1401,16 @@ function MessageRowView({
   const hasAssistantContent = !isUser && hasVisibleContent(message.blocks);
   const showAssistantShell = !isUser && (hasAssistantContent || message.status === "streaming");
   const showThinkingPlaceholder = showAssistantShell && !hasAssistantContent;
+  const showTurnTail = hasAssistantContent && message.status === "streaming";
+  const hasPendingApproval = (message.blocks ?? []).some(
+    (block) => block.type === "approval" && block.status === "pending",
+  );
+  const runningAction = (message.blocks ?? []).find(
+    (block) => block.type === "action" && block.status === "running",
+  );
+  const hasAcceptedSteer = (message.blocks ?? []).some(
+    (block) => block.type === "steer" && block.deliveryStatus === "accepted",
+  );
   const thinkingVariant = useThinkingVariant(showThinkingPlaceholder);
 
   return (
@@ -1499,15 +1509,41 @@ function MessageRowView({
             </div>
           )}
           {hasAssistantContent ? (
-            <MessageBlocks
-              messageId={message.id}
-              blocks={message.blocks}
-              status={message.status}
-              engineId={assistantEngineId}
-              onApproval={onApproval}
-              onLoadActionOutput={(actionId) => onLoadActionOutput(message.id, actionId)}
-              onOpenDiffFile={onOpenDiffFile}
-            />
+            <>
+              <MessageBlocks
+                messageId={message.id}
+                blocks={message.blocks}
+                status={message.status}
+                engineId={assistantEngineId}
+                onApproval={onApproval}
+                onLoadActionOutput={(actionId) => onLoadActionOutput(message.id, actionId)}
+                onOpenDiffFile={onOpenDiffFile}
+              />
+              {showTurnTail && (
+                <div className="chat-turn-tail-status" role="status" aria-live="polite">
+                  <Loader2 size={12} className="chat-send-spinner" aria-hidden="true" />
+                  <span>
+                    {t(
+                      hasPendingApproval
+                        ? "messageBlocks.turnProgress.waitingForApproval"
+                        : runningAction?.type === "action"
+                          ? "messageBlocks.turnProgress.runningAction"
+                          : hasAcceptedSteer
+                            ? "messageBlocks.turnProgress.runningWithSteer"
+                            : "messageBlocks.turnProgress.running",
+                      runningAction?.type === "action"
+                        ? { summary: runningAction.summary }
+                        : undefined,
+                    )}
+                  </span>
+                  <span className="chat-streaming-dots" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </span>
+                </div>
+              )}
+            </>
           ) : (
             <div
               style={{

@@ -395,7 +395,8 @@ pub struct BrowserAnnotationMetadata {
     pub target_label: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnAttachment {
     pub file_name: String,
     pub file_path: String,
@@ -410,6 +411,11 @@ pub struct TurnInput {
     pub attachments: Vec<TurnAttachment>,
     pub plan_mode: bool,
     pub input_items: Vec<TurnInputItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineSteerReceipt {
+    pub expected_turn_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -447,8 +453,10 @@ pub trait Engine: Send + Sync {
     async fn steer_message(
         &self,
         engine_thread_id: &str,
+        client_steer_id: &str,
+        content: &str,
         input: TurnInput,
-    ) -> Result<(), anyhow::Error>;
+    ) -> Result<EngineSteerReceipt, anyhow::Error>;
 
     async fn respond_to_approval(
         &self,
@@ -833,22 +841,24 @@ impl EngineManager {
         &self,
         thread: &ThreadDto,
         engine_thread_id: &str,
+        client_steer_id: &str,
+        content: &str,
         input: TurnInput,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<EngineSteerReceipt> {
         match thread.engine_id.as_str() {
             "codex" => self
                 .codex
-                .steer_message(engine_thread_id, input)
+                .steer_message(engine_thread_id, client_steer_id, content, input)
                 .await
                 .context("codex steer_message failed"),
             "claude" => self
                 .claude
-                .steer_message(engine_thread_id, input)
+                .steer_message(engine_thread_id, client_steer_id, content, input)
                 .await
                 .context("claude steer_message failed"),
             "opencode" => self
                 .opencode
-                .steer_message(engine_thread_id, input)
+                .steer_message(engine_thread_id, client_steer_id, content, input)
                 .await
                 .context("opencode steer_message failed"),
             _ => anyhow::bail!("unsupported engine_id {}", thread.engine_id),

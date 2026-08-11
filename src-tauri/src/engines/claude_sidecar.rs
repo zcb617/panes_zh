@@ -25,8 +25,9 @@ use crate::{process_utils, runtime_env};
 
 use super::{
     normalize_approval_response_for_engine, trim_action_output_delta_content, ActionResult,
-    ActionType, ApprovalRequestRoute, Engine, EngineEvent, EngineThread, ModelInfo, OutputStream,
-    ReasoningEffortOption, SandboxPolicy, ThreadScope, TurnCompletionStatus, TurnInput,
+    ActionType, ApprovalRequestRoute, Engine, EngineEvent, EngineSteerReceipt, EngineThread,
+    ModelInfo, OutputStream, ReasoningEffortOption, SandboxPolicy, ThreadScope,
+    TurnCompletionStatus, TurnInput,
 };
 
 const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -2219,8 +2220,10 @@ impl Engine for ClaudeSidecarEngine {
     async fn steer_message(
         &self,
         _engine_thread_id: &str,
+        _client_steer_id: &str,
+        _content: &str,
         _input: TurnInput,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<EngineSteerReceipt, anyhow::Error> {
         anyhow::bail!("Claude does not support mid-turn steering")
     }
 

@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     collections::HashMap,
+    collections::VecDeque,
     env,
     ffi::OsString,
     path::{Path, PathBuf},
@@ -38,8 +39,8 @@ use super::{
     codex_event_mapper::TurnEventMapper,
     codex_protocol::{raw_value_to_value, IncomingMessage},
     codex_transport::{CodexTransport, CodexTransportMessage},
-    ApprovalRequestRoute, CodexRemoteThreadSummary, Engine, EngineEvent, EngineThread,
-    ImportedThreadMessage, ModelAvailabilityNux, ModelInfo, ModelUpgradeInfo,
+    ApprovalRequestRoute, CodexRemoteThreadSummary, Engine, EngineEvent, EngineSteerReceipt,
+    EngineThread, ImportedThreadMessage, ModelAvailabilityNux, ModelInfo, ModelUpgradeInfo,
     ReasoningEffortOption, SandboxPolicy, ThreadScope, ThreadSyncSnapshot, TurnAttachment,
     TurnCompletionStatus, TurnInput, TurnInputItem, UsageLimitsSnapshot,
 };
@@ -245,12 +246,21 @@ struct TurnStartOutcome {
     native_plan_mode_active: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PendingSteer {
+    expected_turn_id: String,
+    client_steer_id: String,
+    content: String,
+    input: TurnInput,
+}
+
 #[derive(Default)]
 struct CodexState {
     transport: Option<Arc<CodexTransport>>,
     initialized: bool,
     approval_requests: HashMap<String, PendingApproval>,
     active_turn_ids: HashMap<String, String>,
+    pending_steers: HashMap<String, VecDeque<PendingSteer>>,
     thread_runtimes: HashMap<String, ThreadRuntime>,
     runtime_model_cache: Option<Vec<ModelInfo>>,
     sandbox_probe_completed: bool,
@@ -697,6 +707,7 @@ impl Engine for CodexEngine {
         let mut turn_request_done = false;
         let mut completion_seen = false;
         let mut expected_turn_id: Option<String> = None;
+        let mut initial_user_message_seen = false;
         let mut completion_last_progress_at: Option<Instant> = None;
         let completion_inactivity_timeout = completion_inactivity_timeout();
 
@@ -875,6 +886,58 @@ impl Engine for CodexEngine {
                     }
                     if turn_request_done && !completion_seen {
                       completion_last_progress_at = Some(Instant::now());
+                    }
+
+                    if normalized_method == "item/started"
+                      && params
+                        .get("item")
+                        .and_then(|item| item.get("type"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("userMessage")
+                    {
+                      if !initial_user_message_seen {
+                        initial_user_message_seen = true;
+                      } else {
+                        let pending_steer = {
+                          let mut state = self.state.lock().await;
+                          let (pending, remove_queue) = match state.pending_steers.get_mut(&thread_id) {
+                            Some(queue) => {
+                              let expected_matches = queue.front().is_some_and(|pending| {
+                                Some(pending.expected_turn_id.as_str()) == expected_turn_id.as_deref()
+                              });
+                              let pending = expected_matches.then(|| queue.pop_front()).flatten();
+                              (pending, queue.is_empty())
+                            }
+                            None => (None, false),
+                          };
+                          if remove_queue {
+                            state.pending_steers.remove(&thread_id);
+                          }
+                          pending
+                        };
+
+                        if let Some(pending) = pending_steer {
+                          append_codex_transport_log(&serde_json::json!({
+                            "at": chrono::Utc::now().to_rfc3339(),
+                            "event": "steer_applied",
+                            "engine_thread_id": thread_id,
+                            "expected_turn_id": pending.expected_turn_id,
+                            "client_steer_id": pending.client_steer_id,
+                          })).await;
+                          send_engine_event_with_diagnostics(
+                            &event_tx,
+                            EngineEvent::SteerApplied {
+                              client_steer_id: pending.client_steer_id,
+                              content: pending.content,
+                              plan_mode: pending.input.plan_mode,
+                              attachments: pending.input.attachments,
+                              input_items: pending.input.input_items,
+                            },
+                            &thread_id,
+                            "steer_applied",
+                          ).await;
+                        }
+                      }
                     }
 
                     let mapped_events = mapper.map_notification(&method, &params);
@@ -1170,8 +1233,10 @@ impl Engine for CodexEngine {
     async fn steer_message(
         &self,
         engine_thread_id: &str,
+        client_steer_id: &str,
+        content: &str,
         input: TurnInput,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<EngineSteerReceipt, anyhow::Error> {
         let transport = self.ensure_ready_transport().await?;
         validate_turn_attachments(&input.attachments).await?;
 
@@ -1181,16 +1246,43 @@ impl Engine for CodexEngine {
             )
         })?;
 
-        request_turn_steer(
+        {
+            let mut state = self.state.lock().await;
+            state
+                .pending_steers
+                .entry(engine_thread_id.to_string())
+                .or_default()
+                .push_back(PendingSteer {
+                    expected_turn_id: expected_turn_id.clone(),
+                    client_steer_id: client_steer_id.to_string(),
+                    content: content.to_string(),
+                    input: input.clone(),
+                });
+        }
+
+        if let Err(error) = request_turn_steer(
             transport.as_ref(),
             engine_thread_id,
             &expected_turn_id,
             &input,
         )
         .await
-        .context("turn/steer request failed")?;
+        {
+            let mut state = self.state.lock().await;
+            let remove_queue = match state.pending_steers.get_mut(engine_thread_id) {
+                Some(queue) => {
+                    queue.retain(|pending| pending.client_steer_id != client_steer_id);
+                    queue.is_empty()
+                }
+                None => false,
+            };
+            if remove_queue {
+                state.pending_steers.remove(engine_thread_id);
+            }
+            return Err(error).context("turn/steer request failed");
+        }
 
-        Ok(())
+        Ok(EngineSteerReceipt { expected_turn_id })
     }
 
     async fn respond_to_approval(
@@ -2588,6 +2680,7 @@ impl CodexEngine {
             state.initialized = false;
             state.approval_requests.clear();
             state.active_turn_ids.clear();
+            state.pending_steers.clear();
             state.thread_runtimes.clear();
             state.sandbox_probe_completed = false;
             state.force_external_sandbox = false;
@@ -3340,6 +3433,7 @@ impl CodexEngine {
     async fn clear_active_turn(&self, engine_thread_id: &str) {
         let mut state = self.state.lock().await;
         state.active_turn_ids.remove(engine_thread_id);
+        state.pending_steers.remove(engine_thread_id);
     }
 
     async fn active_turn_id(&self, engine_thread_id: &str) -> Option<String> {
@@ -6989,6 +7083,7 @@ pub(crate) fn engine_event_kind(event: &EngineEvent) -> &'static str {
         EngineEvent::TurnCompleted { .. } => "turn_completed",
         EngineEvent::TextDelta { .. } => "text_delta",
         EngineEvent::ThinkingDelta { .. } => "thinking_delta",
+        EngineEvent::SteerApplied { .. } => "steer_applied",
         EngineEvent::ActionStarted { .. } => "action_started",
         EngineEvent::ActionOutputDelta { .. } => "action_output_delta",
         EngineEvent::ActionProgressUpdated { .. } => "action_progress_updated",

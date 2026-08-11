@@ -545,6 +545,19 @@
     "noChanges": "没有更改",
     "thinking": "思考中",
     "hooks": "Hooks（{{count}}）",
+    "steerDelivery": {
+      "sending": "正在发送追加消息…",
+      "accepted": "已接收，等待进入当前处理步骤",
+      "applied": "已进入当前处理步骤",
+      "failed": "追加消息发送失败",
+      "settled": "当前回合已结束"
+    },
+    "turnProgress": {
+      "running": "Codex 仍在运行",
+      "runningAction": "正在执行：{{summary}}",
+      "runningWithSteer": "Codex 仍在运行，追加消息正在等待进入当前处理步骤",
+      "waitingForApproval": "等待你的确认"
+    },
     "actionStatus": {
       "done": "已完成",
       "running": "运行中",

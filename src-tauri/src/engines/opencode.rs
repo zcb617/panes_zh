@@ -33,9 +33,9 @@ use crate::{process_utils, runtime_env};
 
 use super::{
     normalize_approval_response_for_engine, trim_action_output_delta_content, ActionResult,
-    ActionType, ApprovalRequestRoute, DiffScope, Engine, EngineEvent, EngineThread, ModelInfo,
-    ModelLimits, OpenCodeRemoteSessionSummary, OutputStream, ReasoningEffortOption, SandboxPolicy,
-    ThreadScope, TokenUsage, TurnCompletionStatus, TurnInput,
+    ActionType, ApprovalRequestRoute, DiffScope, Engine, EngineEvent, EngineSteerReceipt,
+    EngineThread, ModelInfo, ModelLimits, OpenCodeRemoteSessionSummary, OutputStream,
+    ReasoningEffortOption, SandboxPolicy, ThreadScope, TokenUsage, TurnCompletionStatus, TurnInput,
 };
 
 const OPENCODE_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
@@ -857,7 +857,13 @@ impl Engine for OpenCodeEngine {
         }
     }
 
-    async fn steer_message(&self, _engine_thread_id: &str, _input: TurnInput) -> Result<()> {
+    async fn steer_message(
+        &self,
+        _engine_thread_id: &str,
+        _client_steer_id: &str,
+        _content: &str,
+        _input: TurnInput,
+    ) -> Result<EngineSteerReceipt> {
         anyhow::bail!("Mid-turn steering is not supported for OpenCode")
     }
 
