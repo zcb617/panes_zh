@@ -61,3 +61,4 @@ uniapp_build/simpleDemo/build.gradle
 .pnpm-store
 .agents
 .codex
+.worktree
