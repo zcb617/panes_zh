@@ -20,7 +20,7 @@ use tokio::{
     fs as tokio_fs,
     io::AsyncWriteExt,
     process::Command,
-    sync::{broadcast, mpsc, oneshot, Mutex},
+    sync::{broadcast, mpsc, oneshot, watch, Mutex},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -104,6 +104,7 @@ enum CodexIncomingQueueItem {
 fn spawn_codex_incoming_pump(
     transport: Arc<CodexTransport>,
     consumer: &'static str,
+    mut thread_filter: Option<watch::Receiver<String>>,
 ) -> mpsc::Receiver<CodexIncomingQueueItem> {
     let (queue_tx, queue_rx) = mpsc::channel(CODEX_INCOMING_QUEUE_CAPACITY);
     let mut subscription = transport.subscribe();
@@ -119,6 +120,19 @@ fn spawn_codex_incoming_pump(
                         Ok(message) => {
                             log_transport_subscription_receive(&message, consumer).await;
                             last_received_sequence = Some(message.sequence);
+                            if let Some(thread_filter) = thread_filter.as_mut() {
+                                let thread_id = thread_filter.borrow().clone();
+                                let belongs_to_thread = match &message.message {
+                                    IncomingMessage::Request { params, .. }
+                                    | IncomingMessage::Notification { params, .. } => {
+                                        belongs_to_thread(&raw_value_to_value(params), &thread_id)
+                                    }
+                                    IncomingMessage::Response(_) => true,
+                                };
+                                if !belongs_to_thread {
+                                    continue;
+                                }
+                            }
                             if queue_tx
                                 .send(CodexIncomingQueueItem::Message(message))
                                 .await
@@ -638,9 +652,11 @@ impl Engine for CodexEngine {
             return Err(anyhow::anyhow!(message));
         }
 
-        let mut mapper = TurnEventMapper::default();
-        let mut incoming_rx = spawn_codex_incoming_pump(transport.clone(), "turn");
         let thread_id = engine_thread_id.to_string();
+        let (_, thread_filter) = watch::channel(thread_id.clone());
+        let mut mapper = TurnEventMapper::default();
+        let mut incoming_rx =
+            spawn_codex_incoming_pump(transport.clone(), "turn", Some(thread_filter));
 
         let runtime = self.thread_runtime(&thread_id).await;
         let plan_mode_activation = self
@@ -827,9 +843,10 @@ impl Engine for CodexEngine {
                       return Err(anyhow::anyhow!(error_message));
                     }
 
-                    if !belongs_to_thread(&params, &thread_id) {
-                      continue;
-                    }
+                    // Thread ownership is filtered before messages enter the incoming queue.
+                    // if !belongs_to_thread(&params, &thread_id) {
+                    //   continue;
+                    // }
                     if normalized_method == "turn/started" {
                       if let Some(turn_id) = extract_turn_id(&params) {
                         rebind_expected_turn_id(
@@ -899,10 +916,11 @@ impl Engine for CodexEngine {
                       "codex server request: method={method}, id={id}, raw_id={raw_id}, params_keys={:?}",
                       params.as_object().map(|o| o.keys().collect::<Vec<_>>())
                     );
-                    if !belongs_to_thread(&params, &thread_id) {
-                      log::warn!("codex server request dropped by belongs_to_thread: method={method}");
-                      continue;
-                    }
+                    // Thread ownership is filtered before messages enter the incoming queue.
+                    // if !belongs_to_thread(&params, &thread_id) {
+                    //   log::warn!("codex server request dropped by belongs_to_thread: method={method}");
+                    //   continue;
+                    // }
                     if !belongs_to_turn(&params, expected_turn_id.as_deref()) {
                       log::warn!("codex server request dropped by belongs_to_turn: method={method}");
                       continue;
@@ -1475,9 +1493,15 @@ impl CodexEngine {
             return Err(anyhow::anyhow!(message));
         }
 
-        let mut mapper = TurnEventMapper::default();
-        let mut incoming_rx = spawn_codex_incoming_pump(transport.clone(), "review");
         let source_thread_id = source_engine_thread_id.to_string();
+        let (review_thread_filter_tx, review_thread_filter) =
+            watch::channel(source_thread_id.clone());
+        let mut mapper = TurnEventMapper::default();
+        let mut incoming_rx = spawn_codex_incoming_pump(
+            transport.clone(),
+            "review",
+            Some(review_thread_filter.clone()),
+        );
         let mut active_thread_id = source_thread_id.clone();
         let requested_delivery = delivery.map(str::to_string);
 
@@ -1580,6 +1604,7 @@ impl CodexEngine {
                     }
                 };
                 active_thread_id = review_thread_id.clone();
+                let _ = review_thread_filter_tx.send(active_thread_id.clone());
                 if let Some(started_tx) = started_tx.take() {
                     let _ = started_tx.send(CodexReviewStarted {
                         review_thread_id: review_thread_id.clone(),
@@ -1673,9 +1698,10 @@ impl CodexEngine {
                       return Err(anyhow::anyhow!(error_message));
                     }
 
-                    if !belongs_to_thread(&params, &active_thread_id) {
-                      continue;
-                    }
+                    // Thread ownership is filtered before messages enter the incoming queue.
+                    // if !belongs_to_thread(&params, &active_thread_id) {
+                    //   continue;
+                    // }
                     if normalized_method == "turn/started" {
                       if let Some(turn_id) = extract_turn_id(&params) {
                         rebind_expected_turn_id(
@@ -1745,10 +1771,11 @@ impl CodexEngine {
                       "codex review server request: method={method}, id={id}, raw_id={raw_id}, params_keys={:?}",
                       params.as_object().map(|o| o.keys().collect::<Vec<_>>())
                     );
-                    if !belongs_to_thread(&params, &active_thread_id) {
-                      log::warn!("codex review server request dropped by belongs_to_thread: method={method}");
-                      continue;
-                    }
+                    // Thread ownership is filtered before messages enter the incoming queue.
+                    // if !belongs_to_thread(&params, &active_thread_id) {
+                    //   log::warn!("codex review server request dropped by belongs_to_thread: method={method}");
+                    //   continue;
+                    // }
                     if !belongs_to_turn(&params, expected_turn_id.as_deref()) {
                       log::warn!("codex review server request dropped by belongs_to_turn: method={method}");
                       continue;
@@ -2780,7 +2807,8 @@ impl CodexEngine {
         let state = self.state.clone();
         let runtime_events = self.runtime_events.clone();
         tokio::spawn(async move {
-            let mut incoming_rx = spawn_codex_incoming_pump(transport.clone(), "runtime_monitor");
+            let mut incoming_rx =
+                spawn_codex_incoming_pump(transport.clone(), "runtime_monitor", None);
             if let Ok(diagnostics) =
                 refresh_protocol_diagnostics_for_runtime_monitor(transport.as_ref(), state.clone())
                     .await
