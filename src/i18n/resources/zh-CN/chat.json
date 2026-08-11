@@ -532,6 +532,7 @@
     "parsingDiff": "正在解析差异…",
     "noChanges": "没有更改",
     "thinking": "思考中",
+    "hooks": "Hooks（{{count}}）",
     "actionStatus": {
       "done": "已完成",
       "running": "运行中",

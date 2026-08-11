@@ -15,7 +15,9 @@ import {
   AlertTriangle,
   AtSign,
   CornerDownRight,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   DollarSign,
   ExternalLink,
   FileCode2,
@@ -1733,7 +1735,9 @@ function MessageBlocksView({
   onLoadActionOutput,
   onOpenDiffFile,
 }: Props) {
+  const { t } = useTranslation("chat");
   const [expandedActionGroups, setExpandedActionGroups] = useState<Record<string, boolean>>({});
+  const [hooksExpanded, setHooksExpanded] = useState(false);
 
   const toggleActionGroup = useCallback((groupId: string) => {
     setExpandedActionGroups((current) => ({
@@ -1750,13 +1754,58 @@ function MessageBlocksView({
   );
 
   const isStreaming = status === "streaming";
-  const blockSegments = useMemo(() => buildBlockSegments(safeBlocks, isStreaming), [safeBlocks, isStreaming]);
+  const { hookNotices, visibleBlocks } = useMemo(() => {
+    const hookNotices: Array<{ block: NoticeBlock; index: number }> = [];
+    const visibleBlocks: ContentBlock[] = [];
+
+    safeBlocks.forEach((block, index) => {
+      if (
+        block.type === "notice" &&
+        (block.kind.startsWith("hook_") || block.kind.startsWith("codex_hook_"))
+      ) {
+        hookNotices.push({ block, index });
+        return;
+      }
+      visibleBlocks.push(block);
+    });
+
+    return { hookNotices, visibleBlocks };
+  }, [safeBlocks]);
+  const blockSegments = useMemo(
+    () => buildBlockSegments(visibleBlocks, isStreaming),
+    [visibleBlocks, isStreaming],
+  );
+  const hookNoticeRegionId = `message-hooks-${messageId}`;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      {hookNotices.length > 0 && (
+        <div className="msg-hook-notices">
+          <button
+            type="button"
+            className="msg-hooks-toggle"
+            aria-expanded={hooksExpanded}
+            aria-controls={hookNoticeRegionId}
+            onClick={() => setHooksExpanded((expanded) => !expanded)}
+          >
+            <span>{t("messageBlocks.hooks", { count: hookNotices.length })}</span>
+            {hooksExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          </button>
+          {hooksExpanded && (
+            <div id={hookNoticeRegionId} className="msg-hooks-content">
+              {hookNotices.map(({ block, index }) => (
+                <NoticeBlockView
+                  key={getMessageBlockKey(block, index, safeBlocks)}
+                  block={block}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {blockSegments.map((segment, segIdx) => {
         if (segment.kind === "action-card") {
-          const groupAnchorId = getActionCardAnchorId(segment.segments[0], safeBlocks);
+          const groupAnchorId = getActionCardAnchorId(segment.segments[0], visibleBlocks);
           return (
             <div key={`action-card-${segIdx}`} className="msg-action-card">
               {segment.segments.map((inner, innerIdx) => {
@@ -1774,11 +1823,11 @@ function MessageBlocksView({
                 }
                 if (inner.block.type === "thinking") {
                   const thinkingBlock = inner.block as ThinkingBlock;
-                  const isLastBlock = inner.index === safeBlocks.length - 1;
+                  const isLastBlock = inner.index === visibleBlocks.length - 1;
                   const thinkingActive = status === "streaming" && isLastBlock;
                   return (
                     <ThinkingBlockView
-                      key={getMessageBlockKey(inner.block, inner.index, safeBlocks)}
+                      key={getMessageBlockKey(inner.block, inner.index, visibleBlocks)}
                       block={thinkingBlock}
                       isStreaming={thinkingActive}
                     />
@@ -1797,7 +1846,7 @@ function MessageBlocksView({
                 if (inner.block.type === "diff") {
                   return (
                     <MessageDiffBlock
-                      key={getMessageBlockKey(inner.block, inner.index, safeBlocks)}
+                      key={getMessageBlockKey(inner.block, inner.index, visibleBlocks)}
                       block={inner.block as DiffBlock}
                       onOpenDiffFile={onOpenDiffFile}
                     />
@@ -1834,7 +1883,7 @@ function MessageBlocksView({
         return renderSingleBlock(
           segment.block,
           segment.index,
-          safeBlocks,
+          visibleBlocks,
           status,
           engineId,
           onApproval,

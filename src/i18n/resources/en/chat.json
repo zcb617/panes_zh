@@ -532,6 +532,7 @@
     "parsingDiff": "Parsing diff...",
     "noChanges": "No changes",
     "thinking": "Thinking",
+    "hooks": "Hooks ({{count}})",
     "actionStatus": {
       "done": "Done",
       "running": "Running",

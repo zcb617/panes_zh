@@ -530,6 +530,7 @@
     "parsingDiff": "Analisando diff...",
     "noChanges": "Sem alterações",
     "thinking": "Raciocínio",
+    "hooks": "Hooks ({{count}})",
     "actionStatus": {
       "done": "Concluído",
       "running": "Em andamento",

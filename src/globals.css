@@ -1560,6 +1560,27 @@ button, input, textarea, select {
 .msg-block-chevron-open { transform: rotate(90deg); }
 .msg-block-chevron-spacer { width: 11px; flex-shrink: 0; }
 
+.msg-hook-notices { min-width: 0; }
+.msg-hooks-toggle {
+  margin: 2px 12px;
+  padding: 3px 2px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.msg-hooks-toggle:hover { color: var(--text-1); background: var(--wash-02); }
+.msg-hooks-toggle:focus-visible { outline: 2px solid var(--border-active); outline-offset: 2px; }
+.msg-hooks-content { min-width: 0; }
+
 .msg-block-tile {
   width: 18px; height: 18px; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;
