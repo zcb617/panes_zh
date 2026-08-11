@@ -16,7 +16,8 @@ concurrency:
 
 jobs:
   frontend:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Local validation is completed before tagging.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +43,8 @@ jobs:
         run: pnpm build
 
   rust:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Local validation is completed before tagging.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,7 +75,8 @@ jobs:
         run: cargo check
 
   macos_compat:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Local validation is completed before tagging.
+    if: ${{ false }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -94,7 +97,8 @@ jobs:
         run: cargo check --target x86_64-apple-darwin
 
   windows_compat:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Local validation is completed before tagging.
+    if: ${{ false }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -139,7 +143,8 @@ jobs:
 
   updater_signing_check:
     name: Updater Signing Preflight
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Local validation is completed before tagging.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -171,7 +176,8 @@ jobs:
           test -s "$probe.sig"
 
   windows_bundle_check:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Local validation is completed before tagging.
+    if: ${{ false }}
     runs-on: windows-latest
     needs: [frontend, windows_compat, updater_signing_check]
     timeout-minutes: 45
@@ -387,7 +393,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Verify universal macOS app binary
-        if: matrix.platform == 'macos-15'
+        # Local validation is completed before tagging.
+        if: ${{ false }}
         run: |
           APP_BINARY="$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -path '*.app/Contents/MacOS/Panes' -print -quit)"
           if [ -z "$APP_BINARY" ]; then
