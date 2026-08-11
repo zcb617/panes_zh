@@ -469,9 +469,7 @@ async fn emit_assistant_message_completed(
     {
         Ok(Some(message)) => message,
         Ok(None) => {
-            log::warn!(
-                "assistant message {message_id} was not found after final persistence"
-            );
+            log::warn!("assistant message {message_id} was not found after final persistence");
             return;
         }
         Err(error) => {
@@ -2377,13 +2375,7 @@ async fn run_turn(
     };
 
     if assistant_message_persisted && matches!(message_status, MessageStatusDto::Completed) {
-        emit_assistant_message_completed(
-            &app,
-            &state,
-            &thread.id,
-            &assistant_message_id,
-        )
-        .await;
+        emit_assistant_message_completed(&app, &state, &thread.id, &assistant_message_id).await;
     }
 
     if matches!(message_status, MessageStatusDto::Completed) {
@@ -2989,13 +2981,8 @@ async fn run_codex_review_turn(
     };
 
     if assistant_message_persisted && matches!(message_status, MessageStatusDto::Completed) {
-        emit_assistant_message_completed(
-            &app,
-            &state,
-            &review_thread.id,
-            &assistant_message_id,
-        )
-        .await;
+        emit_assistant_message_completed(&app, &state, &review_thread.id, &assistant_message_id)
+            .await;
     }
 
     if matches!(message_status, MessageStatusDto::Completed) {
