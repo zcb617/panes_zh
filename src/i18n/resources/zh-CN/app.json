@@ -720,6 +720,22 @@
         "unsupported": "当前平台不支持内置 SDK。",
         "loading": "Panes 正在读取本机电脑操作状态。"
       },
+      "waylandHelperTitle": "Wayland 增强组件",
+      "waylandHelperStart": "启动增强组件",
+      "waylandHelperStarting": "正在启动…",
+      "waylandHelperStates": {
+        "installed": "等待生效",
+        "running": "已启动"
+      },
+      "waylandHelperDescriptions": {
+        "available": "可选增强组件，可为 GNOME Wayland 提供精确窗口坐标、指定窗口激活和安全前台输入。",
+        "installed": "增强组件已安装，但当前会话尚未检测到服务；Panes 会自动恢复启用状态，请重新登录桌面会话或重启电脑后生效。",
+        "running": "增强组件已启动，GNOME Wayland 增强能力已经生效。",
+        "notWayland": "当前不是 Wayland 会话，无法启动此增强组件。"
+      },
+      "waylandHelperStartedToast": "增强组件已启动。",
+      "waylandHelperRestartToast": "增强组件已安装，请重新登录桌面会话或重启电脑后生效。",
+      "waylandHelperInstallFailed": "增强组件安装失败：{{error}}",
       "ready": "可用",
       "unavailable": "不可用",
     "currentAuthorizationsTitle": "永久授权",

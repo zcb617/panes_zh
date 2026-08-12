@@ -5,6 +5,7 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/helper/build/
+src-tauri/sidecar-dist/claude-sdk-node_modules.tar.gz
 *.log
 .agent-workspace/
 *.tsbuildinfo

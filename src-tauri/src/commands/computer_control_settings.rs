@@ -4,7 +4,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::{
-    computer_control_sdk::CuaDriverSdkStatus,
+    computer_control_sdk::{is_supported_platform, CuaDriverSdkStatus, CuaWaylandHelperStatus},
     computer_control_service::{ComputerControlAuthorization, ComputerControlService},
     config::app_config::AppConfig,
     state::AppState,
@@ -34,12 +34,13 @@ pub struct ComputerControlStatusDto {
     supported: bool,
     enabled: bool,
     sdk: ComputerControlSdkStatusDto,
+    wayland_helper: CuaWaylandHelperStatus,
     adapters: Vec<ComputerControlAdapterStatusDto>,
     current_authorizations: Vec<ComputerControlAuthorization>,
 }
 
 fn sdk_state(enabled: bool, status: &CuaDriverSdkStatus) -> &'static str {
-    if !cfg!(target_os = "windows") {
+    if !is_supported_platform() {
         return "unsupported";
     }
     if !enabled {
@@ -57,10 +58,11 @@ fn sdk_state(enabled: bool, status: &CuaDriverSdkStatus) -> &'static str {
 fn build_status(
     enabled: bool,
     sdk_status: CuaDriverSdkStatus,
+    wayland_helper: CuaWaylandHelperStatus,
     current_authorizations: Vec<ComputerControlAuthorization>,
 ) -> ComputerControlStatusDto {
     ComputerControlStatusDto {
-        supported: cfg!(target_os = "windows"),
+        supported: is_supported_platform(),
         enabled,
         sdk: ComputerControlSdkStatusDto {
             state: sdk_state(enabled, &sdk_status).to_string(),
@@ -69,6 +71,7 @@ fn build_status(
             driver_version: sdk_status.driver_version,
             error: sdk_status.error,
         },
+        wayland_helper,
         adapters: vec![
             ComputerControlAdapterStatusDto {
                 id: "codex".to_string(),
@@ -95,15 +98,20 @@ async fn current_status(
 ) -> Result<ComputerControlStatusDto, String> {
     let sdk = service.sdk();
     let config_task = tokio::task::spawn_blocking(AppConfig::load_or_create);
+    let helper_sdk = sdk.clone();
+    let helper_task = tokio::task::spawn_blocking(move || helper_sdk.wayland_helper_status());
     let authorizations_task = service.active_authorizations();
-    let (config_result, current_authorizations) = tokio::join!(config_task, authorizations_task);
+    let (config_result, helper_result, current_authorizations) =
+        tokio::join!(config_task, helper_task, authorizations_task);
     let config = config_result
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
+    let wayland_helper = helper_result.map_err(|error| error.to_string())?;
 
     Ok(build_status(
         config.computer_control.enabled,
         sdk.status(),
+        wayland_helper,
         current_authorizations,
     ))
 }
@@ -120,7 +128,7 @@ pub async fn set_computer_control_enabled(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<ComputerControlStatusDto, String> {
-    if enabled && !cfg!(target_os = "windows") {
+    if enabled && !is_supported_platform() {
         return Err("computer control is not supported on this platform".to_string());
     }
 
@@ -140,12 +148,23 @@ pub async fn set_computer_control_enabled(
 
     let sdk = service.sdk();
     if enabled {
-        let sdk = sdk.clone();
-        let initialization_result = tokio::task::spawn_blocking(move || sdk.initialize())
-            .await
-            .map_err(|error| error.to_string())?;
+        let initialization_sdk = sdk.clone();
+        let initialization_result =
+            tokio::task::spawn_blocking(move || initialization_sdk.initialize())
+                .await
+                .map_err(|error| error.to_string())?;
         if let Err(error) = initialization_result {
             log::error!("failed to initialize CUA SDK after enabling computer control: {error}");
+        }
+        let helper_sdk = sdk.clone();
+        let helper_result =
+            tokio::task::spawn_blocking(move || helper_sdk.restore_wayland_helper_if_installed())
+                .await
+                .map_err(|error| error.to_string())?;
+        if let Err(error) = helper_result {
+            log::warn!(
+                "failed to restore installed CUA Wayland helper after enabling computer control: {error}"
+            );
         }
     } else {
         service.revoke_all().await;
@@ -155,6 +174,16 @@ pub async fn set_computer_control_enabled(
     }
 
     current_status(service).await
+}
+
+#[tauri::command]
+pub async fn install_computer_control_wayland_helper(
+    state: State<'_, AppState>,
+) -> Result<CuaWaylandHelperStatus, String> {
+    let sdk = state.computer_control_service.sdk();
+    tokio::task::spawn_blocking(move || sdk.install_wayland_helper())
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -189,7 +218,7 @@ pub async fn revoke_computer_control_authorization(
 #[cfg(test)]
 mod tests {
     use super::{build_status, sdk_state};
-    use crate::computer_control_sdk::CuaDriverSdkStatus;
+    use crate::computer_control_sdk::{is_supported_platform, CuaDriverSdkStatus};
 
     fn sdk_status(initialized: bool, error: Option<&str>) -> CuaDriverSdkStatus {
         CuaDriverSdkStatus {
@@ -203,12 +232,21 @@ mod tests {
         }
     }
 
+    fn wayland_helper_status() -> crate::computer_control_sdk::CuaWaylandHelperStatus {
+        crate::computer_control_sdk::CuaWaylandHelperStatus {
+            supported: cfg!(all(target_os = "linux", target_arch = "x86_64")),
+            wayland: false,
+            installed: false,
+            running: false,
+        }
+    }
+
     #[test]
     fn enabled_but_uninitialized_sdk_is_not_reported_as_ready() {
         let status = sdk_status(false, None);
-        let result = build_status(true, status.clone(), Vec::new());
+        let result = build_status(true, status.clone(), wayland_helper_status(), Vec::new());
 
-        if cfg!(target_os = "windows") {
+        if is_supported_platform() {
             assert_eq!(sdk_state(false, &status), "disabled");
             assert_eq!(sdk_state(true, &status), "uninitialized");
             assert_eq!(result.sdk.state, "uninitialized");
@@ -224,7 +262,7 @@ mod tests {
 
     #[test]
     fn initialized_sdk_is_ready_and_failed_sdk_is_reported() {
-        if cfg!(target_os = "windows") {
+        if is_supported_platform() {
             assert_eq!(sdk_state(true, &sdk_status(true, None)), "ready");
             assert_eq!(
                 sdk_state(true, &sdk_status(false, Some("load failed"))),

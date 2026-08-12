@@ -119,6 +119,8 @@ export const ipc = {
     invoke<ComputerControlStatus>("get_computer_control_settings_status"),
   setComputerControl: (enabled: boolean) =>
     invoke<ComputerControlStatus>("set_computer_control_enabled", { enabled }),
+  installComputerControlWaylandHelper: () =>
+    invoke<ComputerControlStatus["waylandHelper"]>("install_computer_control_wayland_helper"),
   revokeComputerControlAuthorization: (requestId: string) =>
     invoke<ComputerControlStatus>("revoke_computer_control_authorization", { requestId }),
   respondComputerControlApproval: (requestId: string, allowed: boolean) =>

@@ -39,8 +39,7 @@
       "nsis"
     ],
     "resources": [
-      "sidecar-dist",
-      "resources/cua-driver"
+      "sidecar-dist"
     ],
     "icon": [
       "icons/32x32.png",

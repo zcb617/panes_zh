@@ -721,6 +721,22 @@
         "unsupported": "The embedded SDK is not supported on this platform.",
         "loading": "Panes is reading the local computer-control state."
       },
+      "waylandHelperTitle": "Wayland enhancement",
+      "waylandHelperStart": "Start enhancement",
+      "waylandHelperStarting": "Starting…",
+      "waylandHelperStates": {
+        "installed": "Pending restart",
+        "running": "Started"
+      },
+      "waylandHelperDescriptions": {
+        "available": "Optional enhancement for precise window geometry, exact target activation, and safe foreground input on GNOME Wayland.",
+        "installed": "The enhancement is installed but its service is not available in this session. Panes automatically restores its enabled state; sign in again or reboot to activate it.",
+        "running": "The enhancement is running and GNOME Wayland integration is active.",
+        "notWayland": "This is not a Wayland session, so the enhancement cannot be started."
+      },
+      "waylandHelperStartedToast": "The enhancement has started.",
+      "waylandHelperRestartToast": "The enhancement is installed. Sign out and back in, or restart the computer, to activate it.",
+      "waylandHelperInstallFailed": "Could not install the enhancement: {{error}}",
       "ready": "Available",
       "unavailable": "Unavailable",
     "currentAuthorizationsTitle": "Permanent authorizations",

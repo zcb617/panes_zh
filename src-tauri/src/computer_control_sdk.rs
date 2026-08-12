@@ -1,3 +1,5 @@
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use std::{ffi::OsStr, process::Command};
 use std::{
     path::{Path, PathBuf},
     sync::{Condvar, Mutex},
@@ -9,6 +11,22 @@ use serde_json::Value;
 
 const ABI_MAJOR: u16 = 1;
 const ABI_MINOR: u16 = 1;
+
+pub const fn is_supported_platform() -> bool {
+    cfg!(any(
+        target_os = "windows",
+        all(target_os = "linux", target_arch = "x86_64")
+    ))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CuaWaylandHelperStatus {
+    pub supported: bool,
+    pub wayland: bool,
+    pub installed: bool,
+    pub running: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CuaDriverSdkRuntimeInfo {
@@ -89,6 +107,72 @@ impl CuaDriverSdk {
         }
     }
 
+    pub fn wayland_helper_status(&self) -> CuaWaylandHelperStatus {
+        wayland_helper_status()
+    }
+
+    pub fn restore_wayland_helper_if_installed(&self) -> Result<CuaWaylandHelperStatus, String> {
+        activate_wayland_helper_if_installed()
+    }
+
+    pub fn install_wayland_helper(&self) -> Result<CuaWaylandHelperStatus, String> {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            if !is_wayland_session() {
+                return Err("Wayland helper is available only in a Wayland session".to_string());
+            }
+
+            let resource_dir = self
+                .resource_dir
+                .lock()
+                .map_err(|_| "CUA SDK resource state is poisoned".to_string())?
+                .clone()
+                .ok_or_else(|| "Panes resource directory is not configured".to_string())?;
+            let installer =
+                resolve_wayland_helper_installer_path(&resource_dir).ok_or_else(|| {
+                    format!(
+                        "official CUA Wayland helper installer was not found under {}",
+                        resource_dir.display()
+                    )
+                })?;
+
+            let output = Command::new(&installer).output().map_err(|error| {
+                format!(
+                    "failed to start official CUA Wayland helper installer {}: {error}",
+                    installer.display()
+                )
+            })?;
+            if !output.status.success() {
+                let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                return Err(if detail.is_empty() {
+                    format!(
+                        "official CUA Wayland helper installer exited with {}",
+                        output.status
+                    )
+                } else {
+                    format!(
+                        "official CUA Wayland helper installer exited with {}: {detail}",
+                        output.status
+                    )
+                });
+            }
+
+            let status = wayland_helper_status();
+            if !status.installed {
+                return Err(
+                    "official CUA Wayland helper installer completed, but the installed files were not found"
+                        .to_string(),
+                );
+            }
+            activate_wayland_helper_if_installed()
+        }
+
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        {
+            Err("Wayland helper is supported only on Linux x86_64".to_string())
+        }
+    }
+
     pub fn initialize(&self) -> Result<CuaDriverSdkRuntimeInfo, String> {
         {
             let runtime_info = self
@@ -114,6 +198,7 @@ impl CuaDriverSdk {
                 )
             })?;
 
+            prepare_runtime_environment();
             let runtime = Runtime::create(&library_path).map_err(|error| error.to_string())?;
             let runtime_info = runtime.info().map_err(|error| error.to_string())?;
 
@@ -196,6 +281,201 @@ impl CuaDriverSdk {
     }
 }
 
+pub fn is_wayland_session() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    if let Ok(session_type) = std::env::var("XDG_SESSION_TYPE") {
+        if !session_type.trim().is_empty() {
+            return session_type.eq_ignore_ascii_case("wayland");
+        }
+    }
+    std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn wayland_helper_status() -> CuaWaylandHelperStatus {
+    let wayland = is_wayland_session();
+    let installed = wayland_helper_install_dir()
+        .is_some_and(|directory| wayland_helper_files_exist(&directory));
+    let running = wayland && wayland_helper_dbus_is_running();
+    CuaWaylandHelperStatus {
+        supported: true,
+        wayland,
+        installed,
+        running,
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn wayland_helper_status() -> CuaWaylandHelperStatus {
+    CuaWaylandHelperStatus {
+        supported: false,
+        wayland: false,
+        installed: false,
+        running: false,
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn wayland_helper_install_dir() -> Option<PathBuf> {
+    wayland_helper_install_dir_from_env(
+        std::env::var_os("XDG_DATA_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn wayland_helper_install_dir_from_env(
+    xdg_data_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Option<PathBuf> {
+    let data_home = xdg_data_home
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home.filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .map(|home| home.join(".local").join("share"))
+        })?;
+    Some(
+        data_home
+            .join("gnome-shell")
+            .join("extensions")
+            .join("winrects@cua"),
+    )
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn wayland_helper_files_exist(directory: &Path) -> bool {
+    directory.join("metadata.json").is_file() && directory.join("extension.js").is_file()
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn wayland_helper_dbus_is_running() -> bool {
+    let connection = match zbus::blocking::Connection::session() {
+        Ok(connection) => connection,
+        Err(_) => return false,
+    };
+    let proxy = match zbus::blocking::Proxy::new(
+        &connection,
+        "org.cua.WinRects",
+        "/org/cua/WinRects",
+        "org.cua.WinRects",
+    ) {
+        Ok(proxy) => proxy,
+        Err(_) => return false,
+    };
+    proxy
+        .call::<_, _, u32>("GetVersion", &())
+        .is_ok_and(|version| version >= 8)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn activate_wayland_helper_if_installed() -> Result<CuaWaylandHelperStatus, String> {
+    let mut status = wayland_helper_status();
+    if !status.wayland || !status.installed || status.running {
+        return Ok(status);
+    }
+
+    enable_gnome_user_extensions()?;
+    request_wayland_helper_enable_in_current_session();
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(100));
+        status = wayland_helper_status();
+        if status.running {
+            break;
+        }
+    }
+    Ok(status)
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn activate_wayland_helper_if_installed() -> Result<CuaWaylandHelperStatus, String> {
+    Ok(wayland_helper_status())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn enable_gnome_user_extensions() -> Result<(), String> {
+    let current = Command::new("gsettings")
+        .args(["get", "org.gnome.shell", "disable-user-extensions"])
+        .output()
+        .map_err(|error| format!("failed to read GNOME user extension setting: {error}"))?;
+    if !current.status.success() {
+        let detail = String::from_utf8_lossy(&current.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!(
+                "gsettings could not read the GNOME user extension setting and exited with {}",
+                current.status
+            )
+        } else {
+            format!(
+                "gsettings could not read the GNOME user extension setting and exited with {}: {detail}",
+                current.status
+            )
+        });
+    }
+
+    match String::from_utf8_lossy(&current.stdout).trim() {
+        "false" => return Ok(()),
+        "true" => {}
+        value => {
+            return Err(format!(
+                "gsettings returned an unexpected GNOME user extension setting: {value}"
+            ));
+        }
+    }
+
+    let output = Command::new("gsettings")
+        .args(["set", "org.gnome.shell", "disable-user-extensions", "false"])
+        .output()
+        .map_err(|error| format!("failed to enable GNOME user extensions: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if detail.is_empty() {
+        format!(
+            "gsettings could not enable GNOME user extensions and exited with {}",
+            output.status
+        )
+    } else {
+        format!(
+            "gsettings could not enable GNOME user extensions and exited with {}: {detail}",
+            output.status
+        )
+    })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn request_wayland_helper_enable_in_current_session() {
+    let Ok(connection) = zbus::blocking::Connection::session() else {
+        return;
+    };
+    let Ok(proxy) = zbus::blocking::Proxy::new(
+        &connection,
+        "org.gnome.Shell.Extensions",
+        "/org/gnome/Shell/Extensions",
+        "org.gnome.Shell.Extensions",
+    ) else {
+        return;
+    };
+
+    let _ = proxy.set_property("UserExtensionsEnabled", true);
+    let _ = proxy.call::<_, _, bool>("EnableExtension", &("winrects@cua",));
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn prepare_runtime_environment() {
+    if is_wayland_session() && std::env::var_os("CUA_DRIVER_RS_ENABLE_WAYLAND").is_none() {
+        std::env::set_var("CUA_DRIVER_RS_ENABLE_WAYLAND", "1");
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn prepare_runtime_environment() {}
+
 impl Default for CuaDriverSdk {
     fn default() -> Self {
         Self::new()
@@ -212,22 +492,64 @@ impl Drop for CuaDriverSdk {
 }
 
 fn resolve_library_path(resource_dir: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let (platform_dir, library_name) = ("windows-x86_64", "cua_driver_sdk.dll");
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let (platform_dir, library_name) = ("linux-x86_64", "libcua_driver_sdk.so");
+    #[cfg(not(any(
+        target_os = "windows",
+        all(target_os = "linux", target_arch = "x86_64")
+    )))]
+    {
+        let _ = resource_dir;
+        return None;
+    }
+
+    #[cfg(any(
+        target_os = "windows",
+        all(target_os = "linux", target_arch = "x86_64")
+    ))]
+    {
+        [
+            resource_dir
+                .join("resources")
+                .join("cua-driver")
+                .join(platform_dir)
+                .join(library_name),
+            resource_dir
+                .join("resources")
+                .join("cua-driver")
+                .join(library_name),
+            resource_dir
+                .join("cua-driver")
+                .join(platform_dir)
+                .join(library_name),
+            resource_dir.join("cua-driver").join(library_name),
+            resource_dir.join(library_name),
+        ]
+        .into_iter()
+        .find(|path| path.is_file())
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn resolve_wayland_helper_installer_path(resource_dir: &Path) -> Option<PathBuf> {
     [
         resource_dir
             .join("resources")
             .join("cua-driver")
-            .join("windows-x86_64")
-            .join("cua_driver_sdk.dll"),
-        resource_dir
-            .join("resources")
-            .join("cua-driver")
-            .join("cua_driver_sdk.dll"),
+            .join("linux-x86_64")
+            .join("wayland-helper")
+            .join("install.sh"),
         resource_dir
             .join("cua-driver")
-            .join("windows-x86_64")
-            .join("cua_driver_sdk.dll"),
-        resource_dir.join("cua-driver").join("cua_driver_sdk.dll"),
-        resource_dir.join("cua_driver_sdk.dll"),
+            .join("linux-x86_64")
+            .join("wayland-helper")
+            .join("install.sh"),
+        resource_dir
+            .join("linux-x86_64")
+            .join("wayland-helper")
+            .join("install.sh"),
     ]
     .into_iter()
     .find(|path| path.is_file())
@@ -250,10 +572,16 @@ impl std::fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(
+    target_os = "windows",
+    all(target_os = "linux", target_arch = "x86_64")
+)))]
 struct Runtime;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(
+    target_os = "windows",
+    all(target_os = "linux", target_arch = "x86_64")
+)))]
 impl Runtime {
     fn create(_library_path: &Path) -> Result<Self, RuntimeError> {
         Err(RuntimeError::new(
@@ -278,17 +606,18 @@ impl Runtime {
     }
 }
 
-#[cfg(target_os = "windows")]
-mod windows_impl {
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+mod native_impl {
     use super::{
         Condvar, CuaDriverSdkRuntimeInfo, Duration, Mutex, Path, RuntimeError, ABI_MAJOR, ABI_MINOR,
     };
     use serde_json::Value;
     use std::{
-        ffi::{c_char, c_void, OsStr},
-        mem,
-        os::windows::ffi::OsStrExt,
-        ptr, slice,
+        ffi::{c_char, c_void},
+        mem, ptr, slice,
     };
 
     #[repr(C)]
@@ -379,6 +708,7 @@ mod windows_impl {
     unsafe impl Send for Runtime {}
     unsafe impl Sync for Runtime {}
 
+    #[cfg(target_os = "windows")]
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn LoadLibraryW(name: *const u16) -> *mut c_void;
@@ -386,8 +716,87 @@ mod windows_impl {
         fn FreeLibrary(module: *mut c_void) -> i32;
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[link(name = "dl")]
+    unsafe extern "C" {
+        fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn dlclose(handle: *mut c_void) -> i32;
+        fn dlerror() -> *const c_char;
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe fn load_module(path: &Path) -> Result<*mut c_void, RuntimeError> {
+        use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
+        let wide = OsStr::new(path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let module = LoadLibraryW(wide.as_ptr());
+        if module.is_null() {
+            Err(RuntimeError::new(format!(
+                "failed to load official CUA SDK library {}",
+                path.display()
+            )))
+        } else {
+            Ok(module)
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe fn load_module(path: &Path) -> Result<*mut c_void, RuntimeError> {
+        use std::{
+            ffi::{CStr, CString},
+            os::unix::ffi::OsStrExt,
+        };
+        let path_bytes = path.as_os_str().as_bytes();
+        let path_c = CString::new(path_bytes).map_err(|_| {
+            RuntimeError::new(format!(
+                "CUA SDK library path contains NUL: {}",
+                path.display()
+            ))
+        })?;
+        const RTLD_NOW: i32 = 2;
+        let _ = dlerror();
+        let module = dlopen(path_c.as_ptr(), RTLD_NOW);
+        if module.is_null() {
+            let error = dlerror();
+            let detail = if error.is_null() {
+                "unknown dlopen error".to_string()
+            } else {
+                CStr::from_ptr(error).to_string_lossy().into_owned()
+            };
+            Err(RuntimeError::new(format!(
+                "failed to load official CUA SDK library {}: {detail}",
+                path.display()
+            )))
+        } else {
+            Ok(module)
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe fn symbol_address(module: *mut c_void, name: *const c_char) -> *mut c_void {
+        GetProcAddress(module, name)
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe fn symbol_address(module: *mut c_void, name: *const c_char) -> *mut c_void {
+        dlsym(module, name)
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe fn unload_module(module: *mut c_void) {
+        let _ = FreeLibrary(module);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe fn unload_module(module: *mut c_void) {
+        let _ = dlclose(module);
+    }
+
     unsafe fn load_symbol<T>(module: *mut c_void, name: &'static [u8]) -> Result<T, RuntimeError> {
-        let address = GetProcAddress(module, name.as_ptr() as *const c_char);
+        let address = symbol_address(module, name.as_ptr() as *const c_char);
         if address.is_null() {
             return Err(RuntimeError::new(format!(
                 "official CUA SDK is missing symbol {}",
@@ -398,17 +807,7 @@ mod windows_impl {
     }
 
     fn load_api(path: &Path) -> Result<NativeApi, RuntimeError> {
-        let wide = OsStr::new(path)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<_>>();
-        let module = unsafe { LoadLibraryW(wide.as_ptr()) };
-        if module.is_null() {
-            return Err(RuntimeError::new(format!(
-                "failed to load official CUA SDK library {}",
-                path.display()
-            )));
-        }
+        let module = unsafe { load_module(path)? };
 
         let result = (|| unsafe {
             Ok(NativeApi {
@@ -428,7 +827,7 @@ mod windows_impl {
         })();
         if result.is_err() {
             unsafe {
-                let _ = FreeLibrary(module);
+                unload_module(module);
             }
         }
         result
@@ -585,13 +984,13 @@ mod windows_impl {
                 };
                 let status = (api.abi_version)(&mut version);
                 if status != 0 {
-                    let _ = FreeLibrary(api.module);
+                    unload_module(api.module);
                     return Err(RuntimeError::new(format!(
                         "CUA ABI version call failed with status {status}"
                     )));
                 }
                 if version.major != ABI_MAJOR || !(api.abi_compatible)(ABI_MAJOR, ABI_MINOR) {
-                    let _ = FreeLibrary(api.module);
+                    unload_module(api.module);
                     return Err(RuntimeError::new(format!(
                         "CUA ABI mismatch: runtime={}.{}.{} expected={}.{}",
                         version.major, version.minor, version.patch, ABI_MAJOR, ABI_MINOR
@@ -608,7 +1007,7 @@ mod windows_impl {
                 let status = (api.create)(options.as_ptr(), options.len(), &mut driver, &mut error);
                 let error = read_buffer(&api, error);
                 if status != 0 || driver.is_null() {
-                    let _ = FreeLibrary(api.module);
+                    unload_module(api.module);
                     return Err(RuntimeError::new(format!(
                         "CUA runtime creation failed with status {status}: {error}"
                     )));
@@ -624,7 +1023,7 @@ mod windows_impl {
                 let availability_error = read_buffer(&api, availability_error);
                 if availability_status != 0 || !available {
                     (api.destroy)(&mut driver);
-                    let _ = FreeLibrary(api.module);
+                    unload_module(api.module);
                     return Err(RuntimeError::new(format!(
                         "CUA runtime is unavailable with status {availability_status}: {availability_error}"
                     )));
@@ -713,7 +1112,7 @@ mod windows_impl {
             unsafe {
                 let result = call_async(&api, self.driver, None, None, true);
                 (api.destroy)(&mut self.driver);
-                let _ = FreeLibrary(api.module);
+                unload_module(api.module);
                 result.map(|_| ())
             }
         }
@@ -726,8 +1125,11 @@ mod windows_impl {
     }
 }
 
-#[cfg(target_os = "windows")]
-use windows_impl::Runtime;
+#[cfg(any(
+    target_os = "windows",
+    all(target_os = "linux", target_arch = "x86_64")
+))]
+use native_impl::Runtime;
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
@@ -767,6 +1169,103 @@ mod tests {
             .expect_err("tool call must not initialize the CUA runtime on demand");
 
         assert!(error.contains("CUA SDK runtime is not initialized"));
+        assert!(!sdk.status().initialized);
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod linux_tests {
+    use super::{prepare_runtime_environment, wayland_helper_install_dir_from_env, CuaDriverSdk};
+    use std::{env, ffi::OsStr, path::PathBuf, sync::Mutex};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn wayland_helper_install_location_follows_xdg_then_home() {
+        assert_eq!(
+            wayland_helper_install_dir_from_env(
+                Some(OsStr::new("/tmp/panes-data")),
+                Some(OsStr::new("/tmp/panes-home")),
+            ),
+            Some(PathBuf::from(
+                "/tmp/panes-data/gnome-shell/extensions/winrects@cua"
+            ))
+        );
+        assert_eq!(
+            wayland_helper_install_dir_from_env(None, Some(OsStr::new("/tmp/panes-home"))),
+            Some(PathBuf::from(
+                "/tmp/panes-home/.local/share/gnome-shell/extensions/winrects@cua"
+            ))
+        );
+    }
+
+    #[test]
+    fn wayland_runtime_is_enabled_without_overriding_explicit_configuration() {
+        let _guard = ENV_LOCK.lock().expect("environment test lock poisoned");
+        let original_session = env::var_os("XDG_SESSION_TYPE");
+        let original_display = env::var_os("WAYLAND_DISPLAY");
+        let original_enabled = env::var_os("CUA_DRIVER_RS_ENABLE_WAYLAND");
+
+        env::set_var("XDG_SESSION_TYPE", "wayland");
+        env::remove_var("WAYLAND_DISPLAY");
+        env::remove_var("CUA_DRIVER_RS_ENABLE_WAYLAND");
+        prepare_runtime_environment();
+        assert_eq!(env::var("CUA_DRIVER_RS_ENABLE_WAYLAND").as_deref(), Ok("1"));
+
+        env::set_var("CUA_DRIVER_RS_ENABLE_WAYLAND", "0");
+        prepare_runtime_environment();
+        assert_eq!(env::var("CUA_DRIVER_RS_ENABLE_WAYLAND").as_deref(), Ok("0"));
+
+        restore_env("XDG_SESSION_TYPE", original_session);
+        restore_env("WAYLAND_DISPLAY", original_display);
+        restore_env("CUA_DRIVER_RS_ENABLE_WAYLAND", original_enabled);
+    }
+
+    #[test]
+    fn explicit_x11_session_is_not_mistaken_for_wayland() {
+        let _guard = ENV_LOCK.lock().expect("environment test lock poisoned");
+        let original_session = env::var_os("XDG_SESSION_TYPE");
+        let original_display = env::var_os("WAYLAND_DISPLAY");
+
+        env::set_var("XDG_SESSION_TYPE", "x11");
+        env::set_var("WAYLAND_DISPLAY", "wayland-0");
+        assert!(!super::is_wayland_session());
+
+        restore_env("XDG_SESSION_TYPE", original_session);
+        restore_env("WAYLAND_DISPLAY", original_display);
+    }
+
+    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+        if let Some(value) = value {
+            env::set_var(key, value);
+        } else {
+            env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn official_linux_release_runtime_smoke() {
+        let _guard = ENV_LOCK.lock().expect("environment test lock poisoned");
+        if env::var_os("PANES_CUA_SDK_SPIKE").is_none() {
+            return;
+        }
+        let resource_dir = env::var_os("PANES_CUA_SDK_RESOURCE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let sdk = CuaDriverSdk::new();
+        sdk.set_resource_dir(Some(resource_dir));
+        let info = sdk
+            .initialize()
+            .expect("Linux CUA runtime should initialize");
+        assert_eq!(info.abi_version, "1.1.0");
+        assert_eq!(info.driver_version.as_deref(), Some("0.19.3"));
+        assert!(info.embedded);
+        let tools = sdk.list_tools().expect("tool inventory should load");
+        assert!(tools
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tools| !tools.is_empty()));
+        sdk.shutdown().expect("Linux CUA runtime should shut down");
         assert!(!sdk.status().initialized);
     }
 }

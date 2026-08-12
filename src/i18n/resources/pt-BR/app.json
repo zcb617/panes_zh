@@ -721,6 +721,22 @@
         "unsupported": "O SDK não é compatível com esta plataforma.",
         "loading": "O Panes está lendo o estado local."
       },
+      "waylandHelperTitle": "Aprimoramento do Wayland",
+      "waylandHelperStart": "Iniciar aprimoramento",
+      "waylandHelperStarting": "Iniciando…",
+      "waylandHelperStates": {
+        "installed": "Aguardando reinício",
+        "running": "Iniciado"
+      },
+      "waylandHelperDescriptions": {
+        "available": "Aprimoramento opcional para geometria precisa de janelas, ativação exata do destino e entrada segura em primeiro plano no GNOME Wayland.",
+        "installed": "O aprimoramento está instalado, mas o serviço não está disponível nesta sessão. O Panes restaura automaticamente o estado ativado; entre novamente na sessão ou reinicie o computador para ativá-lo.",
+        "running": "O aprimoramento está em execução e a integração com o GNOME Wayland está ativa.",
+        "notWayland": "Esta não é uma sessão Wayland; o aprimoramento não pode ser iniciado."
+      },
+      "waylandHelperStartedToast": "O aprimoramento foi iniciado.",
+      "waylandHelperRestartToast": "O aprimoramento foi instalado. Entre novamente na sessão ou reinicie o computador para ativá-lo.",
+      "waylandHelperInstallFailed": "Não foi possível instalar o aprimoramento: {{error}}",
       "ready": "Disponível",
       "unavailable": "Indisponível",
     "currentAuthorizationsTitle": "Autorizações permanentes",

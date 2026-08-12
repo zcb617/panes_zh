@@ -282,7 +282,17 @@ fn process_executable_path(pid: u32) -> Option<String> {
         .map(|_| String::from_utf16_lossy(&buffer[..length as usize]))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn process_executable_path(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[cfg(not(any(
+    target_os = "windows",
+    all(target_os = "linux", target_arch = "x86_64")
+)))]
 fn process_executable_path(_pid: u32) -> Option<String> {
     None
 }
@@ -383,6 +393,22 @@ mod tests {
         assert_eq!(notepad.key, "application:notepad.exe");
         assert_eq!(notepad.display.to_ascii_lowercase(), "notepad.exe");
         assert_eq!(notepad.key, notepad_exe.key);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn linux_pid_uses_proc_executable_name() {
+        let target = target_resource("list_windows", &json!({"pid": std::process::id()}))
+            .expect("Linux should resolve the current process through /proc");
+        let current_name = std::env::current_exe()
+            .expect("current executable path should resolve")
+            .file_name()
+            .expect("current executable should have a file name")
+            .to_string_lossy()
+            .to_lowercase();
+
+        assert_eq!(target.key, format!("application:{current_name}"));
+        assert_eq!(target.scope, "application");
     }
 
     #[test]

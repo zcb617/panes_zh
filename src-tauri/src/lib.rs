@@ -190,6 +190,11 @@ pub fn run() {
                 if let Err(error) = computer_control_sdk.initialize() {
                     log::error!("failed to initialize CUA SDK during Panes startup: {error}");
                 }
+                if let Err(error) = computer_control_sdk.restore_wayland_helper_if_installed() {
+                    log::warn!(
+                        "failed to restore installed CUA Wayland helper during Panes startup: {error}"
+                    );
+                }
             }
             if let Err(error) =
                 tauri::async_runtime::block_on(state.notifications.start(handle.clone()))
@@ -242,6 +247,7 @@ pub fn run() {
             commands::computer_control_settings::respond_computer_control_approval,
             commands::computer_control_settings::get_computer_control_settings_status,
             commands::computer_control_settings::set_computer_control_enabled,
+            commands::computer_control_settings::install_computer_control_wayland_helper,
             commands::computer_control_settings::revoke_computer_control_authorization,
             commands::power::get_keep_awake_state,
             commands::power::set_keep_awake_enabled,

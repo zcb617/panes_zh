@@ -255,6 +255,7 @@ export function SettingsPage() {
   const [computerControlStatus, setComputerControlStatus] = useState<ComputerControlStatus | null>(null);
   const [computerControlLoading, setComputerControlLoading] = useState(false);
   const [computerControlUpdating, setComputerControlUpdating] = useState(false);
+  const [waylandHelperUpdating, setWaylandHelperUpdating] = useState(false);
   const [fileOpenTarget, setFileOpenTarget] = useState<DefaultFileOpenTarget | null>(null);
   const [fileOpenTargetLoading, setFileOpenTargetLoading] = useState(false);
   const [fileOpenTargetUpdating, setFileOpenTargetUpdating] = useState(false);
@@ -594,6 +595,30 @@ export function SettingsPage() {
       toast.error(String(error));
     } finally {
       setComputerControlUpdating(false);
+    }
+  }
+
+  async function startWaylandHelper() {
+    if (
+      waylandHelperUpdating
+      || !computerControlStatus?.enabled
+      || !computerControlStatus.waylandHelper.wayland
+    ) return;
+    setWaylandHelperUpdating(true);
+    try {
+      const waylandHelper = await ipc.installComputerControlWaylandHelper();
+      setComputerControlStatus((current) => current ? { ...current, waylandHelper } : current);
+      if (waylandHelper.running) {
+        toast.success(t("app:settingsPage.computerControl.waylandHelperStartedToast"));
+      } else {
+        toast.warning(t("app:settingsPage.computerControl.waylandHelperRestartToast"));
+      }
+    } catch (error) {
+      toast.error(t("app:settingsPage.computerControl.waylandHelperInstallFailed", {
+        error: String(error),
+      }));
+    } finally {
+      setWaylandHelperUpdating(false);
     }
   }
 
@@ -1224,6 +1249,48 @@ export function SettingsPage() {
                         : t(`app:settingsPage.computerControl.sdkStates.${computerControlStatus?.sdk.state ?? "disabled"}`)}
                     </span>
                   </SettingsRow>
+                  {computerControlStatus?.waylandHelper.supported ? (
+                    <SettingsRow
+                      icon={computerControlStatus.waylandHelper.running
+                        ? <CheckCircle2 size={17} />
+                        : <BadgeInfo size={17} />}
+                      title={t("app:settingsPage.computerControl.waylandHelperTitle")}
+                      description={t(`app:settingsPage.computerControl.waylandHelperDescriptions.${
+                        computerControlStatus.waylandHelper.running
+                          ? "running"
+                          : computerControlStatus.waylandHelper.installed
+                            ? "installed"
+                            : computerControlStatus.waylandHelper.wayland
+                              ? "available"
+                              : "notWayland"
+                      }`)}
+                    >
+                      {computerControlStatus.waylandHelper.running ? (
+                        <span className="usp-status usp-status-ready">
+                          {t("app:settingsPage.computerControl.waylandHelperStates.running")}
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="usp-button"
+                          disabled={
+                            computerControlLoading
+                            || waylandHelperUpdating
+                            || !computerControlStatus.enabled
+                            || !computerControlStatus.waylandHelper.wayland
+                            || computerControlStatus.waylandHelper.installed
+                          }
+                          onClick={() => void startWaylandHelper()}
+                        >
+                          {waylandHelperUpdating
+                            ? t("app:settingsPage.computerControl.waylandHelperStarting")
+                            : computerControlStatus.waylandHelper.installed
+                              ? t("app:settingsPage.computerControl.waylandHelperStates.installed")
+                              : t("app:settingsPage.computerControl.waylandHelperStart")}
+                        </button>
+                      )}
+                    </SettingsRow>
+                  ) : null}
                 </div>
               </section>
 

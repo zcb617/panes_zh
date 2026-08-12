@@ -189,10 +189,18 @@ export interface ComputerControlAdapterStatus {
   builtIn: boolean;
 }
 
+export interface ComputerControlWaylandHelperStatus {
+  supported: boolean;
+  wayland: boolean;
+  installed: boolean;
+  running: boolean;
+}
+
 export interface ComputerControlStatus {
   supported: boolean;
   enabled: boolean;
   sdk: ComputerControlSdkStatus;
+  waylandHelper: ComputerControlWaylandHelperStatus;
   adapters: ComputerControlAdapterStatus[];
   currentAuthorizations: ComputerControlApprovalRequest[];
 }
