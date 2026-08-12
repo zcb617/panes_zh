@@ -1,4 +1,6 @@
 mod commands;
+mod computer_control_sdk;
+mod computer_control_service;
 mod config;
 mod db;
 mod engines;
@@ -57,11 +59,24 @@ use tauri::{
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use terminal::TerminalManager;
 
+#[cfg(all(test, target_os = "windows"))]
+#[link(name = "resource", kind = "static")]
+unsafe extern "C" {}
+
 pub fn maybe_handle_cli_subcommand() -> anyhow::Result<bool> {
+    /*
+    已停用旧的 --panes-computer-control-mcp 子命令入口：该入口会把第二个 Panes
+    进程作为外部 MCP 代理运行，与当前进程内 CUA SDK 直连架构冲突。保留实现仅供
+    历史迁移审计，不能再从正常启动路径触发。
     if commands::computer_control::maybe_handle_cli_subcommand()? {
         return Ok(true);
     }
+    */
     terminal_notifications::maybe_handle_cli_subcommand()
+}
+
+pub fn initialize_from_cli() -> anyhow::Result<()> {
+    runtime_env::initialize_from_cli()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -106,6 +121,11 @@ pub fn run() {
     let _ =
         db::workspaces::ensure_default_workspace(&db).expect("failed to ensure default workspace");
 
+    let computer_control_sdk = Arc::new(computer_control_sdk::CuaDriverSdk::new());
+    let computer_control_service = Arc::new(computer_control_service::ComputerControlService::new(
+        computer_control_sdk.clone(),
+    ));
+
     let app_state = AppState {
         db,
         config: Arc::new(app_config),
@@ -122,6 +142,7 @@ pub fn run() {
         computer_control_approvals: Arc::new(
             commands::computer_control::ComputerControlApprovalManager::default(),
         ),
+        computer_control_service,
         remote_access: Arc::new(RemoteTunnelManager::default()),
     };
 
@@ -133,6 +154,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(app_state)
+        .manage(computer_control_sdk)
         .menu(move |handle| build_app_menu(handle, app_locale))
         .setup(|app| {
             let main_window = create_main_window(app.handle())?;
@@ -170,11 +192,25 @@ pub fn run() {
             let handle = app.handle().clone();
             let resource_dir = app.path().resource_dir().ok();
             let state = app.state::<AppState>().inner().clone();
+            let computer_control_sdk = app
+                .state::<Arc<computer_control_sdk::CuaDriverSdk>>()
+                .inner()
+                .clone();
+            computer_control_sdk.set_resource_dir(resource_dir.clone());
+            if state.config.computer_control.enabled {
+                if let Err(error) = computer_control_sdk.initialize() {
+                    log::error!("failed to initialize CUA SDK during Panes startup: {error}");
+                }
+            }
             if let Err(error) =
                 tauri::async_runtime::block_on(state.notifications.start(handle.clone()))
             {
                 log::warn!("failed to start terminal notification ingress: {error}");
             }
+            /*
+            旧实现会在 Panes 启动时创建 computer-control broker，供第二个 Panes 进程和
+            cua-driver mcp 使用。CUA SDK 已经由当前 Panes 主进程直接持有，因此保留此段
+            历史代码供迁移审计，但不再启动 broker，也不再生成 broker.json。
             if let Err(error) =
                 tauri::async_runtime::block_on(commands::computer_control::start_approval_broker(
                     handle.clone(),
@@ -183,6 +219,13 @@ pub fn run() {
             {
                 log::warn!("failed to start computer control approval broker: {error}");
             }
+            */
+            state
+                .computer_control_service
+                .bind_app_handle(handle.clone());
+            state
+                .engines
+                .set_computer_control_service(state.computer_control_service.clone());
             state.engines.set_resource_dir(resource_dir);
             tauri::async_runtime::spawn(run_codex_runtime_bridge(handle.clone(), state.clone()));
             spawn_catalog_refresh_scheduler(handle.clone(), state.clone());
@@ -220,9 +263,26 @@ pub fn run() {
             commands::app::set_app_theme,
             commands::app::get_display_scale,
             commands::app::set_display_scale,
+            /*
+            旧 MCP/外部驱动设置命令保留在模块中供迁移审计，但不再向 WebView 注册，
+            防止任何正常前端路径重新执行全局 MCP 配置或外部 cua-driver 写入。
             commands::computer_control::get_computer_control_status,
             commands::computer_control::set_computer_control,
+            */
             commands::computer_control::respond_computer_control_approval,
+            commands::computer_control_settings::get_computer_control_settings_status,
+            commands::computer_control_settings::set_computer_control_enabled,
+            commands::computer_control_settings::revoke_computer_control_authorization,
+            /*
+            SDK 生命周期只能由 Panes 启动、电脑操作开关和退出路径管理。保留这些旧的
+            内部调试命令供迁移审计，但不再向 WebView 暴露，以免 UI 绕过就绪检查直接
+            初始化、调用或关闭 SDK。
+            computer_control_sdk::get_computer_control_sdk_status,
+            computer_control_sdk::initialize_computer_control_sdk,
+            computer_control_sdk::get_computer_control_sdk_tools,
+            computer_control_sdk::get_computer_control_sdk_screen_size,
+            computer_control_sdk::shutdown_computer_control_sdk,
+            */
             commands::power::get_keep_awake_state,
             commands::power::set_keep_awake_enabled,
             commands::power::get_power_settings,
@@ -413,11 +473,23 @@ pub fn run() {
             let terminals = app_handle.state::<AppState>().terminals.clone();
             let keep_awake = app_handle.state::<AppState>().keep_awake.clone();
             let remote_access = app_handle.state::<AppState>().remote_access.clone();
+            let computer_control_service = app_handle
+                .state::<AppState>()
+                .computer_control_service
+                .clone();
+            let computer_control_sdk = app_handle
+                .state::<Arc<computer_control_sdk::CuaDriverSdk>>()
+                .inner()
+                .clone();
             tauri::async_runtime::block_on(async move {
                 if let Err(error) = keep_awake.shutdown().await {
                     log::warn!("failed to release keep awake on shutdown: {error}");
                 }
                 terminals.shutdown().await;
+                computer_control_service.revoke_all().await;
+                if let Err(error) = computer_control_sdk.shutdown() {
+                    log::warn!("failed to shut down CUA SDK runtime: {error}");
+                }
                 remote_access.shutdown().await;
             });
         }

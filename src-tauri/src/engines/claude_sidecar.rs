@@ -21,7 +21,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{process_utils, runtime_env};
+use crate::{computer_control_service::ComputerControlService, process_utils, runtime_env};
 
 use super::{
     normalize_approval_response_for_engine, trim_action_output_delta_content, ActionResult,
@@ -182,6 +182,18 @@ enum SidecarEvent {
         #[serde(rename = "bundledClaudeCodeVersion")]
         bundled_claude_code_version: Option<String>,
     },
+    ComputerControlToolCall {
+        id: Option<String>,
+        #[serde(rename = "callId")]
+        call_id: String,
+        #[serde(rename = "toolName")]
+        tool_name: String,
+        arguments: serde_json::Value,
+        #[serde(rename = "threadId")]
+        thread_id: Option<String>,
+        #[serde(rename = "turnId")]
+        turn_id: Option<String>,
+    },
 }
 
 impl SidecarEvent {
@@ -202,7 +214,8 @@ impl SidecarEvent {
             | SidecarEvent::UsageLimitsUpdated { id, .. }
             | SidecarEvent::Models { id, .. }
             | SidecarEvent::Error { id, .. }
-            | SidecarEvent::Version { id, .. } => id.as_deref(),
+            | SidecarEvent::Version { id, .. }
+            | SidecarEvent::ComputerControlToolCall { id, .. } => id.as_deref(),
         }
     }
 }
@@ -293,12 +306,6 @@ impl ClaudeTransport {
         } else {
             log::info!("claude sidecar: system Claude Code not found, using bundled runtime");
         }
-        command.env(
-            "PANES_COMPUTER_CONTROL_CONFIG",
-            runtime_env::app_data_dir()
-                .join("computer-control")
-                .join("claude-runtime.json"),
-        );
         let mut child = command
             .arg(&sidecar_path)
             .current_dir(&sidecar_dir)
@@ -625,6 +632,7 @@ struct ThreadConfig {
 #[derive(Default)]
 struct ClaudeState {
     transport: Option<Arc<ClaudeTransport>>,
+    computer_control_service: Option<Arc<ComputerControlService>>,
     threads: HashMap<String, ThreadConfig>,
     resource_dir: Option<PathBuf>,
     runtime_model_cache: Option<Vec<ModelInfo>>,
@@ -660,6 +668,11 @@ struct NodeRuntimeProbe {
 }
 
 impl ClaudeSidecarEngine {
+    pub fn set_computer_control_service(&self, service: Arc<ComputerControlService>) {
+        let mut state = self.state.blocking_lock();
+        state.computer_control_service = Some(service);
+    }
+
     pub fn set_resource_dir(&self, resource_dir: Option<PathBuf>) {
         let mut state = self.state.blocking_lock();
         state.resource_dir = resource_dir;
@@ -1805,6 +1818,11 @@ impl Engine for ClaudeSidecarEngine {
                 .cloned()
                 .context("no thread config found — was start_thread called?")?
         };
+        let computer_control_service = self.state.lock().await.computer_control_service.clone();
+        let computer_control_tools = match computer_control_service.as_ref() {
+            Some(service) => service.reviewed_tool_specs().map_err(anyhow::Error::msg)?,
+            None => Vec::new(),
+        };
 
         let request_id = Uuid::new_v4().to_string();
         {
@@ -1852,6 +1870,8 @@ impl Engine for ClaudeSidecarEngine {
             "sandboxMode": thread_config.sandbox.sandbox_mode.clone(),
             "reasoningEffort": thread_config.sandbox.reasoning_effort.clone(),
             "planMode": plan_mode,
+            "threadId": engine_thread_id,
+            "computerControlTools": computer_control_tools,
         });
 
         if let Some(ref session_id) = thread_config.agent_session_id {
@@ -1992,6 +2012,73 @@ impl Engine for ClaudeSidecarEngine {
                                         })
                                         .await
                                         .ok();
+                                }
+                                SidecarEvent::ComputerControlToolCall {
+                                    call_id,
+                                    tool_name,
+                                    arguments,
+                                    thread_id: event_thread_id,
+                                    turn_id,
+                                    ..
+                                } => {
+                                    if let Some(event_thread_id) = event_thread_id.as_deref() {
+                                        if event_thread_id != engine_thread_id_owned {
+                                            log::debug!(
+                                                "Claude computer-control call thread mismatch: event={}, engine={}",
+                                                event_thread_id,
+                                                engine_thread_id_owned
+                                            );
+                                        }
+                                    }
+                                    let effective_turn_id =
+                                        turn_id.unwrap_or_else(|| request_id.clone());
+                                    let result = match computer_control_service.as_ref() {
+                                        Some(service) => {
+                                            service
+                                                .invoke_for_engine(
+                                                    "claude",
+                                                    &engine_thread_id_owned,
+                                                    &effective_turn_id,
+                                                    &tool_name,
+                                                    &call_id,
+                                                    arguments,
+                                                    cancellation.clone(),
+                                                )
+                                                .await
+                                        }
+                                        None => Err(
+                                            "电脑操作服务尚未绑定到 Claude 引擎".to_string(),
+                                        ),
+                                    };
+                                    let response = match result {
+                                        Ok(value) => serde_json::json!({
+                                            "requestId": request_id.clone(),
+                                            "callId": call_id,
+                                            "result": value,
+                                        }),
+                                        Err(error) => serde_json::json!({
+                                            "requestId": request_id.clone(),
+                                            "callId": call_id,
+                                            "error": error,
+                                        }),
+                                    };
+                                    if let Err(error) = transport
+                                        .send_command(&serde_json::json!({
+                                            "method": "computer_control_tool_result",
+                                            "params": response,
+                                        }))
+                                        .await
+                                    {
+                                        event_tx
+                                            .send(EngineEvent::Error {
+                                                message: format!(
+                                                    "Claude 电脑操作结果发送失败：{error:#}"
+                                                ),
+                                                recoverable: false,
+                                            })
+                                            .await
+                                            .ok();
+                                    }
                                 }
                                 SidecarEvent::ApprovalRequested {
                                     approval_id,
@@ -2326,6 +2413,39 @@ mod tests {
             } => {
                 assert_eq!(action_id, "action-1");
                 assert_eq!(message, "Claude finished preparing tool input.");
+            }
+            other => panic!("unexpected event variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_computer_control_tool_calls() {
+        let event: SidecarEvent = serde_json::from_value(serde_json::json!({
+            "type": "computer_control_tool_call",
+            "id": "request-1",
+            "callId": "call-1",
+            "toolName": "click",
+            "arguments": { "pid": 1234, "x": 10, "y": 20 },
+            "threadId": "thread-1",
+            "turnId": "turn-1"
+        }))
+        .expect("computer control tool call should deserialize");
+
+        assert_eq!(event.request_id(), Some("request-1"));
+        match event {
+            SidecarEvent::ComputerControlToolCall {
+                call_id,
+                tool_name,
+                thread_id,
+                turn_id,
+                arguments,
+                ..
+            } => {
+                assert_eq!(call_id, "call-1");
+                assert_eq!(tool_name, "click");
+                assert_eq!(thread_id.as_deref(), Some("thread-1"));
+                assert_eq!(turn_id.as_deref(), Some("turn-1"));
+                assert_eq!(arguments["pid"], serde_json::json!(1234));
             }
             other => panic!("unexpected event variant: {other:?}"),
         }

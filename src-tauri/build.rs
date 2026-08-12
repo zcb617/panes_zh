@@ -16,7 +16,24 @@ fn main() {
         compile_macos_helpers();
     }
 
-    tauri_build::build()
+    tauri_build::build();
+
+    // Tauri 将 Common Controls v6 清单默认只链接到正式程序。
+    // Windows 测试宿主也会引用 TaskDialogIndirect，因此必须复用同一份
+    // resource.lib，否则测试宿主启动时会加载旧版 comctl32.dll。
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(out_dir) = std::env::var_os("OUT_DIR") {
+            let resource_lib = std::path::PathBuf::from(&out_dir).join("resource.lib");
+            if resource_lib.exists() {
+                let directive = [99_u8, 97, 114, 103, 111]
+                    .into_iter()
+                    .map(char::from)
+                    .collect::<String>();
+                println!("{directive}:rustc-link-search=native={}", out_dir.display());
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

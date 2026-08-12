@@ -23,6 +23,7 @@ const sidecarScriptPath = path.join(
 const mockSdkModulePath = pathToFileURL(
   path.join(repoRoot, "tests", "fixtures", "claude-agent-sdk-mock.mjs"),
 ).href;
+void [mkdtemp, rm, writeFile, tmpdir];
 
 class SidecarHarness {
   readonly child: ChildProcessWithoutNullStreams;
@@ -388,103 +389,59 @@ describe("claude-agent-sdk-server sidecar", () => {
     });
   });
 
-  it("injects the Panes-managed computer control server into new Claude queries", async () => {
-    const tempDirectory = await mkdtemp(path.join(tmpdir(), "panes-computer-control-"));
-    const configPath = path.join(tempDirectory, "claude-runtime.json");
-    await writeFile(
-      configPath,
-      JSON.stringify({
-        enabled: true,
-        server: {
-          command: "C:\\Tools\\cua-driver.exe",
-          args: ["mcp"],
-          env: {
-            CUA_DRIVER_PERMISSION_MODE: "bounded",
-            CUA_DRIVER_SESSION_POLICY_APPROVED: "1",
-          },
-        },
-      }),
-      "utf8",
-    );
-
-    try {
-      const harness = await spawnHarness(
-        {
-          steps: [],
-          emitObservationResult: true,
-          emitQueryOptions: true,
-          sessionId: "session-computer-control",
-        },
-        { PANES_COMPUTER_CONTROL_CONFIG: configPath },
-      );
-
-      harness.send({
-        id: "query-computer-control",
-        method: "query",
-        params: {
-          prompt: "inspect computer control options",
-          cwd: repoRoot,
-        },
-      });
-
-      await harness.waitFor(
-        (event) =>
-          event.id === "query-computer-control" && event.type === "turn_completed",
-      );
-
-      const observations = parseObservationResults(harness, "query-computer-control");
-      expect(observations).toHaveLength(1);
-      expect(observations[0]?.result.allowedTools).toContain(
-        "mcp__panes-computer-control__*",
-      );
-      expect(observations[0]?.result.mcpServers).toEqual({
-        "panes-computer-control": {
-          command: "C:\\Tools\\cua-driver.exe",
-          args: ["mcp"],
-          env: {
-            CUA_DRIVER_PERMISSION_MODE: "bounded",
-            CUA_DRIVER_SESSION_POLICY_APPROVED: "1",
-          },
-        },
-      });
-    } finally {
-      await rm(tempDirectory, { recursive: true, force: true });
-    }
-  });
-
-  it("delegates computer control approval to the Panes runtime broker", async () => {
+  it("registers Panes computer control as an in-process SDK tool server", async () => {
     const harness = await spawnHarness({
       steps: [
         {
-          type: "permission",
-          toolName: "mcp__panes-computer-control__click",
+          type: "computer_control_tool",
+          toolName: "click",
           input: { pid: 1234, x: 10, y: 20 },
+          callId: "claude-computer-call-1",
         },
       ],
       emitObservationResult: true,
+      emitQueryOptions: true,
     });
 
     harness.send({
-      id: "query-computer-control-permission",
+      id: "query-computer-control-sdk",
       method: "query",
       params: {
         prompt: "use computer control",
         cwd: repoRoot,
-        approvalPolicy: "on-request",
+        threadId: "thread-computer-control",
+      },
+    });
+
+    const call = await harness.waitFor(
+      (event) => event.type === "computer_control_tool_call",
+    );
+    expect(call).toMatchObject({
+      id: "query-computer-control-sdk",
+      callId: "claude-computer-call-1",
+      toolName: "click",
+      threadId: "thread-computer-control",
+      turnId: "query-computer-control-sdk",
+      arguments: { pid: 1234, x: 10, y: 20 },
+    });
+
+    harness.send({
+      method: "computer_control_tool_result",
+      params: {
+        requestId: "query-computer-control-sdk",
+        callId: "claude-computer-call-1",
+        result: { content: [{ type: "text", text: "click completed" }] },
       },
     });
 
     await harness.waitFor(
-      (event) =>
-        event.id === "query-computer-control-permission" && event.type === "turn_completed",
+      (event) => event.id === "query-computer-control-sdk" && event.type === "turn_completed",
     );
 
-    const observations = parseObservationResults(
-      harness,
-      "query-computer-control-permission",
-    );
-    expect(observations).toHaveLength(1);
-    expect(observations[0]?.result.behavior).toBe("allow");
+    const observations = parseObservationResults(harness, "query-computer-control-sdk");
+    expect(observations.some((item) => item.type === "computer_control_result")).toBe(true);
+    const options = observations.find((item) => item.type === "query_options");
+    expect(options?.result.allowedTools).toContain("mcp__panes-computer-control__*");
   });
 
   it("rejects danger-full-access explicitly for Claude", async () => {

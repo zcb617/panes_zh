@@ -181,13 +181,38 @@ export interface ComputerControlAgentStatus {
   configured: boolean;
 }
 
+export type ComputerControlSdkState =
+  | "disabled"
+  | "uninitialized"
+  | "ready"
+  | "failed"
+  | "unsupported";
+
+export interface ComputerControlSdkStatus {
+  state: ComputerControlSdkState;
+  initialized: boolean;
+  abiVersion?: string | null;
+  driverVersion?: string | null;
+  error?: string | null;
+}
+
+export interface ComputerControlAdapterStatus {
+  id: "codex" | "claude" | "opencode";
+  name: string;
+  builtIn: boolean;
+}
+
 export interface ComputerControlStatus {
   supported: boolean;
   enabled: boolean;
-  allowedApplications: string[];
-  driver: ComputerControlDriverStatus;
-  agents: ComputerControlAgentStatus[];
-  warnings: string[];
+  sdk: ComputerControlSdkStatus;
+  adapters: ComputerControlAdapterStatus[];
+  currentAuthorizations: ComputerControlApprovalRequest[];
+  // 兼容旧 MCP/白名单状态返回；SDK 直连设置页不再读取这些字段。
+  allowedApplications?: string[];
+  driver?: ComputerControlDriverStatus;
+  agents?: ComputerControlAgentStatus[];
+  warnings?: string[];
 }
 
 export interface TextEditorApplication {
@@ -204,7 +229,12 @@ export interface ComputerControlApprovalRequest {
   requestId: string;
   agent: "codex" | "claude" | "opencode" | string;
   tool: string;
+  callId?: string;
   application: string;
+  operation?: string;
+  scope?: string;
+  threadId?: string;
+  turnId?: string;
 }
 
 export type ScheduledTaskTargetType = "existing_thread" | "new_thread";

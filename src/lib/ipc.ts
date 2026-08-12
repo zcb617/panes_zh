@@ -116,9 +116,11 @@ export const ipc = {
   setDisplayScale: (displayScale: DisplayScale) =>
     invoke<DisplayScale>("set_display_scale", { displayScale }),
   getComputerControlStatus: () =>
-    invoke<ComputerControlStatus>("get_computer_control_status"),
-  setComputerControl: (enabled: boolean, allowedApplications: string[]) =>
-    invoke<ComputerControlStatus>("set_computer_control", { enabled, allowedApplications }),
+    invoke<ComputerControlStatus>("get_computer_control_settings_status"),
+  setComputerControl: (enabled: boolean, _legacyAllowedApplications: string[] = []) =>
+    invoke<ComputerControlStatus>("set_computer_control_enabled", { enabled }),
+  revokeComputerControlAuthorization: (requestId: string) =>
+    invoke<ComputerControlStatus>("revoke_computer_control_authorization", { requestId }),
   respondComputerControlApproval: (requestId: string, allowed: boolean) =>
     invoke<void>("respond_computer_control_approval", { requestId, allowed }),
   getKeepAwakeState: () => invoke<KeepAwakeState>("get_keep_awake_state"),

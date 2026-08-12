@@ -31,8 +31,17 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg", "deb", "appimage", "nsis"],
-    "resources": ["sidecar-dist"],
+    "targets": [
+      "app",
+      "dmg",
+      "deb",
+      "appimage",
+      "nsis"
+    ],
+    "resources": [
+      "sidecar-dist",
+      "resources/cua-driver"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",
@@ -46,7 +55,9 @@
   },
   "plugins": {
     "updater": {
-      "endpoints": ["https://zcb617.github.io/panes_zh/latest.json"],
+      "endpoints": [
+        "https://zcb617.github.io/panes_zh/latest.json"
+      ],
       "dialog": false,
       "windows": {
         "installMode": "passive"

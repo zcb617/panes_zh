@@ -584,6 +584,9 @@ mod tests {
             computer_control_approvals: Arc::new(
                 crate::commands::computer_control::ComputerControlApprovalManager::default(),
             ),
+            computer_control_service: Arc::new(
+                crate::computer_control_service::ComputerControlService::default(),
+            ),
             remote_access: Arc::new(crate::remote::RemoteTunnelManager::default()),
         }
     }

@@ -1,0 +1,51 @@
+[general]
+theme = "system"
+default_engine = "codex"
+default_model = "gpt-5.4"
+locale = "zh-CN"
+terminal_font_size = 16
+chat_notifications = true
+notification_sound = "Blow"
+default_file_open_target = 'windows:c:\program files\sublime text\sublime_text.exe'
+
+[ui]
+sidebar_width = 260
+git_panel_width = 380
+font_size = 13
+display_scale = 120
+
+[debug]
+persist_engine_event_logs = true
+max_action_output_chars = 20000
+
+[power]
+keep_awake_enabled = false
+prevent_display_sleep = false
+prevent_screen_saver = false
+ac_only_mode = false
+prevent_closed_display_sleep = false
+
+[computer_control]
+enabled = true
+allowed_applications = []
+
+[remote_access]
+enabled = true
+endpoint = "wss://panes.jxrjkf.cn/ws/tunnel"
+tunnel_id = "panes_23fd64dc6c124bd8a2376a42620f3908"
+credential = "a08d2cda6e9d48be95234e8321118ca3989a8526e5b3476c918fbe14effb3498"
+device_credential = ""
+
+[[remote_access.devices]]
+id = "mobile_b7271717ad294a9a86ea33560c1cb485"
+name = "Android 14 2106118C"
+credential = "7051ec9da6ad4779bd9335372d0fe28e457f96458d044d0092087b9b5dfca2fe"
+paired_at = "2026-08-10T07:49:54.023108400+00:00"
+last_connected_at = "2026-08-11T08:23:09.891020800+00:00"
+
+[[remote_access.devices]]
+id = "mobile_1beff2a3ab564b0ca24bd51027fbee47"
+name = "Android 15 25053RT47C"
+credential = "ea2b842805664a7387ffb0d01eb0623415465e8902094276a1ceb699c1b71d19"
+paired_at = "2026-08-11T06:55:52.457303600+00:00"
+last_connected_at = "2026-08-11T08:40:47.528488500+00:00"
