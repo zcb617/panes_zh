@@ -1,8 +1,8 @@
-# Panes 电脑操作 SDK 阶段 3：Claude 和 OpenCode 适配器
+# Panes 电脑操作 SDK 阶段 2：Claude 和 OpenCode 适配器
 
 ## 1. 阶段信息
 
-- 阶段：日志阶段 3 / 总体设计阶段 2
+- 阶段：2
 - 分支：`codex/computer-control-sdk`
 - 工作目录：`.worktree/computer-control-sdk`
 - 开始日期：2026-08-11
@@ -29,9 +29,9 @@
 | TODO-011 | Claude sidecar 自定义工具转发 | 本阶段实现并完成 sidecar 协议测试 |
 | TODO-012 | OpenCode 自定义工具、隔离目录和进程配置 | 本阶段实现并完成静态契约测试 |
 | TODO-013 | OpenCode 图片 tool-result 合同 | 本阶段保留结构化回传代码；真实 OpenCode 图片运行证据仍待回归 |
-| TODO-018 | 三引擎共用授权服务 | 本阶段把 Claude/OpenCode 接到统一服务；三个引擎实机隔离仍留待阶段 5 |
+| TODO-018 | 三引擎共用授权服务 | 本阶段把 Claude/OpenCode 接到统一服务；三个引擎实机隔离仍留待阶段 4 |
 
-本阶段没有把设置页、旧 broker、旧 exe 白名单兼容清理提前混入适配器改动；这些事项仍按主清单进入阶段 4。
+本阶段没有把设置页、旧 broker、旧 exe 白名单兼容清理提前混入适配器改动；这些事项仍按主清单进入阶段 3。
 
 ## 4. 实际完成内容
 
@@ -100,23 +100,23 @@ Claude sidecar mock 增加 SDK `tool` / `createSdkMcpServer` 模拟，并新增�
 
 1. TODO-006：已定位并修复 Windows 测试宿主入口点问题；正式程序和测试宿主均已验证包含 Common Controls v6 清单。
 2. TODO-013：OpenCode 图片 tool-result 只完成结构化回传入口和静态契约核对，尚未有当前 OpenCode 版本的真实图片结果证据。
-3. TODO-011、TODO-012：已完成代码适配，但尚未在 Panes GUI 中使用真实 Claude/OpenCode 会话完成授权、窗口动作和进程回收；对应实机证据留到阶段 5。
-4. 旧设置页仍可能读取或生成外部 broker/exe 兼容字段；本阶段没有把旧 UI 清理冒充为适配器完成，阶段 4 负责迁移。
+3. TODO-011、TODO-012：已完成代码适配，但尚未在 Panes GUI 中使用真实 Claude/OpenCode 会话完成授权、窗口动作和进程回收；对应实机证据留到阶段 4。
+4. 旧设置页仍可能读取或生成外部 broker/exe 兼容字段；本阶段没有把旧 UI 清理冒充为适配器完成，阶段 3 负责迁移。
 
 ## 7. 阶段收尾清单回看
 
 收尾再次回看 TODO-006、TODO-011、TODO-012、TODO-013、TODO-018、TODO-023：
 
 - TODO-006 已重新执行并定位：`muda` 的 `TaskDialogIndirect` 依赖要求 Common Controls v6；测试宿主原先没有 Tauri 资源清单，现已补充测试专用资源链接并验证 `--list` 正常。
-- TODO-011 已有 sidecar 协议和 Rust 转发代码证据，但真实 GUI 授权仍待阶段 5，因此状态改为“待回归”。
-- TODO-012 已有 OpenCode 隔离目录、进程级配置、回调和工具源生成代码证据，但真实 server 调用仍待阶段 5，因此状态改为“待回归”。
+- TODO-011 已有 sidecar 协议和 Rust 转发代码证据，但真实 GUI 授权仍待阶段 4，因此状态改为“待回归”。
+- TODO-012 已有 OpenCode 隔离目录、进程级配置、回调和工具源生成代码证据，但真实 server 调用仍待阶段 4，因此状态改为“待回归”。
 - TODO-013 没有真实图片结果，状态保持“待回归”。
-- TODO-018 仅完成服务绑定和引擎字段隔离，三引擎并行实机验证留待阶段 5，状态保持“未完成”。
+- TODO-018 仅完成服务绑定和引擎字段隔离，三引擎并行实机验证留待阶段 4，状态保持“未完成”。
 - TODO-023 已登记 Windows 全量单元测试中剩余的 11 项环境敏感失败，状态改为“待回归”；这些失败不影响测试宿主启动，也不涉及本阶段电脑操作代码。
 
 ## 8. 下一阶段入口
 
-下一阶段为日志阶段 4 / 总体设计阶段 3：设置页迁移。入口要求：
+下一阶段为阶段 3：设置页迁移。入口要求：
 
 - 电脑操作能力继续作为 Panes 独立功能，不混入左上角 MCP UI；
 - 设置页不再要求预先添加 exe；

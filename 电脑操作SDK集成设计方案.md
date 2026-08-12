@@ -51,8 +51,8 @@ CUA Driver SDK 负责“把指令变成鼠标、键盘、窗口、UIA 和截图�
 
 ### 3.2 改造目标
 
-- CUA Driver 只在 Panes 主进程内创建一个 SDK runtime。
-- 模型实际发起电脑操作工具调用时，才由 Panes 弹出授权申请。
+- CUA Driver 只在 Panes 主进程内创建一个 SDK runtime，并在电脑操作功能开启的 Panes 启动阶段完成初始化。
+- 只有 SDK 已经就绪后，模型实际发起电脑操作工具调用时，Panes 才弹出授权申请。
 - 授权按当前任务、目标应用和操作范围临时生效，不要求用户预先提供 exe。
 - 关闭能力、结束任务、引擎断开或 Panes 退出时，授权和 SDK runtime 可确定性释放。
 - Codex、Claude、OpenCode 均通过各自原生接入点调用同一个 Panes 电脑操作服务。
@@ -73,10 +73,10 @@ CUA Driver SDK 负责“把指令变成鼠标、键盘、窗口、UIA 和截图�
 
 ### 4.2 Panes 主进程内的核心对象
 
-新增一个长期持有、按需初始化的 `ComputerControlService`，由 Rust `AppState` 持有。建议包含：
+新增一个长期持有、在功能开启时初始化的 `ComputerControlService`，由 Rust `AppState` 持有。建议包含：
 
 - `config`：仅保存功能开关和版本迁移信息。
-- `driver_runtime`：惰性创建的 CUA Driver SDK 实例；整个 Panes 进程最多一个。
+- `driver_runtime`：启动时创建的 CUA Driver SDK 实例；整个 Panes 进程最多一个。
 - `tool_catalog`：Panes 对模型暴露的稳定工具目录，不直接把 SDK 所有内部工具原样暴露给模型。
 - `authorization_manager`：管理待授权请求、临时授权、撤销和超时。
 - `engine_adapters`：Codex、Claude、OpenCode 的请求入口和关联上下文。
@@ -120,8 +120,9 @@ CUA 官方发布工作流会构建 `cua-driver-sdk`，并为各平台打包完�
 
 - Panes 进程最多创建一个 CUA runtime。
 - `enabled = false` 时不加载原生库，也不启动 SDK 私有 worker。
-- 首次真实工具调用时惰性加载；状态页显示“未初始化”不是“检测中”。
-- 初始化失败显示明确错误码和重试入口，不循环探测。
+- `enabled = true` 时，Panes 在启动阶段加载原生库、校验 ABI、创建 runtime 并检查可用性；状态页必须在“就绪”或“初始化失败”之间收敛。
+- SDK 初始化、授权和工具执行是三个互不替代的状态：SDK 未就绪时不得弹出授权；授权通过后才允许执行工具。
+- 初始化失败显示明确错误码；不循环探测、不弹授权，也不执行工具。
 - `shutdown()` 必须幂等；关闭能力、引擎停止、Panes 退出都可以安全调用。
 - SDK runtime 不通过共享 socket 或外部 CLI 代理；若官方 runtime 使用私有 worker，worker 的创建、认证和退出必须绑定 runtime 生命周期。
 
@@ -180,9 +181,7 @@ CUA 官方发布工作流会构建 `cua-driver-sdk`，并为各平台打包完�
 
 ```text
 disabled
-   ↓ 设置开启
-enabled_uninitialized
-   ↓ 首次工具调用
+   ↓ 设置开启 / Panes 启动
 initializing ──失败──> failed
    ↓ 成功
 ready
@@ -198,6 +197,7 @@ revoked
 
 状态机的关键约束：
 
+- SDK 不是 `ready` 时，服务必须直接返回 `sdk_unavailable`，不得创建 pending 授权或显示授权弹窗。
 - 用户拒绝后，只结束当前请求，不得自动重试弹窗。
 - 用户关闭设置开关，所有 `awaiting_user` 请求立即取消，所有临时授权立即撤销。
 - 任务取消和引擎断开必须唤醒正在等待授权或 SDK 调用的任务，返回明确的 `cancelled` / `engine_disconnected`。
@@ -208,7 +208,7 @@ revoked
 设置页继续使用独立的“电脑操作能力”区块，不能放到左上角 MCP/扩展列表中。第一版页面调整为：
 
 - “允许电脑操作”总开关。
-- “CUA Driver SDK 状态”：已关闭、未初始化、可用、初始化失败、当前平台不支持。
+- “CUA Driver SDK 状态”：已关闭、未初始化、就绪、初始化失败、当前平台不支持。
 - “当前授权”：显示当前任务的应用、授权范围和剩余时间，提供撤销按钮。
 - “引擎适配器”：Codex、Claude、OpenCode 显示内置适配状态；历史线程没有工具时显示“需要新建会话”。
 - 安全说明：授权只在当前任务有效，Panes 退出后全部失效。
@@ -230,7 +230,7 @@ Panes 已经通过 `codex app-server --listen stdio://` 与 Codex 通信。电�
 
 1. 在 `thread/start` 的 `dynamicTools` 中注册 `panes_computer_control` 命名空间及统一工具目录。
 2. Codex 产生 `item/tool/call` 后，Panes 将 `threadId`、`turnId`、`callId` 和工具参数转换为统一服务请求。
-3. 统一服务先做授权，再调用 CUA SDK。
+3. 统一服务先确认 SDK 为 `ready`，再做授权；只有授权允许后才能调用 CUA SDK。
 4. 以 `DynamicToolCallResponse` 回传文本；截图以 app-server schema 支持的 `input_image` content item 回传。
 
 Codex 当前 schema 中 `dynamicTools` 属于 `thread/start`，`thread/resume` 和 `thread/fork` 没有同样的动态工具字段。因此不能假设恢复旧线程时可以临时补工具。设计要求：
@@ -352,13 +352,14 @@ Panes 退出时执行同一套清理，但即使异常退出也不会留下 `--p
 
 各阶段的未完成事项统一登记在《[电脑操作 SDK 未完成清单](<电脑操作SDK未完成清单.md>)》。阶段开始和收尾必须回看该清单；具备当前阶段验证条件的事项必须当场补做，不得只在阶段文档中顺延。
 
-### 阶段 0：官方预编译 SDK 集成 Spike，作为硬门槛
+### 阶段 0：官方预编译 SDK 集成 Spike 与 Panes 正式运行时接入，作为硬门槛
 
 详细的业务目的、执行顺序、用例编号和结果记录格式见《电脑操作 SDK 集成测试清单》；Spike 和后续集成都必须按该清单逐条执行，不能只做 DLL 加载烟测。
 
 - 固定一个官方 CUA release 版本，取得对应 Windows archive，不把 CUA 源码加入 Panes 的 Rust 构建配置。
 - 核对 archive 是否包含 `cua_driver_sdk.dll`、`cua_driver_abi.h` 以及该版本声明的全部运行时依赖。
 - 在当前工作树中只做 Panes 侧最小 FFI 集成：从 resources 相对路径加载原生库，校验 ABI，创建 runtime、列工具、创建 session、获取一次桌面状态、shutdown。
+- 将官方资源纳入 Panes 正式 resources，并验证 Panes runtime 在功能开启后的启动初始化、状态读取和 shutdown；此前单列的 runtime 记录归入本阶段，不再作为独立阶段。
 - 验证 Panes 进程内只有一个 runtime；如果该版本需要 SDK 私有 worker，验证 worker 随 runtime 创建并随 shutdown 退出。
 - 验证 Windows UIA、屏幕捕获、输入依赖能被官方 archive 正确带起。
 - Spike 未通过时停止，不进入 UI 和引擎适配器开发。
@@ -396,6 +397,7 @@ Panes 退出时执行同一套清理，但即使异常退出也不会留下 `--p
 ### 必须满足
 
 - 设置页有独立的 Panes“电脑操作能力”开关，不出现在 MCP/扩展列表。
+- 功能开启后的 Panes 启动阶段必须完成 SDK 初始化；只有状态为“可用”时才允许产生电脑操作授权。
 - 模型第一次实际调用时才弹授权，不要求预先添加 exe。
 - Panes 主进程内只有一个 CUA SDK runtime。
 - Panes 使用官方预编译原生库和稳定 C ABI，不要求消费者编译 CUA 源码。

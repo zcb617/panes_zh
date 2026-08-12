@@ -797,6 +797,10 @@ export function App() {
               agent: computerControlAgentName,
               tool: computerControlApproval.tool,
               application: computerControlApproval.application,
+              operation: computerControlApproval.operation,
+              scope: computerControlApproval.scope,
+              threadId: computerControlApproval.threadId,
+              turnId: computerControlApproval.turnId,
             })
           : ""}
         confirmLabel={computerControlApprovalUpdating

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::Path,
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
@@ -15,7 +15,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{computer_control_sdk::CuaDriverSdk, config::app_config::AppConfig};
+use crate::{
+    computer_control_sdk::CuaDriverSdk,
+    config::app_config::{AppConfig, ComputerControlAuthorizationConfig},
+    runtime_env,
+};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 const COMPUTER_CONTROL_APPROVAL_EVENT: &str = "computer-control-approval-requested";
@@ -53,7 +57,8 @@ const REVIEWED_TOOLS: &[(&str, &str)] = &[
 
 #[derive(Debug)]
 struct PendingAuthorization {
-    grant_key: String,
+    target_key: String,
+    authorization: ComputerControlAuthorization,
     response: oneshot::Sender<bool>,
 }
 
@@ -167,16 +172,18 @@ fn target_resource(tool: &str, arguments: &Value) -> Result<TargetResource, Stri
         ));
     }
 
-    for key in ["launch_path", "path", "aumid", "application", "name"] {
+    for key in ["launch_path", "path"] {
         if let Some(value) = object
             .and_then(|value| value.get(key))
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            return Ok(application_resource(value));
+            return resolved_application_resource(value);
         }
     }
+    /*
+    授权不得按窗口号保存。窗口号和 PID 一样只在进程生命周期内有效，设置页也不应显示它。
     if let Some(window_id) = object.and_then(|value| value.get("window_id")) {
         if let Some(value) = window_id.as_str().filter(|value| !value.trim().is_empty()) {
             return Ok(TargetResource {
@@ -185,23 +192,39 @@ fn target_resource(tool: &str, arguments: &Value) -> Result<TargetResource, Stri
                 scope: "window",
             });
         }
-        if let Some(value) = window_id.as_u64() {
-            return Ok(TargetResource {
-                key: format!("window:{value}"),
-                display: format!("窗口 {value}"),
-                scope: "window",
-            });
-        }
     }
+    */
     if let Some(pid) = object
         .and_then(|value| value.get("pid"))
         .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
     {
+        if let Some(application) = process_executable_path(pid) {
+            return resolved_application_resource(&application);
+        }
+        /*
+        授权不得按 PID 保存或展示，必须先解析成可执行文件名。
         return Ok(TargetResource {
             key: format!("pid:{pid}"),
             display: format!("PID {pid}"),
             scope: "application",
         });
+        */
+        return Err(service_error(
+            "target_not_found",
+            "无法读取目标进程的可执行文件名",
+        ));
+    }
+
+    for key in ["application", "name", "aumid"] {
+        if let Some(value) = object
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return resolved_application_resource(value);
+        }
     }
 
     match tool {
@@ -233,16 +256,97 @@ fn target_resource(tool: &str, arguments: &Value) -> Result<TargetResource, Stri
 }
 
 fn application_resource(application: &str) -> TargetResource {
-    let display = Path::new(application)
-        .canonicalize()
-        .ok()
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|| application.to_string());
+    let display = Path::new(application.trim())
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .map(str::trim)
+        .filter(|file_name| !file_name.is_empty())
+        .unwrap_or_else(|| application.trim())
+        .to_string();
+    /*
+    错误逻辑：不能因为调用方省略扩展名，就擅自把 A 变为 A.exe。
+    if Path::new(&display).extension().is_none() {
+        display.push_str(".exe");
+    }
+    */
     TargetResource {
         key: format!("application:{}", display.to_lowercase()),
         display,
         scope: "application",
     }
+}
+
+fn resolved_application_resource(application: &str) -> Result<TargetResource, String> {
+    let application = application.trim();
+    if application.is_empty() {
+        return Err(service_error("target_not_found", "缺少目标可执行文件名"));
+    }
+
+    let path = Path::new(application);
+    if path.is_file() {
+        return Ok(application_resource(application));
+    }
+
+    let is_bare_name = !application.contains('\\') && !application.contains('/');
+    if is_bare_name {
+        let resolved = runtime_env::resolve_executable(application).ok_or_else(|| {
+            service_error("target_not_found", "无法解析目标名称对应的实际可执行文件名")
+        })?;
+        return Ok(application_resource(&resolved.to_string_lossy()));
+    }
+
+    Err(service_error(
+        "target_not_found",
+        "无法解析目标路径对应的实际可执行文件名",
+    ))
+}
+
+fn authorization_matches_target(
+    authorization: &ComputerControlAuthorizationConfig,
+    target_key: &str,
+) -> bool {
+    authorization.target_key == target_key
+        || (target_key.starts_with("application:")
+            && authorization.target_key.starts_with("application:")
+            && resolved_application_resource(&authorization.application)
+                .unwrap_or_else(|_| application_resource(&authorization.application))
+                .key
+                == target_key)
+}
+
+#[cfg(target_os = "windows")]
+fn process_executable_path(pid: u32) -> Option<String> {
+    use windows::{
+        core::PWSTR,
+        Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{
+                OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        },
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buffer = vec![0_u16; 32_768];
+    let mut length = buffer.len() as u32;
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+    };
+    let _ = unsafe { CloseHandle(process) };
+    result
+        .ok()
+        .map(|_| String::from_utf16_lossy(&buffer[..length as usize]))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_executable_path(_pid: u32) -> Option<String> {
+    None
 }
 
 fn target_is_panes(application: &str) -> bool {
@@ -284,7 +388,12 @@ fn service_error(code: &str, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        dynamic_tool_failure, dynamic_tool_success, target_resource, ComputerControlService,
+        application_resource, authorization_matches_target, dynamic_tool_failure,
+        dynamic_tool_success, resolved_application_resource, target_resource,
+        ComputerControlService,
+    };
+    use crate::config::app_config::{
+        with_temp_app_data_env, AppConfig, ComputerControlAuthorizationConfig,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -308,6 +417,84 @@ mod tests {
     }
 
     #[test]
+    fn application_file_name_is_extracted_without_guessed_extension() {
+        let system_notepad = application_resource(r"C:\\Windows\\System32\\notepad.exe");
+        let custom_notepad = application_resource(r"D:\\tools\\notepad.exe");
+        let custom_extension = application_resource(r"D:\\tools\\notepad.custom");
+        let bare_notepad = application_resource("Notepad");
+
+        assert_eq!(system_notepad.key, "application:notepad.exe");
+        assert_eq!(custom_notepad.key, "application:notepad.exe");
+        assert_eq!(custom_extension.key, "application:notepad.custom");
+        assert_eq!(bare_notepad.key, "application:notepad");
+        assert_eq!(system_notepad.display, "notepad.exe");
+        assert_eq!(custom_notepad.display, "notepad.exe");
+        assert_eq!(custom_extension.display, "notepad.custom");
+        assert_eq!(bare_notepad.display, "Notepad");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn bare_windows_name_uses_windows_actual_executable_name() {
+        let notepad = resolved_application_resource("notepad")
+            .expect("Windows should resolve the built-in Notepad executable");
+        let notepad_exe = resolved_application_resource("notepad.exe")
+            .expect("Windows should resolve the built-in Notepad executable");
+
+        assert_eq!(notepad.key, "application:notepad.exe");
+        assert_eq!(notepad.display.to_ascii_lowercase(), "notepad.exe");
+        assert_eq!(notepad.key, notepad_exe.key);
+    }
+
+    #[test]
+    fn unresolved_bare_name_is_not_given_an_extension() {
+        assert!(resolved_application_resource("panes-cua-not-a-real-application").is_err());
+    }
+
+    #[test]
+    fn old_path_authorization_matches_the_same_file_name() {
+        let authorization = ComputerControlAuthorizationConfig {
+            request_id: "legacy-request".to_string(),
+            target_key: r"application:c:\\windows\\system32\\notepad.exe".to_string(),
+            agent: "codex".to_string(),
+            tool: "launch_app".to_string(),
+            call_id: "call-1".to_string(),
+            application: r"C:\\Windows\\System32\\notepad.exe".to_string(),
+            operation: "input".to_string(),
+            scope: "application".to_string(),
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+        };
+
+        assert!(authorization_matches_target(
+            &authorization,
+            "application:notepad.exe"
+        ));
+    }
+
+    #[test]
+    fn target_scopes_are_classified() {
+        assert_eq!(
+            target_resource("start_session", &json!({}))
+                .expect("session target should resolve")
+                .scope,
+            "metadata"
+        );
+        assert_eq!(
+            target_resource("list_windows", &json!({}))
+                .expect("observation target should resolve")
+                .scope,
+            "observation"
+        );
+        assert_eq!(
+            target_resource("launch_app", &json!({"path": "notepad.exe"}))
+                .expect("application target should resolve")
+                .scope,
+            "application"
+        );
+    }
+
+    #[test]
     fn dynamic_tool_result_has_codex_content_items() {
         assert_eq!(dynamic_tool_success(json!({"ok": true}))["success"], true);
         assert_eq!(
@@ -319,26 +506,77 @@ mod tests {
         }));
         assert_eq!(image["contentItems"][0]["type"], "inputImage");
     }
+
+    #[test]
+    fn persistent_authorization_survives_service_recreation_and_can_be_revoked() {
+        with_temp_app_data_env(|| {
+            AppConfig::mutate(|config| {
+                config.computer_control.persistent_authorizations.push(
+                    ComputerControlAuthorizationConfig {
+                        request_id: "request-1".to_string(),
+                        target_key: "application:notepad.exe".to_string(),
+                        agent: "codex".to_string(),
+                        tool: "click".to_string(),
+                        call_id: "call-1".to_string(),
+                        application: "notepad.exe".to_string(),
+                        operation: "input".to_string(),
+                        scope: "application".to_string(),
+                        thread_id: "thread-1".to_string(),
+                        turn_id: "turn-1".to_string(),
+                    },
+                );
+                Ok(())
+            })
+            .expect("authorization should persist");
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should start");
+            runtime.block_on(async {
+                let service = ComputerControlService::default();
+                let active = service.active_authorizations().await;
+                assert_eq!(active.len(), 1);
+                assert_eq!(active[0].request_id, "request-1");
+                assert_eq!(active[0].application, "notepad.exe");
+                assert!(ComputerControlService::has_persistent_authorization(
+                    "application:notepad.exe"
+                ));
+
+                service.revoke_turn("thread-1", Some("turn-1")).await;
+                assert!(ComputerControlService::has_persistent_authorization(
+                    "application:notepad.exe"
+                ));
+
+                service.revoke_all().await;
+                assert!(ComputerControlService::has_persistent_authorization(
+                    "application:notepad.exe"
+                ));
+
+                assert!(service.revoke_authorization("request-1").await);
+                assert!(service.active_authorizations().await.is_empty());
+            });
+        });
+    }
 }
 
 #[derive(Default)]
 struct AuthorizationState {
     pending: HashMap<String, PendingAuthorization>,
-    grants: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ComputerControlAuthorizationRequest {
-    request_id: String,
-    agent: String,
-    tool: String,
-    call_id: String,
-    application: String,
-    operation: String,
-    scope: String,
-    thread_id: String,
-    turn_id: String,
+pub struct ComputerControlAuthorization {
+    pub request_id: String,
+    pub agent: String,
+    pub tool: String,
+    pub call_id: String,
+    pub application: String,
+    pub operation: String,
+    pub scope: String,
+    pub thread_id: String,
+    pub turn_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -399,13 +637,90 @@ impl ComputerControlService {
         REVIEWED_TOOLS.iter().any(|(name, _)| *name == tool)
     }
 
-    #[cfg(test)]
     pub fn sdk(&self) -> Arc<CuaDriverSdk> {
         self.sdk.clone()
     }
 
-    async fn has_grant(&self, grant_key: &str) -> bool {
-        self.state.lock().await.grants.contains(grant_key)
+    pub async fn active_authorizations(&self) -> Vec<ComputerControlAuthorization> {
+        let mut authorizations = AppConfig::load_or_create()
+            .map(|config| {
+                let mut applications = HashMap::new();
+                for authorization in config
+                    .computer_control
+                    .persistent_authorizations
+                    .into_iter()
+                    .filter(|authorization| authorization.target_key.starts_with("application:"))
+                {
+                    let application = resolved_application_resource(&authorization.application)
+                        .unwrap_or_else(|_| application_resource(&authorization.application));
+                    applications.entry(application.key).or_insert_with(|| {
+                        ComputerControlAuthorization {
+                            request_id: authorization.request_id,
+                            agent: authorization.agent,
+                            tool: authorization.tool,
+                            call_id: authorization.call_id,
+                            application: application.display,
+                            operation: authorization.operation,
+                            scope: authorization.scope,
+                            thread_id: authorization.thread_id,
+                            turn_id: authorization.turn_id,
+                        }
+                    });
+                }
+                applications.into_values().collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        authorizations.sort_by(|left, right| left.application.cmp(&right.application));
+        authorizations
+    }
+
+    pub async fn revoke_authorization(&self, request_id: &str) -> bool {
+        let request_id = request_id.trim();
+        let revoked = AppConfig::mutate(|config| {
+            let authorizations = &mut config.computer_control.persistent_authorizations;
+            let Some(target_key) = authorizations
+                .iter()
+                .find(|authorization| authorization.request_id == request_id)
+                .map(|authorization| {
+                    if authorization.target_key.starts_with("application:") {
+                        resolved_application_resource(&authorization.application)
+                            .unwrap_or_else(|_| application_resource(&authorization.application))
+                            .key
+                    } else {
+                        authorization.target_key.clone()
+                    }
+                })
+            else {
+                return Ok(false);
+            };
+            let count_before = authorizations.len();
+            authorizations
+                .retain(|authorization| !authorization_matches_target(authorization, &target_key));
+            Ok(authorizations.len() != count_before)
+        })
+        .unwrap_or(false);
+        let pending_response = {
+            let mut state = self.state.lock().await;
+            let pending = state.pending.remove(request_id);
+            pending.map(|authorization| authorization.response)
+        };
+        let pending_was_cancelled = pending_response.is_some();
+        if let Some(response) = pending_response {
+            let _ = response.send(false);
+        }
+        revoked || pending_was_cancelled
+    }
+
+    fn has_persistent_authorization(target_key: &str) -> bool {
+        AppConfig::load_or_create()
+            .map(|config| {
+                config
+                    .computer_control
+                    .persistent_authorizations
+                    .iter()
+                    .any(|authorization| authorization_matches_target(authorization, target_key))
+            })
+            .unwrap_or(false)
     }
 
     pub async fn respond(&self, request_id: &str, allowed: bool) -> Result<bool, String> {
@@ -417,17 +732,48 @@ impl ComputerControlService {
             return Ok(false);
         };
 
+        let PendingAuthorization {
+            target_key,
+            authorization,
+            response,
+        } = pending;
         if allowed {
-            self.state.lock().await.grants.insert(pending.grant_key);
+            AppConfig::mutate(|config| {
+                let authorizations = &mut config.computer_control.persistent_authorizations;
+                authorizations
+                    .retain(|existing| !authorization_matches_target(existing, &target_key));
+                authorizations.push(ComputerControlAuthorizationConfig {
+                    request_id: authorization.request_id.clone(),
+                    target_key,
+                    agent: authorization.agent.clone(),
+                    tool: authorization.tool.clone(),
+                    call_id: authorization.call_id.clone(),
+                    application: authorization.application.clone(),
+                    operation: authorization.operation.clone(),
+                    scope: authorization.scope.clone(),
+                    thread_id: authorization.thread_id.clone(),
+                    turn_id: authorization.turn_id.clone(),
+                });
+                Ok(())
+            })
+            .map_err(|error| error.to_string())?;
         }
-        let _ = pending.response.send(allowed);
+        let _ = response.send(allowed);
         Ok(true)
     }
 
     pub async fn revoke_all(&self) {
+        /*
+        用户已明确要求授权“永远保存，只需要授权一次”。因此功能关闭、引擎断开和
+        Panes 退出只取消尚未响应的授权窗口，不清空已写入配置的目标授权；删除永久
+        授权只能由设置页的“撤销”操作完成。
+        let _ = AppConfig::mutate(|config| {
+            config.computer_control.persistent_authorizations.clear();
+            Ok(())
+        });
+        */
         let pending = {
             let mut state = self.state.lock().await;
-            state.grants.clear();
             state
                 .pending
                 .drain()
@@ -446,11 +792,16 @@ impl ComputerControlService {
         };
         let pending = {
             let mut state = self.state.lock().await;
-            state.grants.retain(|key| !key.starts_with(&prefix));
             let request_ids = state
                 .pending
                 .iter()
-                .filter(|(_, pending)| pending.grant_key.starts_with(&prefix))
+                .filter(|(_, pending)| {
+                    format!(
+                        "{}\n{}\n",
+                        pending.authorization.thread_id, pending.authorization.turn_id
+                    )
+                    .starts_with(&prefix)
+                })
                 .map(|(request_id, _)| request_id.clone())
                 .collect::<Vec<_>>();
             request_ids
@@ -520,6 +871,12 @@ impl ComputerControlService {
                 "Panes 的电脑操作能力开关未开启",
             ));
         }
+        if !self.sdk.status().initialized {
+            return Err(service_error(
+                "sdk_unavailable",
+                "CUA SDK 尚未就绪，Panes 不会发起电脑操作授权",
+            ));
+        }
         let arguments = normalize_arguments(arguments)?;
         let target = target_resource(tool, &arguments)?;
         if target_is_panes(&target.display) {
@@ -529,11 +886,7 @@ impl ComputerControlService {
             ));
         }
         let operation = operation_kind(tool);
-        let grant_key = format!(
-            "{thread_id}\n{turn_id}\n{agent}\n{}\n{operation}",
-            target.key
-        );
-        if !self.has_grant(&grant_key).await {
+        if !Self::has_persistent_authorization(&target.key) {
             self.request_authorization(
                 agent,
                 thread_id,
@@ -542,7 +895,7 @@ impl ComputerControlService {
                 call_id,
                 &target,
                 operation,
-                grant_key,
+                target.key.clone(),
                 cancellation.clone(),
             )
             .await?;
@@ -561,23 +914,12 @@ impl ComputerControlService {
         call_id: &str,
         target: &TargetResource,
         operation: &str,
-        grant_key: String,
+        target_key: String,
         cancellation: CancellationToken,
     ) -> Result<(), String> {
         let request_id = Uuid::new_v4().to_string();
         let (response_tx, response_rx) = oneshot::channel();
-        {
-            let mut state = self.state.lock().await;
-            state.pending.insert(
-                request_id.clone(),
-                PendingAuthorization {
-                    grant_key,
-                    response: response_tx,
-                },
-            );
-        }
-
-        let request = ComputerControlAuthorizationRequest {
+        let request = ComputerControlAuthorization {
             request_id: request_id.clone(),
             agent: agent.to_string(),
             tool: tool.to_string(),
@@ -588,6 +930,17 @@ impl ComputerControlService {
             thread_id: thread_id.to_string(),
             turn_id: turn_id.to_string(),
         };
+        {
+            let mut state = self.state.lock().await;
+            state.pending.insert(
+                request_id.clone(),
+                PendingAuthorization {
+                    target_key,
+                    authorization: request.clone(),
+                    response: response_tx,
+                },
+            );
+        }
         let emit_result = self
             .app_handle
             .lock()

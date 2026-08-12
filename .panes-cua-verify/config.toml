@@ -1,0 +1,62 @@
+[general]
+theme = "dark"
+default_engine = "codex"
+default_model = "gpt-5.4"
+locale = "zh-CN"
+
+[ui]
+sidebar_width = 260
+git_panel_width = 380
+font_size = 13
+display_scale = 100
+
+[debug]
+persist_engine_event_logs = false
+max_action_output_chars = 20000
+
+[power]
+keep_awake_enabled = false
+prevent_display_sleep = false
+prevent_screen_saver = false
+ac_only_mode = false
+prevent_closed_display_sleep = false
+
+[computer_control]
+enabled = true
+allowed_applications = []
+
+[[computer_control.persistent_authorizations]]
+request_id = "973f7a73-5ad0-47c5-a1e6-1c53860907b7"
+target_key = "metadata:computer-control"
+agent = "codex"
+tool = "start_session"
+call_id = "exec-7ca87554-a83b-44e5-b7dd-fbaf6925a4b5"
+application = "电脑操作运行状态"
+operation = "session"
+scope = "metadata"
+thread_id = "019ff3f3-e75a-7833-8b5d-b0a986876f4c"
+turn_id = "019ff3f4-aa73-7381-af8c-b4684aae0566"
+
+[[computer_control.persistent_authorizations]]
+request_id = "4aa8d42e-9d0f-4f25-9196-54fa50a5b22d"
+target_key = "observation:applications"
+agent = "codex"
+tool = "list_apps"
+call_id = "exec-398fae1f-dcfe-49db-b741-bc7a2c104ac2"
+application = "Windows 应用和窗口"
+operation = "observe"
+scope = "observation"
+thread_id = "019ff3f3-e75a-7833-8b5d-b0a986876f4c"
+turn_id = "019ff3f4-aa73-7381-af8c-b4684aae0566"
+
+[[computer_control.persistent_authorizations]]
+request_id = "3aed34d9-7661-4a1f-a545-bf0a66723bc7"
+target_key = "application:notepad.exe"
+agent = "codex"
+tool = "bring_to_front"
+call_id = "exec-3beff297-e9b5-4f71-9b00-3ce97480dce6"
+application = "Notepad.exe"
+operation = "input"
+scope = "application"
+thread_id = "019ff41b-6c22-7763-b41d-742527d2d99c"
+turn_id = "019ff41c-1e8f-7042-99fb-dd1ba2c975d9"

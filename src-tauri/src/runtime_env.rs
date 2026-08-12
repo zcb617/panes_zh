@@ -16,6 +16,8 @@ const LOGIN_ENV_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const LOGIN_ENV_PROBE_MARKER: &str = "__PANES_LOGIN_ENV_START__";
 
 static LOGIN_SHELL_ENV: OnceCell<HashMap<OsString, OsString>> = OnceCell::const_new();
+static APP_DATA_DIR_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static CONFIG_PATH_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellFlavor {
@@ -51,7 +53,53 @@ pub fn is_flatpak() -> bool {
     env::var_os("FLATPAK_ID").is_some()
 }
 
+/// Initializes the per-instance data directory from the main application's
+/// `--config <path>` argument before any configuration, database, or runtime
+/// state is loaded.
+pub fn initialize_from_cli() -> anyhow::Result<()> {
+    let mut args = env::args_os().skip(1);
+    let Some(first) = args.next() else {
+        return Ok(());
+    };
+
+    let first_text = first.to_string_lossy();
+    let raw_path = if first_text == "--config" {
+        args.next()
+            .ok_or_else(|| anyhow::anyhow!("missing value for --config"))?
+    } else if let Some(value) = first_text.strip_prefix("--config=") {
+        OsString::from(value)
+    } else {
+        return Ok(());
+    };
+    if raw_path.is_empty() {
+        anyhow::bail!("--config path must not be empty");
+    }
+
+    let config_path = if Path::new(&raw_path).is_absolute() {
+        PathBuf::from(raw_path)
+    } else {
+        env::current_dir()?.join(raw_path)
+    };
+    let data_dir = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("--config path must have a parent directory"))?
+        .to_path_buf();
+
+    APP_DATA_DIR_OVERRIDE
+        .set(data_dir)
+        .map_err(|_| anyhow::anyhow!("Panes startup options were already initialized"))?;
+    CONFIG_PATH_OVERRIDE
+        .set(config_path)
+        .map_err(|_| anyhow::anyhow!("Panes startup options were already initialized"))?;
+    Ok(())
+}
+
 pub fn app_data_dir() -> PathBuf {
+    if let Some(path) = APP_DATA_DIR_OVERRIDE.get() {
+        return path.clone();
+    }
+
     app_data_dir_for(
         cfg!(target_os = "windows"),
         local_app_data_dir().as_deref(),
@@ -65,8 +113,19 @@ pub fn legacy_app_data_dir() -> Option<PathBuf> {
 }
 
 pub fn migrate_legacy_app_data_dir() -> std::io::Result<()> {
+    if APP_DATA_DIR_OVERRIDE.get().is_some() {
+        return Ok(());
+    }
+
     let current = app_data_dir();
     migrate_legacy_app_data_dir_for(&current, legacy_app_data_dir().as_deref())
+}
+
+pub fn config_path() -> PathBuf {
+    CONFIG_PATH_OVERRIDE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| app_data_dir().join("config.toml"))
 }
 
 pub fn augmented_path() -> Option<OsString> {

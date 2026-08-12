@@ -108,6 +108,22 @@ pub struct PowerConfig {
 pub struct ComputerControlConfig {
     pub enabled: bool,
     pub allowed_applications: Vec<String>,
+    pub persistent_authorizations: Vec<ComputerControlAuthorizationConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComputerControlAuthorizationConfig {
+    pub request_id: String,
+    pub target_key: String,
+    pub agent: String,
+    pub tool: String,
+    pub call_id: String,
+    pub application: String,
+    pub operation: String,
+    pub scope: String,
+    pub thread_id: String,
+    pub turn_id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,7 +428,7 @@ impl AppConfig {
     }
 
     pub fn path() -> PathBuf {
-        runtime_env::app_data_dir().join("config.toml")
+        runtime_env::config_path()
     }
 }
 
@@ -443,6 +459,36 @@ fn lock_config() -> anyhow::Result<MutexGuard<'static, ()>> {
 pub(crate) fn app_data_env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
+const APP_DATA_ENV_VARS: [&str; 4] = ["HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"];
+
+#[cfg(test)]
+pub(crate) fn with_temp_app_data_env<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = app_data_env_lock().lock().expect("env lock poisoned");
+    let previous: Vec<(&str, Option<std::ffi::OsString>)> = APP_DATA_ENV_VARS
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect();
+    let root = std::env::temp_dir().join(format!("panes-app-config-home-{}", uuid::Uuid::new_v4()));
+    let local_app_data = root.join("AppData").join("Local");
+    let roaming_app_data = root.join("AppData").join("Roaming");
+    fs::create_dir_all(&local_app_data).expect("temp local app data should exist");
+    fs::create_dir_all(&roaming_app_data).expect("temp roaming app data should exist");
+    std::env::set_var("HOME", &root);
+    std::env::set_var("USERPROFILE", &root);
+    std::env::set_var("LOCALAPPDATA", &local_app_data);
+    std::env::set_var("APPDATA", &roaming_app_data);
+    let result = f();
+    for (key, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+    result
 }
 
 fn replace_file(temp_path: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
@@ -479,40 +525,7 @@ fn replace_file(temp_path: &std::path::Path, path: &std::path::Path) -> std::io:
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use super::AppConfig;
-    use uuid::Uuid;
-
-    const APP_DATA_ENV_VARS: [&str; 4] = ["HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"];
-
-    fn with_temp_app_data_env<T>(f: impl FnOnce() -> T) -> T {
-        let _guard = super::app_data_env_lock()
-            .lock()
-            .expect("env lock poisoned");
-        let previous: Vec<(&str, Option<std::ffi::OsString>)> = APP_DATA_ENV_VARS
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect();
-        let root = std::env::temp_dir().join(format!("panes-app-config-home-{}", Uuid::new_v4()));
-        let local_app_data = root.join("AppData").join("Local");
-        let roaming_app_data = root.join("AppData").join("Roaming");
-        fs::create_dir_all(&local_app_data).expect("temp local app data should exist");
-        fs::create_dir_all(&roaming_app_data).expect("temp roaming app data should exist");
-        std::env::set_var("HOME", &root);
-        std::env::set_var("USERPROFILE", &root);
-        std::env::set_var("LOCALAPPDATA", &local_app_data);
-        std::env::set_var("APPDATA", &roaming_app_data);
-        let result = f();
-        for (key, value) in previous {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-        let _ = fs::remove_dir_all(&root);
-        result
-    }
+    use super::{with_temp_app_data_env, AppConfig};
 
     #[test]
     fn missing_locale_field_uses_none() {
@@ -560,6 +573,38 @@ max_action_output_chars = 20000
         assert!(!raw.contains("terminal_font_size"));
         assert!(!raw.contains("default_file_open_target"));
         assert!(!raw.contains("harnesses"));
+    }
+
+    #[test]
+    fn persistent_computer_control_authorization_roundtrips() {
+        let mut config = AppConfig::default();
+        config.computer_control.persistent_authorizations.push(
+            super::ComputerControlAuthorizationConfig {
+                request_id: "authorization-1".to_string(),
+                target_key: "application:notepad.exe".to_string(),
+                agent: "codex".to_string(),
+                tool: "launch_app".to_string(),
+                call_id: "call-1".to_string(),
+                application: "notepad.exe".to_string(),
+                operation: "input".to_string(),
+                scope: "application".to_string(),
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
+        );
+
+        let raw = toml::to_string_pretty(&config).expect("config should serialize");
+        let restored = toml::from_str::<AppConfig>(&raw).expect("config should deserialize");
+
+        assert_eq!(restored.computer_control.persistent_authorizations.len(), 1);
+        assert_eq!(
+            restored.computer_control.persistent_authorizations[0].target_key,
+            "application:notepad.exe"
+        );
+        assert_eq!(
+            restored.computer_control.persistent_authorizations[0].application,
+            "notepad.exe"
+        );
     }
 
     #[test]

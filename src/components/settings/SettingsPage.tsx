@@ -117,7 +117,7 @@ function SettingsRow({ icon, title, description, children, onActivate }: Setting
       <span className="usp-row-icon">{icon}</span>
       <span className="usp-row-copy">
         <span className="usp-row-title">{title}</span>
-        <span className="usp-row-description">{description}</span>
+        {description ? <span className="usp-row-description">{description}</span> : null}
       </span>
       {children ? <div className="usp-row-control">{children}</div> : null}
       {onActivate ? <ChevronRight size={14} className="usp-row-chevron" /> : null}
@@ -572,13 +572,30 @@ export function SettingsPage() {
     try {
       const status = await ipc.setComputerControl(enabled, allowedApplications);
       setComputerControlStatus(status);
-      if (status.warnings.length > 0) {
-        toast.warning(status.warnings.join("\n"));
+      if (enabled && status.sdk.state !== "ready") {
+        toast.error(status.sdk.error
+          ?? t(`app:settingsPage.computerControl.sdkDescriptions.${status.sdk.state}`));
+      } else if ((status.warnings?.length ?? 0) > 0) {
+        toast.warning(status.warnings?.join("\n") ?? "");
       } else {
         toast.success(t(enabled
           ? "app:settingsPage.computerControl.enabledToast"
           : "app:settingsPage.computerControl.savedToast"));
       }
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      setComputerControlUpdating(false);
+    }
+  }
+
+  async function revokeComputerControlAuthorization(requestId: string) {
+    if (computerControlUpdating) return;
+    setComputerControlUpdating(true);
+    try {
+      const status = await ipc.revokeComputerControlAuthorization(requestId);
+      setComputerControlStatus(status);
+      toast.success(t("app:settingsPage.computerControl.authorizationRevoked"));
     } catch (error) {
       toast.error(String(error));
     } finally {
@@ -1180,7 +1197,6 @@ export function SettingsPage() {
                         computerControlLoading
                         || computerControlUpdating
                         || computerControlStatus?.supported === false
-                        || (!computerControlStatus?.enabled && !computerControlStatus?.driver.installed)
                       }
                       label={t("app:settingsPage.computerControl.switchTitle")}
                       onChange={(enabled) => {
@@ -1197,22 +1213,17 @@ export function SettingsPage() {
                     />
                   </SettingsRow>
                   <SettingsRow
-                    icon={computerControlStatus?.driver.installed
-                      ? <CheckCircle2 size={17} />
-                      : <AlertCircle size={17} />}
-                    title={t("app:settingsPage.computerControl.driverTitle")}
-                    description={computerControlStatus?.driver.installed
-                      ? t("app:settingsPage.computerControl.driverReady", {
-                          version: computerControlStatus.driver.version ?? t("app:settingsPage.computerControl.unknownVersion"),
-                        })
-                      : t("app:settingsPage.computerControl.driverMissing")}
+                    icon={computerControlStatus?.sdk.state === "failed"
+                      ? <AlertCircle size={17} />
+                      : <CheckCircle2 size={17} />}
+                    title={t("app:settingsPage.computerControl.sdkTitle")}
+                    description={computerControlStatus?.sdk.error
+                      ?? t(`app:settingsPage.computerControl.sdkDescriptions.${computerControlStatus?.sdk.state ?? "loading"}`)}
                   >
-                    <span className={`usp-status${computerControlStatus?.driver.installed ? " usp-status-ready" : ""}`}>
+                    <span className={`usp-status${computerControlStatus?.sdk.state === "ready" ? " usp-status-ready" : ""}`}>
                       {computerControlLoading
-                        ? t("app:settingsPage.computerControl.detecting")
-                        : computerControlStatus?.driver.installed
-                          ? t("app:settingsPage.computerControl.ready")
-                          : t("app:settingsPage.computerControl.unavailable")}
+                        ? t("app:settingsPage.computerControl.loading")
+                        : t(`app:settingsPage.computerControl.sdkStates.${computerControlStatus?.sdk.state ?? "disabled"}`)}
                     </span>
                   </SettingsRow>
                 </div>
@@ -1299,15 +1310,35 @@ export function SettingsPage() {
 
               <section className="usp-section">
                 <div className="usp-section-header">
-                  <h2>{t("app:settingsPage.computerControl.applicationsTitle")}</h2>
-                  <p>{t("app:settingsPage.computerControl.applicationsDescription")}</p>
+                  <h2>{t("app:settingsPage.computerControl.currentAuthorizationsTitle")}</h2>
+                  <p>{t("app:settingsPage.computerControl.currentAuthorizationsDescription")}</p>
                 </div>
                 <div className="usp-group">
-                  <SettingsRow
-                    icon={<LockKeyhole size={17} />}
-                    title={t("app:settingsPage.computerControl.noApplicationsTitle")}
-                    description={t("app:settingsPage.computerControl.noApplicationsDescription")}
-                  />
+                  {(computerControlStatus?.currentAuthorizations ?? []).length > 0 ? (
+                    computerControlStatus?.currentAuthorizations.map((authorization) => (
+                      <SettingsRow
+                        key={authorization.requestId}
+                        icon={<LockKeyhole size={17} />}
+                        title={authorization.application}
+                        description=""
+                      >
+                        <button
+                          type="button"
+                          className="usp-button"
+                          disabled={computerControlUpdating}
+                          onClick={() => void revokeComputerControlAuthorization(authorization.requestId)}
+                        >
+                          {t("app:settingsPage.computerControl.revokeAuthorization")}
+                        </button>
+                      </SettingsRow>
+                    ))
+                  ) : (
+                    <SettingsRow
+                      icon={<LockKeyhole size={17} />}
+                      title={t("app:settingsPage.computerControl.currentAuthorizationsEmptyTitle")}
+                      description={t("app:settingsPage.computerControl.currentAuthorizationsEmptyDescription")}
+                    />
+                  )}
                 </div>
               </section>
 
@@ -1317,21 +1348,19 @@ export function SettingsPage() {
                   <p>{t("app:settingsPage.computerControl.agentsDescription")}</p>
                 </div>
                 <div className="usp-group">
-                  {(computerControlStatus?.agents ?? []).map((agent) => (
+                  {(computerControlStatus?.adapters ?? []).map((agent) => (
                     <SettingsRow
                       key={agent.id}
                       icon={getHarnessIcon(agent.id === "claude" ? "claude-code" : agent.id, 16)}
                       title={agent.name}
-                      description={agent.installed
-                        ? t("app:settingsPage.computerControl.agentInstalled")
-                        : t("app:settingsPage.computerControl.agentMissing")}
+                      description={agent.builtIn
+                        ? t("app:settingsPage.computerControl.agentBuiltIn")
+                        : t("app:settingsPage.computerControl.unavailable")}
                     >
-                      <span className={`usp-status${agent.configured ? " usp-status-ready" : ""}`}>
-                        {agent.configured
+                      <span className={`usp-status${agent.builtIn ? " usp-status-ready" : ""}`}>
+                        {agent.builtIn
                           ? t("app:settingsPage.computerControl.agentReady")
-                          : agent.installed
-                            ? t("app:settingsPage.computerControl.agentNotEnabled")
-                            : t("app:settingsPage.computerControl.unavailable")}
+                          : t("app:settingsPage.computerControl.unavailable")}
                       </span>
                     </SettingsRow>
                   ))}

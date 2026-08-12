@@ -100,50 +100,48 @@ impl CuaDriverSdk {
             }
         }
 
-        let resource_dir = self
-            .resource_dir
-            .lock()
-            .map_err(|_| "CUA SDK resource state is poisoned".to_string())?
-            .clone()
-            .ok_or_else(|| "Panes resource directory is not configured".to_string())?;
-        let library_path = resolve_library_path(&resource_dir).ok_or_else(|| {
-            format!(
-                "official CUA SDK library was not found under {}",
-                resource_dir.display()
-            )
-        })?;
-
-        let runtime = Runtime::create(&library_path).map_err(|error| {
-            let message = error.to_string();
-            self.set_error(Some(message.clone()));
-            message
-        })?;
-        let runtime_info = runtime.info().map_err(|error| {
-            let message = error.to_string();
-            self.set_error(Some(message.clone()));
-            message
-        })?;
-
-        let mut runtime_slot = self
-            .runtime
-            .lock()
-            .map_err(|_| "CUA SDK runtime state is poisoned".to_string())?;
-        if runtime_slot.is_none() {
-            *runtime_slot = Some(runtime);
-            *self
-                .runtime_info
+        let result = (|| {
+            let resource_dir = self
+                .resource_dir
                 .lock()
-                .map_err(|_| "CUA SDK runtime info is poisoned".to_string())? =
-                Some(runtime_info.clone());
-            self.set_error(None);
-            Ok(runtime_info)
-        } else {
-            Err("CUA SDK runtime was initialized concurrently".to_string())
+                .map_err(|_| "CUA SDK resource state is poisoned".to_string())?
+                .clone()
+                .ok_or_else(|| "Panes resource directory is not configured".to_string())?;
+            let library_path = resolve_library_path(&resource_dir).ok_or_else(|| {
+                format!(
+                    "official CUA SDK library was not found under {}",
+                    resource_dir.display()
+                )
+            })?;
+
+            let runtime = Runtime::create(&library_path).map_err(|error| error.to_string())?;
+            let runtime_info = runtime.info().map_err(|error| error.to_string())?;
+
+            let mut runtime_slot = self
+                .runtime
+                .lock()
+                .map_err(|_| "CUA SDK runtime state is poisoned".to_string())?;
+            if runtime_slot.is_none() {
+                *runtime_slot = Some(runtime);
+                *self
+                    .runtime_info
+                    .lock()
+                    .map_err(|_| "CUA SDK runtime info is poisoned".to_string())? =
+                    Some(runtime_info.clone());
+                self.set_error(None);
+                Ok(runtime_info)
+            } else {
+                Err("CUA SDK runtime was initialized concurrently".to_string())
+            }
+        })();
+
+        if let Err(error) = &result {
+            self.set_error(Some(error.clone()));
         }
+        result
     }
 
     pub fn list_tools(&self) -> Result<Value, String> {
-        self.initialize()?;
         let mut runtime = self
             .runtime
             .lock()
@@ -156,7 +154,6 @@ impl CuaDriverSdk {
     }
 
     pub fn get_screen_size(&self) -> Result<Value, String> {
-        self.initialize()?;
         let mut runtime = self
             .runtime
             .lock()
@@ -169,7 +166,6 @@ impl CuaDriverSdk {
     }
 
     pub fn invoke(&self, tool: &str, arguments: &Value) -> Result<Value, String> {
-        self.initialize()?;
         let mut runtime = self
             .runtime
             .lock()
@@ -229,6 +225,15 @@ impl Drop for CuaDriverSdk {
 
 fn resolve_library_path(resource_dir: &Path) -> Option<PathBuf> {
     [
+        resource_dir
+            .join("resources")
+            .join("cua-driver")
+            .join("windows-x86_64")
+            .join("cua_driver_sdk.dll"),
+        resource_dir
+            .join("resources")
+            .join("cua-driver")
+            .join("cua_driver_sdk.dll"),
         resource_dir
             .join("cua-driver")
             .join("windows-x86_64")
@@ -781,7 +786,7 @@ mod tests {
         if env::var_os("PANES_CUA_SDK_SPIKE").is_none() {
             return;
         }
-        let resource_dir = PathBuf::from("resources/cua-driver/windows-x86_64");
+        let resource_dir = PathBuf::from("target/release");
         let sdk = CuaDriverSdk::new();
         sdk.set_resource_dir(Some(resource_dir));
         let info = sdk.initialize().expect("CUA runtime should initialize");
@@ -797,6 +802,18 @@ mod tests {
             .expect("screen size should be readable")
             .is_object());
         sdk.shutdown().expect("CUA runtime should shut down");
+        assert!(!sdk.status().initialized);
+    }
+
+    #[test]
+    fn tool_calls_require_explicit_startup_initialization() {
+        let sdk = CuaDriverSdk::new();
+
+        let error = sdk
+            .get_screen_size()
+            .expect_err("tool call must not initialize the CUA runtime on demand");
+
+        assert!(error.contains("CUA SDK runtime is not initialized"));
         assert!(!sdk.status().initialized);
     }
 }
