@@ -25,34 +25,34 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 const COMPUTER_CONTROL_APPROVAL_EVENT: &str = "computer-control-approval-requested";
 const COMPUTER_CONTROL_NAMESPACE: &str = "panes_computer_control";
 
-const REVIEWED_TOOLS: &[(&str, &str)] = &[
-    ("start_session", "创建当前任务的电脑操作会话"),
-    ("end_session", "结束当前任务的电脑操作会话"),
-    ("launch_app", "启动指定应用程序"),
-    ("list_apps", "列出可见应用程序"),
-    ("list_windows", "列出可见应用窗口"),
-    ("bring_to_front", "将指定应用窗口置于前台"),
-    ("get_window_state", "读取指定窗口状态"),
-    ("get_accessibility_tree", "读取指定应用的可访问性树"),
-    ("verify_state", "验证指定应用当前状态"),
-    ("get_screen_size", "读取屏幕尺寸元数据"),
-    ("get_cursor_position", "读取当前光标位置"),
-    ("click", "点击指定应用窗口"),
-    ("double_click", "双击指定应用窗口"),
-    ("right_click", "右键点击指定应用窗口"),
-    ("drag", "在指定应用窗口内拖动"),
-    ("type_text", "向指定应用输入文本"),
-    ("press_key", "向指定应用发送按键"),
-    ("hotkey", "向指定应用发送组合键"),
-    ("set_value", "设置指定应用控件值"),
-    ("invoke_menu", "调用指定应用菜单"),
-    ("scroll", "滚动指定应用窗口"),
-    ("move_cursor", "移动指定应用窗口内的光标"),
-    ("zoom", "调整指定应用窗口缩放"),
-    ("clipboard_read", "读取当前任务剪贴板"),
-    ("clipboard_write", "写入当前任务剪贴板"),
-    ("health_report", "读取电脑操作运行状态"),
-    ("get_session_state", "读取当前电脑操作会话状态"),
+const REVIEWED_TOOL_NAMES: &[&str] = &[
+    "start_session",
+    "end_session",
+    "launch_app",
+    "list_apps",
+    "list_windows",
+    "bring_to_front",
+    "get_window_state",
+    "get_accessibility_tree",
+    "verify_state",
+    "get_screen_size",
+    "get_cursor_position",
+    "click",
+    "double_click",
+    "right_click",
+    "drag",
+    "type_text",
+    "press_key",
+    "hotkey",
+    "set_value",
+    "invoke_menu",
+    "scroll",
+    "move_cursor",
+    "zoom",
+    "clipboard_read",
+    "clipboard_write",
+    "health_report",
+    "get_session_state",
 ];
 
 #[derive(Debug)]
@@ -399,13 +399,15 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn dynamic_tools_are_namespaced_and_do_not_start_runtime() {
-        let value = ComputerControlService::dynamic_tools_spec();
-        assert_eq!(value[0]["type"], "namespace");
-        assert_eq!(value[0]["name"], "panes_computer_control");
-        assert!(!value[0]["tools"].as_array().unwrap().is_empty());
+    fn dynamic_tools_are_not_registered_before_sdk_is_ready() {
         let service = ComputerControlService::default();
         assert!(!service.sdk().status().initialized);
+        assert_eq!(
+            service
+                .dynamic_tools_spec()
+                .expect("an uninitialized SDK should register no tools"),
+            json!([])
+        );
         let _ = Arc::new(service);
     }
 
@@ -607,34 +609,92 @@ impl ComputerControlService {
         }
     }
 
-    pub fn dynamic_tools_spec() -> Value {
-        let tools = REVIEWED_TOOLS
-            .iter()
-            .map(|(name, description)| {
+    pub fn reviewed_tool_specs(&self) -> Result<Vec<Value>, String> {
+        if !self.sdk.status().initialized {
+            return Ok(Vec::new());
+        }
+
+        let catalog = self
+            .sdk
+            .list_tools()
+            .map_err(|error| service_error("sdk_unavailable", &error))?;
+        let catalog_tools = catalog
+            .get("tools")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                service_error(
+                    "sdk_invalid_catalog",
+                    "CUA SDK 的工具目录没有 tools 数组",
+                )
+            })?;
+
+        let mut tools = Vec::new();
+        for spec in catalog_tools {
+            let Some(name) = spec.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if !Self::is_reviewed_tool(name) {
+                continue;
+            }
+            if spec.get("description").and_then(Value::as_str).is_none()
+                || spec.get("inputSchema").is_none()
+            {
+                return Err(service_error(
+                    "sdk_invalid_catalog",
+                    &format!("CUA SDK 工具 `{name}` 缺少 description 或 inputSchema"),
+                ));
+            }
+            if !spec["inputSchema"].is_object() {
+                return Err(service_error(
+                    "sdk_invalid_catalog",
+                    &format!("CUA SDK 工具 `{name}` 的 inputSchema 不是 JSON 对象"),
+                ));
+            }
+            tools.push(json!({
+                "name": name,
+                "description": spec["description"].clone(),
+                "inputSchema": spec["inputSchema"].clone(),
+            }));
+        }
+
+        if tools.is_empty() {
+            return Err(service_error(
+                "sdk_invalid_catalog",
+                "CUA SDK 未返回任何已审核的电脑操作工具",
+            ));
+        }
+        Ok(tools)
+    }
+
+    pub fn dynamic_tools_spec(&self) -> Result<Value, String> {
+        let tools = self
+            .reviewed_tool_specs()?
+            .into_iter()
+            .map(|spec| {
                 json!({
                     "type": "function",
-                    "name": name,
-                    "description": description,
-                    "inputSchema": {
-                        "type": "object",
-                        "additionalProperties": true
-                    }
+                    "name": spec["name"].clone(),
+                    "description": spec["description"].clone(),
+                    "inputSchema": spec["inputSchema"].clone(),
                 })
             })
             .collect::<Vec<_>>();
+        if tools.is_empty() {
+            return Ok(Value::Array(Vec::new()));
+        }
 
-        json!([
+        Ok(json!([
             {
                 "type": "namespace",
                 "name": COMPUTER_CONTROL_NAMESPACE,
                 "description": "Panes 的电脑操作能力。每次实际调用都由 Panes 在执行前申请授权。",
                 "tools": tools
             }
-        ])
+        ]))
     }
 
     pub fn is_reviewed_tool(tool: &str) -> bool {
-        REVIEWED_TOOLS.iter().any(|(name, _)| *name == tool)
+        REVIEWED_TOOL_NAMES.iter().any(|name| *name == tool)
     }
 
     pub fn sdk(&self) -> Arc<CuaDriverSdk> {

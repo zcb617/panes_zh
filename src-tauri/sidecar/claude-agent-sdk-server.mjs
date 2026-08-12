@@ -143,6 +143,9 @@ const IMAGE_ATTACHMENT_MEDIA_TYPES = new Map([
 ]);
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(IMAGE_ATTACHMENT_MEDIA_TYPES.values());
 
+/*
+历史实现：手写工具清单、说明和输入字段会漂移，且不能表达 CUA SDK 的真实参数约束。
+保留仅供追溯；运行时不再使用，实际工具定义由 Panes 通过 CUA SDK 的公开 list_tools_json API 传入。
 const PANES_COMPUTER_CONTROL_TOOLS = [
   ["start_session", "创建当前任务的电脑操作会话"],
   ["end_session", "结束当前任务的电脑操作会话"],
@@ -206,6 +209,7 @@ const PANES_COMPUTER_CONTROL_INPUT_KEYS = [
   "sessionId",
   "timeout_ms",
 ];
+*/
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
@@ -613,6 +617,8 @@ function cleanupPendingApprovalsForQuery(queryId, denialMessage) {
   context.pendingApprovalIds.clear();
 }
 
+/*
+历史实现：不能用单一的任意 JSON Schema 代替每个 CUA SDK 工具的真实 inputSchema。
 function computerControlInputSchema() {
   if (!z?.any) {
     return Object.fromEntries(PANES_COMPUTER_CONTROL_INPUT_KEYS.map((key) => [key, {}]));
@@ -620,6 +626,7 @@ function computerControlInputSchema() {
 
   return z.record(z.string(), z.any());
 }
+*/
 
 function computerControlCallResultToClaudeContent(value) {
   const source = Array.isArray(value?.content)
@@ -686,6 +693,8 @@ function waitForComputerControlResult(context, callId, toolName, arguments_, sig
   });
 }
 
+/*
+历史实现：Panes 不能在此处手写 CUA 工具或参数 Schema，保留仅供追溯。
 function createPanesComputerControlServer(context) {
   if (typeof toolFn !== "function" || typeof createSdkMcpServerFn !== "function") {
     throw new Error("当前 Claude Agent SDK 不支持进程内自定义工具服务器。");
@@ -714,6 +723,55 @@ function createPanesComputerControlServer(context) {
       return { content: computerControlCallResultToClaudeContent(result.value) };
     }),
   );
+
+  return createSdkMcpServerFn({
+    name: "panes-computer-control",
+    version: "1.0.0",
+    tools,
+  });
+}
+*/
+
+function createPanesComputerControlServer(context, toolSpecs) {
+  if (typeof toolFn !== "function" || typeof createSdkMcpServerFn !== "function") {
+    throw new Error("当前 Claude Agent SDK 不支持进程内自定义工具服务器。");
+  }
+
+  const tools = (Array.isArray(toolSpecs) ? toolSpecs : [])
+    .filter(
+      (spec) =>
+        typeof spec?.name === "string" &&
+        typeof spec?.description === "string" &&
+        spec.inputSchema &&
+        typeof spec.inputSchema === "object" &&
+        !Array.isArray(spec.inputSchema),
+    )
+    .map(({ name, description, inputSchema }) =>
+      toolFn(name, description, inputSchema, async (arguments_, extra = {}) => {
+        const callId =
+          extra.toolUseID ||
+          extra.toolUseId ||
+          `${context.id}-${name}-${context.pendingComputerControlCalls.size + 1}`;
+        const result = await waitForComputerControlResult(
+          context,
+          callId,
+          name,
+          arguments_,
+          extra.signal,
+        );
+        if (!result.ok) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: result.error }],
+          };
+        }
+        return { content: computerControlCallResultToClaudeContent(result.value) };
+      }),
+    );
+
+  if (tools.length === 0) {
+    return null;
+  }
 
   return createSdkMcpServerFn({
     name: "panes-computer-control",
@@ -1585,6 +1643,7 @@ async function handleQuery(req) {
     sandboxMode,
     reasoningEffort,
     threadId,
+    computerControlTools = [],
   } = params;
 
   const context = createQueryContext(id);
@@ -1606,8 +1665,13 @@ async function handleQuery(req) {
   try {
     const normalizedSandboxMode = normalizeSandboxMode(sandboxMode);
     const normalizedWritableRoots = normalizeWritableRoots(sessionCwd, writableRoots);
-    const panesComputerControlServer = createPanesComputerControlServer(context);
-    toolList.push("mcp__panes-computer-control__*");
+    const panesComputerControlServer = createPanesComputerControlServer(
+      context,
+      computerControlTools,
+    );
+    if (panesComputerControlServer) {
+      toolList.push("mcp__panes-computer-control__*");
+    }
 
     const options = applyClaudeRuntime({
       cwd: sessionCwd,
@@ -1618,9 +1682,9 @@ async function handleQuery(req) {
       ),
       permissionMode: planMode ? "plan" : "default",
       allowedTools: toolList,
-      mcpServers: {
-        "panes-computer-control": panesComputerControlServer,
-      },
+      mcpServers: panesComputerControlServer
+        ? { "panes-computer-control": panesComputerControlServer }
+        : {},
       canUseTool: buildPermissionHandler({
         context,
         cwd: sessionCwd,

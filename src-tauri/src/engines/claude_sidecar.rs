@@ -1818,6 +1818,10 @@ impl Engine for ClaudeSidecarEngine {
                 .context("no thread config found — was start_thread called?")?
         };
         let computer_control_service = self.state.lock().await.computer_control_service.clone();
+        let computer_control_tools = match computer_control_service.as_ref() {
+            Some(service) => service.reviewed_tool_specs().map_err(anyhow::Error::msg)?,
+            None => Vec::new(),
+        };
 
         let request_id = Uuid::new_v4().to_string();
         {
@@ -1866,6 +1870,7 @@ impl Engine for ClaudeSidecarEngine {
             "reasoningEffort": thread_config.sandbox.reasoning_effort.clone(),
             "planMode": plan_mode,
             "threadId": engine_thread_id,
+            "computerControlTools": computer_control_tools,
         });
 
         if let Some(ref session_id) = thread_config.agent_session_id {

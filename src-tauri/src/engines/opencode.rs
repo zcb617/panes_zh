@@ -2474,6 +2474,7 @@ fn write_opencode_computer_control_tool(
     run_dir: &Path,
     callback_url: &str,
     callback_token: &str,
+    tool_specs: &[Value],
 ) -> Result<()> {
     let tools_dir = run_dir.join(".opencode").join("tools");
     std::fs::create_dir_all(&tools_dir)
@@ -2481,25 +2482,30 @@ fn write_opencode_computer_control_tool(
 
     let endpoint = serde_json::to_string(callback_url)?;
     let token = serde_json::to_string(callback_token)?;
-    let schema = r#"{"type":"object","additionalProperties":true}"#;
     let mut source = format!(
-        "const endpoint = {endpoint};\nconst token = {token};\nconst schema = {schema};\nasync function invoke(tool, args, context) {{\n  const response = await fetch(endpoint, {{\n    method: \"POST\",\n    headers: {{ \"content-type\": \"application/json\", \"x-panes-computer-control-token\": token }},\n    body: JSON.stringify({{\n      tool,\n      arguments: args ?? {{}},\n      threadId: context?.sessionID ?? context?.sessionId ?? context?.session_id,\n      turnId: context?.messageID ?? context?.messageId ?? context?.callID ?? context?.callId,\n      callId: context?.callID ?? context?.callId,\n    }}),\n  }});\n  const result = await response.json();\n  if (!response.ok) throw new Error(result?.error || `Panes computer control callback failed (HTTP ${{response.status}})`);\n  return result;\n}}\n",
+        "const endpoint = {endpoint};\nconst token = {token};\nasync function invoke(tool, args, context) {{\n  const response = await fetch(endpoint, {{\n    method: \"POST\",\n    headers: {{ \"content-type\": \"application/json\", \"x-panes-computer-control-token\": token }},\n    body: JSON.stringify({{\n      tool,\n      arguments: args ?? {{}},\n      threadId: context?.sessionID ?? context?.sessionId ?? context?.session_id,\n      turnId: context?.messageID ?? context?.messageId ?? context?.callID ?? context?.callId,\n      callId: context?.callID ?? context?.callId,\n    }}),\n  }});\n  const result = await response.json();\n  if (!response.ok) throw new Error(result?.error || `Panes computer control callback failed (HTTP ${{response.status}})`);\n  return result;\n}}\n",
     );
 
-    let mut tool_specs = ComputerControlService::dynamic_tools_spec()[0]["tools"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    for spec in tool_specs.drain(..) {
+    for spec in tool_specs {
         let Some(name) = spec["name"].as_str() else {
             continue;
         };
-        let description = serde_json::to_string(
-            spec["description"].as_str().unwrap_or("Panes 电脑操作工具"),
-        )?;
+        if !name
+            .chars()
+            .enumerate()
+            .all(|(index, character)| {
+                character == '_' || character.is_ascii_alphanumeric() && (index > 0 || character.is_ascii_alphabetic())
+            })
+        {
+            return Err(anyhow::anyhow!(
+                "CUA SDK 返回了不能作为 OpenCode 工具导出的名称：{name}"
+            ));
+        }
+        let description = serde_json::to_string(&spec["description"])?;
+        let input_schema = serde_json::to_string(&spec["inputSchema"])?;
         let tool_name = serde_json::to_string(name)?;
         source.push_str(&format!(
-            "export const {name} = {{ description: {description}, parameters: schema, execute: (args, context) => invoke({tool_name}, args, context) }};\n",
+            "export const {name} = {{ description: {description}, parameters: {input_schema}, execute: (args, context) => invoke({tool_name}, args, context) }};\n",
         ));
     }
 
@@ -2686,7 +2692,11 @@ async fn start_server(
         .with_context(|| format!("failed to create OpenCode runtime directory {}", run_dir.display()))?;
     let callback_listener = AsyncTcpListener::bind((DEFAULT_HOST, 0)).await?;
     let callback_url = format!("http://{DEFAULT_HOST}:{}/invoke", callback_listener.local_addr()?.port());
-    write_opencode_computer_control_tool(&run_dir, &callback_url, &callback_token)?;
+    let tool_specs = match computer_control_service.as_ref() {
+        Some(service) => service.reviewed_tool_specs().map_err(anyhow::Error::msg)?,
+        None => Vec::new(),
+    };
+    write_opencode_computer_control_tool(&run_dir, &callback_url, &callback_token, &tool_specs)?;
     let callback_cancel = CancellationToken::new();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<String>();
 
@@ -3748,6 +3758,15 @@ opencode/gpt-5-nano
             &run_dir,
             "http://127.0.0.1:45678/invoke",
             "one-time-token",
+            &[json!({
+                "name": "click",
+                "description": "SDK supplied click tool",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "pid": { "type": "integer" } },
+                    "required": ["pid"]
+                }
+            })],
         )
         .expect("OpenCode tool source should be generated");
 
@@ -3759,8 +3778,8 @@ opencode/gpt-5-nano
         assert!(source.contains("x-panes-computer-control-token"));
         assert!(source.contains("http://127.0.0.1:45678/invoke"));
         assert!(source.contains("export const click"));
-        assert!(source.contains("export const get_screen_size"));
-        assert!(source.contains("export const clipboard_write"));
+        assert!(source.contains("\"required\":[\"pid\"]"));
+        assert!(!source.contains("additionalProperties\":true"));
 
         let _ = std::fs::remove_dir_all(run_dir);
     }

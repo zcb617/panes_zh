@@ -583,8 +583,18 @@ impl Engine for CodexEngine {
             }
         }
 
-        let start_params =
-            build_thread_start_params(model, &cwd, &approval_policy, &sandbox_mode, &sandbox);
+        let dynamic_tools = match self.computer_control_service() {
+            Some(service) => service.dynamic_tools_spec().map_err(anyhow::Error::msg)?,
+            None => serde_json::Value::Array(Vec::new()),
+        };
+        let start_params = build_thread_start_params(
+            model,
+            &cwd,
+            &approval_policy,
+            &sandbox_mode,
+            &sandbox,
+            &dynamic_tools,
+        );
 
         let result = request_with_fallback(
             transport.as_ref(),
@@ -4518,6 +4528,7 @@ fn build_thread_start_params(
     approval_policy: &serde_json::Value,
     sandbox_mode: &str,
     sandbox: &SandboxPolicy,
+    dynamic_tools: &serde_json::Value,
 ) -> serde_json::Value {
     let mut params = serde_json::Map::new();
     params.insert(
@@ -4549,10 +4560,9 @@ fn build_thread_start_params(
         "persistExtendedHistory".to_string(),
         serde_json::Value::Bool(false),
     );
-    params.insert(
-        "dynamicTools".to_string(),
-        crate::computer_control_service::ComputerControlService::dynamic_tools_spec(),
-    );
+    if !dynamic_tools.as_array().is_some_and(|tools| tools.is_empty()) {
+        params.insert("dynamicTools".to_string(), dynamic_tools.clone());
+    }
     serde_json::Value::Object(params)
 }
 
@@ -7623,6 +7633,13 @@ mod tests {
 
     #[test]
     fn thread_start_params_register_panes_computer_control_namespace() {
+        let dynamic_tools = json!([
+            {
+                "type": "namespace",
+                "name": "panes_computer_control",
+                "tools": []
+            }
+        ]);
         let params = build_thread_start_params(
             "gpt-5-codex",
             "/tmp/workspace",
@@ -7641,6 +7658,7 @@ mod tests {
                 output_schema: None,
                 opencode_agent: None,
             },
+            &dynamic_tools,
         );
         assert_eq!(params["dynamicTools"][0]["name"], "panes_computer_control");
     }
