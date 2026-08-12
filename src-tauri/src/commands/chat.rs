@@ -5118,9 +5118,6 @@ mod tests {
                 crate::extensions::refresh::ExtensionCatalogRefreshManager::default(),
             ),
             scheduled_tasks: Arc::new(crate::scheduled_tasks::ScheduledTaskManager::new()),
-            computer_control_approvals: Arc::new(
-                crate::commands::computer_control::ComputerControlApprovalManager::default(),
-            ),
             computer_control_service: Arc::new(
                 crate::computer_control_service::ComputerControlService::default(),
             ),

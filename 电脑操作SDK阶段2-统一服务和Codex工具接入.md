@@ -27,7 +27,7 @@
 
 - 设置页“添加 exe”产品路径的替换；该项属于阶段 3。
 - Claude 和 OpenCode 的工具适配；该项属于阶段 2。
-- 删除旧 MCP broker、旧配置字段或旧命令；保留兼容实现，迁移另行处理。
+- 本阶段当时未处理旧 MCP broker、旧配置字段和旧命令；它们已在后续重构中彻底删除。
 - 把旧白名单转换为永久授权。
 
 ## 3. 业务流程
@@ -64,7 +64,7 @@ Codex 新建线程
 
 ## 4. 工具目录
 
-动态工具使用 `panes_computer_control` 命名空间。目录只描述 Panes 已审核的 CUA 工具，输入 schema 先保持为对象 schema，由统一服务继续做工具名、范围和参数校验。
+动态工具使用 `panes_computer_control` 命名空间。工具名称、说明和输入 schema 全部直接来自 CUA SDK 的规范工具目录；Panes 不维护第二份硬编码工具名单，也不对 SDK 工具目录取交集。
 
 工具类别：
 
@@ -97,7 +97,7 @@ Codex 新建线程
 ## 6. 安全和生命周期
 
 - 开关关闭时返回 `computer_control_disabled`，不初始化 SDK。
-- 未审核工具返回 `tool_not_allowed`。
+- CUA SDK 工具目录中不存在的工具返回 `tool_not_available`。
 - 用户拒绝返回 `permission_denied`。
 - 目标越界返回 `target_scope_mismatch`。
 - 授权等待最多 5 分钟，超时后清理 pending 状态。

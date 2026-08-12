@@ -117,7 +117,7 @@ export const ipc = {
     invoke<DisplayScale>("set_display_scale", { displayScale }),
   getComputerControlStatus: () =>
     invoke<ComputerControlStatus>("get_computer_control_settings_status"),
-  setComputerControl: (enabled: boolean, _legacyAllowedApplications: string[] = []) =>
+  setComputerControl: (enabled: boolean) =>
     invoke<ComputerControlStatus>("set_computer_control_enabled", { enabled }),
   revokeComputerControlAuthorization: (requestId: string) =>
     invoke<ComputerControlStatus>("revoke_computer_control_authorization", { requestId }),

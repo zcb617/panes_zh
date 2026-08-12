@@ -168,19 +168,6 @@ export interface Thread {
   lastActivityAt: string;
 }
 
-export interface ComputerControlDriverStatus {
-  installed: boolean;
-  path?: string | null;
-  version?: string | null;
-}
-
-export interface ComputerControlAgentStatus {
-  id: "codex" | "claude" | "opencode";
-  name: string;
-  installed: boolean;
-  configured: boolean;
-}
-
 export type ComputerControlSdkState =
   | "disabled"
   | "uninitialized"
@@ -208,11 +195,6 @@ export interface ComputerControlStatus {
   sdk: ComputerControlSdkStatus;
   adapters: ComputerControlAdapterStatus[];
   currentAuthorizations: ComputerControlApprovalRequest[];
-  // 兼容旧 MCP/白名单状态返回；SDK 直连设置页不再读取这些字段。
-  allowedApplications?: string[];
-  driver?: ComputerControlDriverStatus;
-  agents?: ComputerControlAgentStatus[];
-  warnings?: string[];
 }
 
 export interface TextEditorApplication {

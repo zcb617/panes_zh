@@ -29,12 +29,12 @@
 - 授权弹窗补充操作类型、授权范围、任务和回合，便于用户在执行前判断请求。
 - 英文、简体中文、葡萄牙语资源同步更新，并保持相同键结构。
 
-### 3. 旧 MCP / broker 路径停用并保留审计代码
+### 3. 旧 MCP / broker 路径删除
 
-- `src-tauri/src/lib.rs` 不再在 Panes 启动时调用 `start_approval_broker`，因此不再生成 broker 文件或监听旧 broker 端口。
-- 旧的 `--panes-computer-control-mcp` CLI 分支已从正常启动调度中注释停用。
-- 旧的外部 driver 状态与设置命令不再注册给 WebView，正常前端无法再触发全局 MCP、broker 或外部 `cua-driver` 配置写入。
-- 旧实现按项目规则保留为带说明的历史迁移代码；不自动清理用户既有全局 MCP 配置，也不把历史白名单转换为永久授权。
+- 旧 `start_approval_broker` 实现和启动调用已删除，因此不再生成 broker 文件或监听旧 broker 端口。
+- 旧的 `--panes-computer-control-mcp` CLI 分支已彻底删除。
+- 旧的外部 driver 状态与设置命令已删除，正常前端无法再触发全局 MCP、broker 或外部 `cua-driver` 配置写入。
+- 旧实现已从当前代码中彻底删除；不自动清理用户既有全局 MCP 配置，也不把历史白名单转换为永久授权。
 
 ## 验证结果
 
@@ -51,7 +51,7 @@
 - 原“授权后才初始化 SDK”的实现违反 SDK 就绪先于授权的边界，已列为本轮修正项；需要重新执行静态和 Windows 实机验证。
 - TODO-014、TODO-015、TODO-016、TODO-017 的代码迁移已完成，均转为阶段 4 的实机回归项。
 - 未执行 G1 和 G10 的 Windows GUI/进程链用例，不能把本阶段静态验证写成最终功能通过。
-- 历史外部 MCP 代码目前不走正常启动或 WebView 命令路径；仍需在实际 Windows 环境确认不存在第二个 Panes、`--panes-computer-control-mcp`、黑框或“检测中”死循环。
+- 历史外部 MCP 代码已删除；仍需在实际 Windows 环境确认不存在第二个 Panes、`--panes-computer-control-mcp`、黑框或“检测中”死循环。
 
 ## 下一阶段入口
 

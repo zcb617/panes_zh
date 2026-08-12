@@ -23,7 +23,6 @@ prevent_closed_display_sleep = false
 
 [computer_control]
 enabled = true
-allowed_applications = []
 
 [[computer_control.persistent_authorizations]]
 request_id = "973f7a73-5ad0-47c5-a1e6-1c53860907b7"

@@ -410,6 +410,21 @@ describe("claude-agent-sdk-server sidecar", () => {
         prompt: "use computer control",
         cwd: repoRoot,
         threadId: "thread-computer-control",
+        computerControlTools: [
+          {
+            name: "click",
+            description: "点击指定应用窗口",
+            inputSchema: {
+              type: "object",
+              properties: {
+                pid: { type: "integer" },
+                x: { type: "integer" },
+                y: { type: "integer" },
+              },
+              required: ["pid", "x", "y"],
+            },
+          },
+        ],
       },
     });
 

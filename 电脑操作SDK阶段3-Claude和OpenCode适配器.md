@@ -43,7 +43,7 @@
 
 ### 4.2 Claude 进程内 SDK 工具服务器
 
-Claude sidecar 通过 `tool` 和 `createSdkMcpServer` 创建 `panes-computer-control` SDK server，登记已审核的电脑操作工具。工具 handler 发出 sidecar 事件：
+Claude sidecar 通过 `tool` 和 `createSdkMcpServer` 创建 `panes-computer-control` SDK server，登记 CUA SDK 规范工具目录返回的全部电脑操作工具。工具 handler 发出 sidecar 事件：
 
 ```json
 {
@@ -68,12 +68,12 @@ Claude transport 不再设置 `PANES_COMPUTER_CONTROL_CONFIG`，sidecar 也不�
 每个 OpenCode server 启动时：
 
 - 在 Panes 应用数据目录下创建独立的 `computer-control/opencode-runs/<随机目录>`；
-- 生成 `.opencode/tools/panes_computer_control.ts`，以命名导出登记已审核工具；
+- 生成 `.opencode/tools/panes_computer_control.ts`，以命名导出登记 CUA SDK 规范工具目录返回的全部工具；
 - 设置进程级 `OPENCODE_CONFIG_DIR` 和 `XDG_CONFIG_HOME`，不修改用户全局配置；
 - 启动 `127.0.0.1` 随机端口的本机回调监听器，并把一次性令牌写入工具闭包；
 - 回调收到工具名、任务、轮次、调用标识和参数后，调用统一 `ComputerControlService`，再返回 CUA 原始 content。
 
-OpenCode 工具名会在回调入口去掉 `panes_computer_control_` 前缀后再进入审核工具白名单；回调令牌、目标任务和操作范围不会从请求参数中省略。
+OpenCode 工具名会在回调入口去掉 `panes_computer_control_` 前缀，再由统一服务按照 CUA SDK 规范工具目录确认工具是否存在；Panes 不维护工具白名单。回调令牌、目标任务和操作范围不会从请求参数中省略。
 
 ### 4.4 测试夹具
 

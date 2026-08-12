@@ -32,7 +32,6 @@ if (
 let queryFn;
 let toolFn;
 let createSdkMcpServerFn;
-let z;
 let sdkEntryPath = null;
 let sdkVersion = null;
 let bundledClaudeCodeVersion = null;
@@ -49,28 +48,6 @@ try {
       ? fileURLToPath(sdkModuleSpecifier)
       : sdkModuleSpecifier
     : fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"));
-  z = sdk.z;
-  try {
-    if (!z && sdkEntryPath) {
-      const urlModule = await import(
-        String.fromCharCode(
-          110, 111, 100, 101, 58, 117, 114, 108,
-        ),
-      );
-      const sdkZodSpecifier = urlModule.pathToFileURL(
-        path.join(path.dirname(sdkEntryPath), "..", "..", "zod", "index.js"),
-      ).href;
-      ({ z } = await import(sdkZodSpecifier));
-    }
-  } catch {
-    // The SDK package may expose zod only through its own nested dependency.
-  }
-  try {
-    if (!z) ({ z } = await import("zod"));
-  } catch {
-    z = null;
-  }
-
   try {
     const sdkPackage = JSON.parse(
       await readFile(path.join(path.dirname(sdkEntryPath), "package.json"), "utf8"),
@@ -142,74 +119,6 @@ const IMAGE_ATTACHMENT_MEDIA_TYPES = new Map([
   ["webp", "image/webp"],
 ]);
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(IMAGE_ATTACHMENT_MEDIA_TYPES.values());
-
-/*
-历史实现：手写工具清单、说明和输入字段会漂移，且不能表达 CUA SDK 的真实参数约束。
-保留仅供追溯；运行时不再使用，实际工具定义由 Panes 通过 CUA SDK 的公开 list_tools_json API 传入。
-const PANES_COMPUTER_CONTROL_TOOLS = [
-  ["start_session", "创建当前任务的电脑操作会话"],
-  ["end_session", "结束当前任务的电脑操作会话"],
-  ["launch_app", "启动指定应用程序"],
-  ["list_apps", "列出可见应用程序"],
-  ["list_windows", "列出可见应用窗口"],
-  ["bring_to_front", "将指定应用窗口置于前台"],
-  ["get_window_state", "读取指定窗口状态"],
-  ["get_accessibility_tree", "读取指定应用的可访问性树"],
-  ["verify_state", "验证指定应用当前状态"],
-  ["get_screen_size", "读取屏幕尺寸元数据"],
-  ["get_cursor_position", "读取当前光标位置"],
-  ["click", "点击指定应用窗口"],
-  ["double_click", "双击指定应用窗口"],
-  ["right_click", "右键点击指定应用窗口"],
-  ["drag", "在指定应用窗口内拖动"],
-  ["type_text", "向指定应用输入文本"],
-  ["press_key", "向指定应用发送按键"],
-  ["hotkey", "向指定应用发送组合键"],
-  ["set_value", "设置指定应用控件值"],
-  ["invoke_menu", "调用指定应用菜单"],
-  ["scroll", "滚动指定应用窗口"],
-  ["move_cursor", "移动指定应用窗口内的光标"],
-  ["zoom", "调整指定应用窗口缩放"],
-  ["clipboard_read", "读取当前任务剪贴板"],
-  ["clipboard_write", "写入当前任务剪贴板"],
-  ["health_report", "读取电脑操作运行状态"],
-  ["get_session_state", "读取当前电脑操作会话状态"],
-];
-
-const PANES_COMPUTER_CONTROL_INPUT_KEYS = [
-  "scope",
-  "capture_scope",
-  "path",
-  "launch_path",
-  "aumid",
-  "application",
-  "name",
-  "window_id",
-  "pid",
-  "x",
-  "y",
-  "width",
-  "height",
-  "text",
-  "key",
-  "keys",
-  "value",
-  "menu",
-  "selector",
-  "control_id",
-  "control_type",
-  "query",
-  "pattern",
-  "amount",
-  "delta",
-  "direction",
-  "factor",
-  "scale",
-  "session_id",
-  "sessionId",
-  "timeout_ms",
-];
-*/
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
@@ -617,17 +526,6 @@ function cleanupPendingApprovalsForQuery(queryId, denialMessage) {
   context.pendingApprovalIds.clear();
 }
 
-/*
-历史实现：不能用单一的任意 JSON Schema 代替每个 CUA SDK 工具的真实 inputSchema。
-function computerControlInputSchema() {
-  if (!z?.any) {
-    return Object.fromEntries(PANES_COMPUTER_CONTROL_INPUT_KEYS.map((key) => [key, {}]));
-  }
-
-  return z.record(z.string(), z.any());
-}
-*/
-
 function computerControlCallResultToClaudeContent(value) {
   const source = Array.isArray(value?.content)
     ? value.content
@@ -692,45 +590,6 @@ function waitForComputerControlResult(context, callId, toolName, arguments_, sig
     });
   });
 }
-
-/*
-历史实现：Panes 不能在此处手写 CUA 工具或参数 Schema，保留仅供追溯。
-function createPanesComputerControlServer(context) {
-  if (typeof toolFn !== "function" || typeof createSdkMcpServerFn !== "function") {
-    throw new Error("当前 Claude Agent SDK 不支持进程内自定义工具服务器。");
-  }
-
-  const inputSchema = computerControlInputSchema();
-  const tools = PANES_COMPUTER_CONTROL_TOOLS.map(([name, description]) =>
-    toolFn(name, description, inputSchema, async (arguments_, extra = {}) => {
-      const callId =
-        extra.toolUseID ||
-        extra.toolUseId ||
-        `${context.id}-${name}-${context.pendingComputerControlCalls.size + 1}`;
-      const result = await waitForComputerControlResult(
-        context,
-        callId,
-        name,
-        arguments_,
-        extra.signal,
-      );
-      if (!result.ok) {
-        return {
-          isError: true,
-          content: [{ type: "text", text: result.error }],
-        };
-      }
-      return { content: computerControlCallResultToClaudeContent(result.value) };
-    }),
-  );
-
-  return createSdkMcpServerFn({
-    name: "panes-computer-control",
-    version: "1.0.0",
-    tools,
-  });
-}
-*/
 
 function createPanesComputerControlServer(context, toolSpecs) {
   if (typeof toolFn !== "function" || typeof createSdkMcpServerFn !== "function") {

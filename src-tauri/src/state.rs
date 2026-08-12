@@ -4,7 +4,6 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    commands::computer_control::ComputerControlApprovalManager,
     computer_control_service::ComputerControlService, config::app_config::AppConfig, db::Database,
     engines::EngineManager, extensions::refresh::ExtensionCatalogRefreshManager,
     git::repo::FileTreeCache, git::watcher::GitWatcherManager, power::KeepAwakeManager,
@@ -26,7 +25,6 @@ pub struct AppState {
     pub file_tree_cache: Arc<FileTreeCache>,
     pub extension_catalog_refreshes: Arc<ExtensionCatalogRefreshManager>,
     pub scheduled_tasks: Arc<ScheduledTaskManager>,
-    pub computer_control_approvals: Arc<ComputerControlApprovalManager>,
     pub computer_control_service: Arc<ComputerControlService>,
     pub remote_access: Arc<RemoteTunnelManager>,
 }

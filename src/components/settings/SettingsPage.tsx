@@ -576,17 +576,15 @@ export function SettingsPage() {
     await savePowerSettings(powerDraft);
   }
 
-  async function saveComputerControl(enabled: boolean, allowedApplications: string[]) {
+  async function saveComputerControl(enabled: boolean) {
     if (computerControlUpdating) return;
     setComputerControlUpdating(true);
     try {
-      const status = await ipc.setComputerControl(enabled, allowedApplications);
+      const status = await ipc.setComputerControl(enabled);
       setComputerControlStatus(status);
       if (enabled && status.sdk.state !== "ready") {
         toast.error(status.sdk.error
           ?? t(`app:settingsPage.computerControl.sdkDescriptions.${status.sdk.state}`));
-      } else if ((status.warnings?.length ?? 0) > 0) {
-        toast.warning(status.warnings?.join("\n") ?? "");
       } else {
         toast.success(t(enabled
           ? "app:settingsPage.computerControl.enabledToast"
@@ -1209,17 +1207,7 @@ export function SettingsPage() {
                         || computerControlStatus?.supported === false
                       }
                       label={t("app:settingsPage.computerControl.switchTitle")}
-                      onChange={(enabled) => {
-                        /*
-                        旧实现要求先添加至少一个 .exe；运行时授权模式不再使用静态列表。
-                        if (enabled && (computerControlStatus?.allowedApplications.length ?? 0) === 0) {
-                          toast.warning(t("app:settingsPage.computerControl.selectFirst"));
-                          return;
-                        }
-                        void saveComputerControl(enabled, computerControlStatus?.allowedApplications ?? []);
-                        */
-                        void saveComputerControl(enabled, []);
-                      }}
+                      onChange={(enabled) => void saveComputerControl(enabled)}
                     />
                   </SettingsRow>
                   <SettingsRow
@@ -1238,85 +1226,6 @@ export function SettingsPage() {
                   </SettingsRow>
                 </div>
               </section>
-
-              {/*
-              旧的预选 .exe 白名单界面保留为历史参考，不再渲染。目标应用改为在智能体
-              真正调用电脑操作时，由 Panes 根据工具参数和目标进程动态识别并申请授权。
-              <section className="usp-section">
-                <div className="usp-section-header usp-section-header-action">
-                  <div>
-                    <h2>{t("app:settingsPage.computerControl.applicationsTitle")}</h2>
-                    <p>{t("app:settingsPage.computerControl.applicationsDescription")}</p>
-                  </div>
-                  <button
-                    type="button"
-                    className="usp-button"
-                    disabled={computerControlLoading || computerControlUpdating}
-                    onClick={() => {
-                      void import("@tauri-apps/plugin-dialog").then(async ({ open }) => {
-                        const selected = await open({
-                          multiple: true,
-                          directory: false,
-                          filters: [{ name: t("app:settingsPage.computerControl.applicationFilter"), extensions: ["exe"] }],
-                        });
-                        const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
-                        if (paths.length === 0) return;
-                        const existing = computerControlStatus?.allowedApplications ?? [];
-                        const next = [...existing];
-                        for (const path of paths) {
-                          if (!next.some((current) => current.toLocaleLowerCase() === path.toLocaleLowerCase())) {
-                            next.push(path);
-                          }
-                        }
-                        await saveComputerControl(computerControlStatus?.enabled ?? false, next);
-                      }).catch((error) => toast.error(String(error)));
-                    }}
-                  >
-                    <Plus size={13} />
-                    {t("app:settingsPage.computerControl.addApplication")}
-                  </button>
-                </div>
-                <div className="usp-group">
-                  {(computerControlStatus?.allowedApplications.length ?? 0) > 0 ? (
-                    computerControlStatus?.allowedApplications.map((path) => (
-                      <SettingsRow
-                        key={path}
-                        icon={<SquareCode size={17} />}
-                        title={path.split(/[\\/]/).pop() || path}
-                        description={path}
-                      >
-                        <button
-                          type="button"
-                          className="usp-icon-button"
-                          disabled={
-                            computerControlUpdating
-                            || (computerControlStatus.enabled && computerControlStatus.allowedApplications.length === 1)
-                          }
-                          title={t(
-                            computerControlStatus.enabled && computerControlStatus.allowedApplications.length === 1
-                              ? "app:settingsPage.computerControl.keepOneWhileEnabled"
-                              : "app:settingsPage.computerControl.removeApplication",
-                          )}
-                          aria-label={t("app:settingsPage.computerControl.removeApplication")}
-                          onClick={() => void saveComputerControl(
-                            computerControlStatus.enabled,
-                            computerControlStatus.allowedApplications.filter((current) => current !== path),
-                          )}
-                        >
-                          <Minus size={13} />
-                        </button>
-                      </SettingsRow>
-                    ))
-                  ) : (
-                    <SettingsRow
-                      icon={<LockKeyhole size={17} />}
-                      title={t("app:settingsPage.computerControl.noApplicationsTitle")}
-                      description={t("app:settingsPage.computerControl.noApplicationsDescription")}
-                    />
-                  )}
-                </div>
-              </section>
-              */}
 
               <section className="usp-section">
                 <div className="usp-section-header">

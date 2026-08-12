@@ -107,7 +107,6 @@ pub struct PowerConfig {
 #[serde(default)]
 pub struct ComputerControlConfig {
     pub enabled: bool,
-    pub allowed_applications: Vec<String>,
     pub persistent_authorizations: Vec<ComputerControlAuthorizationConfig>,
 }
 
@@ -558,7 +557,6 @@ max_action_output_chars = 20000
         assert_eq!(config.power.session_duration_secs, None);
         assert!(!config.power.prevent_closed_display_sleep);
         assert!(!config.computer_control.enabled);
-        assert!(config.computer_control.allowed_applications.is_empty());
     }
 
     #[test]

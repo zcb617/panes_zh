@@ -10,7 +10,7 @@
   - 在 `src-tauri/tauri.conf.json` 配置 `resources/cua-driver` 随应用资源发布。
   - 把官方 Windows x86_64 运行时文件放入 `src-tauri/resources/cua-driver/windows-x86_64/`。
   - 新增 `manifest.json`，记录官方来源、版本、压缩包哈希、动态库哈希和必需文件。
-  - 保留原有 `src-tauri/src/commands/computer_control.rs`，本阶段没有把旧 MCP 实现混入新 SDK 路由。
+  - 本阶段没有把旧 MCP 实现混入新 SDK 路由；该旧模块已在后续重构中删除。
   - 更新设计文档和集成测试清单，记录本阶段的范围和证据。
 - 验证方式与结果：
   - Rust 静态检查：通过；仅有原有警告，没有新增错误。

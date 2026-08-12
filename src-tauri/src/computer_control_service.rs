@@ -25,36 +25,6 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 const COMPUTER_CONTROL_APPROVAL_EVENT: &str = "computer-control-approval-requested";
 const COMPUTER_CONTROL_NAMESPACE: &str = "panes_computer_control";
 
-const REVIEWED_TOOL_NAMES: &[&str] = &[
-    "start_session",
-    "end_session",
-    "launch_app",
-    "list_apps",
-    "list_windows",
-    "bring_to_front",
-    "get_window_state",
-    "get_accessibility_tree",
-    "verify_state",
-    "get_screen_size",
-    "get_cursor_position",
-    "click",
-    "double_click",
-    "right_click",
-    "drag",
-    "type_text",
-    "press_key",
-    "hotkey",
-    "set_value",
-    "invoke_menu",
-    "scroll",
-    "move_cursor",
-    "zoom",
-    "clipboard_read",
-    "clipboard_write",
-    "health_report",
-    "get_session_state",
-];
-
 #[derive(Debug)]
 struct PendingAuthorization {
     target_key: String,
@@ -182,18 +152,6 @@ fn target_resource(tool: &str, arguments: &Value) -> Result<TargetResource, Stri
             return resolved_application_resource(value);
         }
     }
-    /*
-    授权不得按窗口号保存。窗口号和 PID 一样只在进程生命周期内有效，设置页也不应显示它。
-    if let Some(window_id) = object.and_then(|value| value.get("window_id")) {
-        if let Some(value) = window_id.as_str().filter(|value| !value.trim().is_empty()) {
-            return Ok(TargetResource {
-                key: format!("window:{}", value.to_lowercase()),
-                display: format!("窗口 {value}"),
-                scope: "window",
-            });
-        }
-    }
-    */
     if let Some(pid) = object
         .and_then(|value| value.get("pid"))
         .and_then(Value::as_u64)
@@ -202,14 +160,6 @@ fn target_resource(tool: &str, arguments: &Value) -> Result<TargetResource, Stri
         if let Some(application) = process_executable_path(pid) {
             return resolved_application_resource(&application);
         }
-        /*
-        授权不得按 PID 保存或展示，必须先解析成可执行文件名。
-        return Ok(TargetResource {
-            key: format!("pid:{pid}"),
-            display: format!("PID {pid}"),
-            scope: "application",
-        });
-        */
         return Err(service_error(
             "target_not_found",
             "无法读取目标进程的可执行文件名",
@@ -263,12 +213,6 @@ fn application_resource(application: &str) -> TargetResource {
         .filter(|file_name| !file_name.is_empty())
         .unwrap_or_else(|| application.trim())
         .to_string();
-    /*
-    错误逻辑：不能因为调用方省略扩展名，就擅自把 A 变为 A.exe。
-    if Path::new(&display).extension().is_none() {
-        display.push_str(".exe");
-    }
-    */
     TargetResource {
         key: format!("application:{}", display.to_lowercase()),
         display,
@@ -306,12 +250,6 @@ fn authorization_matches_target(
     target_key: &str,
 ) -> bool {
     authorization.target_key == target_key
-        || (target_key.starts_with("application:")
-            && authorization.target_key.starts_with("application:")
-            && resolved_application_resource(&authorization.application)
-                .unwrap_or_else(|_| application_resource(&authorization.application))
-                .key
-                == target_key)
 }
 
 #[cfg(target_os = "windows")]
@@ -388,9 +326,8 @@ fn service_error(code: &str, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        application_resource, authorization_matches_target, dynamic_tool_failure,
-        dynamic_tool_success, resolved_application_resource, target_resource,
-        ComputerControlService,
+        application_resource, dynamic_tool_failure, dynamic_tool_success,
+        resolved_application_resource, target_resource, ComputerControlService,
     };
     use crate::config::app_config::{
         with_temp_app_data_env, AppConfig, ComputerControlAuthorizationConfig,
@@ -451,27 +388,6 @@ mod tests {
     #[test]
     fn unresolved_bare_name_is_not_given_an_extension() {
         assert!(resolved_application_resource("panes-cua-not-a-real-application").is_err());
-    }
-
-    #[test]
-    fn old_path_authorization_matches_the_same_file_name() {
-        let authorization = ComputerControlAuthorizationConfig {
-            request_id: "legacy-request".to_string(),
-            target_key: r"application:c:\\windows\\system32\\notepad.exe".to_string(),
-            agent: "codex".to_string(),
-            tool: "launch_app".to_string(),
-            call_id: "call-1".to_string(),
-            application: r"C:\\Windows\\System32\\notepad.exe".to_string(),
-            operation: "input".to_string(),
-            scope: "application".to_string(),
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-        };
-
-        assert!(authorization_matches_target(
-            &authorization,
-            "application:notepad.exe"
-        ));
     }
 
     #[test]
@@ -609,7 +525,7 @@ impl ComputerControlService {
         }
     }
 
-    pub fn reviewed_tool_specs(&self) -> Result<Vec<Value>, String> {
+    pub fn sdk_tool_specs(&self) -> Result<Vec<Value>, String> {
         if !self.sdk.status().initialized {
             return Ok(Vec::new());
         }
@@ -630,12 +546,9 @@ impl ComputerControlService {
 
         let mut tools = Vec::new();
         for spec in catalog_tools {
-            let Some(name) = spec.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            if !Self::is_reviewed_tool(name) {
-                continue;
-            }
+            let name = spec.get("name").and_then(Value::as_str).ok_or_else(|| {
+                service_error("sdk_invalid_catalog", "CUA SDK 工具缺少 name")
+            })?;
             if spec.get("description").and_then(Value::as_str).is_none()
                 || spec.get("inputSchema").is_none()
             {
@@ -660,7 +573,7 @@ impl ComputerControlService {
         if tools.is_empty() {
             return Err(service_error(
                 "sdk_invalid_catalog",
-                "CUA SDK 未返回任何已审核的电脑操作工具",
+                "CUA SDK 未返回任何电脑操作工具",
             ));
         }
         Ok(tools)
@@ -668,7 +581,7 @@ impl ComputerControlService {
 
     pub fn dynamic_tools_spec(&self) -> Result<Value, String> {
         let tools = self
-            .reviewed_tool_specs()?
+            .sdk_tool_specs()?
             .into_iter()
             .map(|spec| {
                 json!({
@@ -691,10 +604,6 @@ impl ComputerControlService {
                 "tools": tools
             }
         ]))
-    }
-
-    pub fn is_reviewed_tool(tool: &str) -> bool {
-        REVIEWED_TOOL_NAMES.iter().any(|name| *name == tool)
     }
 
     pub fn sdk(&self) -> Arc<CuaDriverSdk> {
@@ -823,15 +732,6 @@ impl ComputerControlService {
     }
 
     pub async fn revoke_all(&self) {
-        /*
-        用户已明确要求授权“永远保存，只需要授权一次”。因此功能关闭、引擎断开和
-        Panes 退出只取消尚未响应的授权窗口，不清空已写入配置的目标授权；删除永久
-        授权只能由设置页的“撤销”操作完成。
-        let _ = AppConfig::mutate(|config| {
-            config.computer_control.persistent_authorizations.clear();
-            Ok(())
-        });
-        */
         let pending = {
             let mut state = self.state.lock().await;
             state
@@ -916,12 +816,6 @@ impl ComputerControlService {
                 "电脑操作请求缺少 agent、threadId 或 turnId",
             ));
         }
-        if !Self::is_reviewed_tool(tool) {
-            return Err(service_error(
-                "tool_not_allowed",
-                &format!("未审核的电脑操作工具：{tool}"),
-            ));
-        }
         let enabled = AppConfig::load_or_create()
             .map(|config| config.computer_control.enabled)
             .unwrap_or(false);
@@ -935,6 +829,16 @@ impl ComputerControlService {
             return Err(service_error(
                 "sdk_unavailable",
                 "CUA SDK 尚未就绪，Panes 不会发起电脑操作授权",
+            ));
+        }
+        let tool_is_available = self
+            .sdk_tool_specs()?
+            .iter()
+            .any(|spec| spec.get("name").and_then(Value::as_str) == Some(tool));
+        if !tool_is_available {
+            return Err(service_error(
+                "tool_not_available",
+                &format!("CUA SDK 未提供电脑操作工具：{tool}"),
             ));
         }
         let arguments = normalize_arguments(arguments)?;

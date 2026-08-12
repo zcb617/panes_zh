@@ -129,7 +129,6 @@ pub async fn set_computer_control_enabled(
     let guard = config_write_lock.lock_owned().await;
     tokio::task::spawn_blocking(move || {
         AppConfig::mutate(|config| {
-            // 保留 allowed_applications 的旧配置读取兼容；新授权流程不再写入它。
             config.computer_control.enabled = enabled;
             Ok(())
         })
@@ -147,23 +146,6 @@ pub async fn set_computer_control_enabled(
             .map_err(|error| error.to_string())?;
         if let Err(error) = initialization_result {
             log::error!("failed to initialize CUA SDK after enabling computer control: {error}");
-            /*
-            初始化失败必须保留 enabled=true：它表示用户仍希望开启这项能力，设置页据此
-            显示 "failed" 和具体错误。若在这里把配置反写为 false，状态会被错误地
-            折叠成 "disabled"，用户无法区分“主动关闭”和“SDK 初始化失败”。
-            let config_write_lock = state.config_write_lock.clone();
-            let guard = config_write_lock.lock_owned().await;
-            tokio::task::spawn_blocking(|| {
-                AppConfig::mutate(|config| {
-                    config.computer_control.enabled = false;
-                    Ok(())
-                })
-                .map_err(|mutation_error| mutation_error.to_string())
-            })
-            .await
-            .map_err(|join_error| join_error.to_string())??;
-            drop(guard);
-            */
         }
     } else {
         service.revoke_all().await;
@@ -173,6 +155,23 @@ pub async fn set_computer_control_enabled(
     }
 
     current_status(service).await
+}
+
+#[tauri::command]
+pub async fn respond_computer_control_approval(
+    state: State<'_, AppState>,
+    request_id: String,
+    allowed: bool,
+) -> Result<(), String> {
+    if state
+        .computer_control_service
+        .respond(request_id.trim(), allowed)
+        .await?
+    {
+        Ok(())
+    } else {
+        Err("computer control authorization was not found".to_string())
+    }
 }
 
 #[tauri::command]

@@ -2699,7 +2699,7 @@ async fn start_server(
     let callback_listener = AsyncTcpListener::bind((DEFAULT_HOST, 0)).await?;
     let callback_url = format!("http://{DEFAULT_HOST}:{}/invoke", callback_listener.local_addr()?.port());
     let tool_specs = match computer_control_service.as_ref() {
-        Some(service) => service.reviewed_tool_specs().map_err(anyhow::Error::msg)?,
+        Some(service) => service.sdk_tool_specs().map_err(anyhow::Error::msg)?,
         None => Vec::new(),
     };
     write_opencode_computer_control_tool(&run_dir, &callback_url, &callback_token, &tool_specs)?;

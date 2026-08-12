@@ -1,11 +1,11 @@
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{Condvar, Mutex},
     time::Duration,
 };
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 const ABI_MAJOR: u16 = 1;
 const ABI_MINOR: u16 = 1;
@@ -153,18 +153,6 @@ impl CuaDriverSdk {
             .map_err(|error| self.remember_error(error))
     }
 
-    pub fn get_screen_size(&self) -> Result<Value, String> {
-        let mut runtime = self
-            .runtime
-            .lock()
-            .map_err(|_| "CUA SDK runtime state is poisoned".to_string())?;
-        runtime
-            .as_mut()
-            .ok_or_else(|| "CUA SDK runtime is not initialized".to_string())?
-            .invoke("get_screen_size", &json!({}))
-            .map_err(|error| self.remember_error(error))
-    }
-
     pub fn invoke(&self, tool: &str, arguments: &Value) -> Result<Value, String> {
         let mut runtime = self
             .runtime
@@ -243,41 +231,6 @@ fn resolve_library_path(resource_dir: &Path) -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|path| path.is_file())
-}
-
-#[tauri::command]
-pub fn get_computer_control_sdk_status(
-    state: tauri::State<'_, Arc<CuaDriverSdk>>,
-) -> CuaDriverSdkStatus {
-    state.status()
-}
-
-#[tauri::command]
-pub fn initialize_computer_control_sdk(
-    state: tauri::State<'_, Arc<CuaDriverSdk>>,
-) -> Result<CuaDriverSdkRuntimeInfo, String> {
-    state.initialize()
-}
-
-#[tauri::command]
-pub fn get_computer_control_sdk_tools(
-    state: tauri::State<'_, Arc<CuaDriverSdk>>,
-) -> Result<Value, String> {
-    state.list_tools()
-}
-
-#[tauri::command]
-pub fn get_computer_control_sdk_screen_size(
-    state: tauri::State<'_, Arc<CuaDriverSdk>>,
-) -> Result<Value, String> {
-    state.get_screen_size()
-}
-
-#[tauri::command]
-pub fn shutdown_computer_control_sdk(
-    state: tauri::State<'_, Arc<CuaDriverSdk>>,
-) -> Result<(), String> {
-    state.shutdown()
 }
 
 #[derive(Debug)]
@@ -798,7 +751,7 @@ mod tests {
             .expect("tool inventory should load")
             .is_object());
         assert!(sdk
-            .get_screen_size()
+            .invoke("get_screen_size", &serde_json::json!({}))
             .expect("screen size should be readable")
             .is_object());
         sdk.shutdown().expect("CUA runtime should shut down");
@@ -810,7 +763,7 @@ mod tests {
         let sdk = CuaDriverSdk::new();
 
         let error = sdk
-            .get_screen_size()
+            .invoke("get_screen_size", &serde_json::json!({}))
             .expect_err("tool call must not initialize the CUA runtime on demand");
 
         assert!(error.contains("CUA SDK runtime is not initialized"));

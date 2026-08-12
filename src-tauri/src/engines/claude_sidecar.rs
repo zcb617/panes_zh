@@ -1820,7 +1820,7 @@ impl Engine for ClaudeSidecarEngine {
         };
         let computer_control_service = self.state.lock().await.computer_control_service.clone();
         let computer_control_tools = match computer_control_service.as_ref() {
-            Some(service) => service.reviewed_tool_specs().map_err(anyhow::Error::msg)?,
+            Some(service) => service.sdk_tool_specs().map_err(anyhow::Error::msg)?,
             None => Vec::new(),
         };
 

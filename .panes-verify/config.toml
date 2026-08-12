@@ -27,7 +27,6 @@ prevent_closed_display_sleep = false
 
 [computer_control]
 enabled = true
-allowed_applications = []
 
 [remote_access]
 enabled = true
