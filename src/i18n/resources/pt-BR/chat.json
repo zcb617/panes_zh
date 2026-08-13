@@ -399,6 +399,7 @@
     "flexibleMessageGroup": {
       "label": "Mensagens prontas para envio",
       "confirm": "Pode enviar",
+      "withdraw": "Retirar",
       "confirmDescription": "Enviar todas as mensagens retidas ao modelo de uma só vez",
       "waitForResponse": "Aguarde a resposta atual antes de enviar"
     },

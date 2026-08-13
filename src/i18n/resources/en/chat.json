@@ -399,6 +399,7 @@
     "flexibleMessageGroup": {
       "label": "Messages ready to send",
       "confirm": "That's all",
+      "withdraw": "Withdraw",
       "confirmDescription": "Send all held messages to the model together",
       "waitForResponse": "Wait for the current response before sending"
     },

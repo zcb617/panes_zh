@@ -1749,11 +1749,13 @@ function FlexibleMessageGroup({
   confirmDisabled,
   confirmTitle,
   onConfirm,
+  onWithdraw,
 }: {
   messages: PendingFlexibleMessage[];
   confirmDisabled: boolean;
   confirmTitle: string;
   onConfirm: () => void;
+  onWithdraw: (message: PendingFlexibleMessage) => void;
 }) {
   const { t } = useTranslation("chat");
 
@@ -1762,7 +1764,16 @@ function FlexibleMessageGroup({
       <div className="flexible-message-group-content">
         {messages.map((message) => (
           <div key={message.id} className="flexible-message-group-item">
-            {message.text}
+            <span className="flexible-message-group-item-text">{message.text}</span>
+            <button
+              type="button"
+              className="flexible-message-group-withdraw"
+              title={t("panel.flexibleMessageGroup.withdraw")}
+              aria-label={t("panel.flexibleMessageGroup.withdraw")}
+              onClick={() => onWithdraw(message)}
+            >
+              {t("panel.flexibleMessageGroup.withdraw")}
+            </button>
           </div>
         ))}
       </div>
@@ -2003,6 +2014,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const addPendingFlexibleMessage = useChatComposerStore(
     (state) => state.addPendingFlexibleMessage,
   );
+  const removePendingFlexibleMessage = useChatComposerStore(
+    (state) => state.removePendingFlexibleMessage,
+  );
   const clearPendingFlexibleMessages = useChatComposerStore(
     (state) => state.clearPendingFlexibleMessages,
   );
@@ -2092,6 +2106,28 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       );
     },
     [activeWorkspaceId, setWorkspaceReferences],
+  );
+  const withdrawFlexibleMessage = useCallback(
+    (message: PendingFlexibleMessage) => {
+      if (!activeWorkspaceId) {
+        return;
+      }
+
+      removePendingFlexibleMessage(activeWorkspaceId, message.id);
+      setInput(message.text);
+      setAttachments(message.attachments);
+      setTextAnnotations([]);
+      setReferences(message.references);
+      inputRef.current?.focus();
+    },
+    [
+      activeWorkspaceId,
+      removePendingFlexibleMessage,
+      setAttachments,
+      setInput,
+      setReferences,
+      setTextAnnotations,
+    ],
   );
   const terminalWorkspaceState = useTerminalStore((s) =>
     activeWorkspaceId ? s.workspaces[activeWorkspaceId] : undefined,
@@ -6257,6 +6293,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
               confirmDisabled={flexibleMessageConfirmDisabled}
               confirmTitle={flexibleMessageConfirmTitle}
               onConfirm={() => void submitFlexibleMessages()}
+              onWithdraw={withdrawFlexibleMessage}
             />
           </div>
         )}

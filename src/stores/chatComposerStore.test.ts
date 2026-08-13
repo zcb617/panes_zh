@@ -143,6 +143,31 @@ describe("chatComposerStore", () => {
     expect(useChatComposerStore.getState().pendingFlexibleMessagesByWorkspace).toEqual({});
   });
 
+  it("removes only the selected pending flexible message", () => {
+    const firstMessage = {
+      id: "pending-message-1",
+      text: "First held message",
+      attachments: [],
+      references: [],
+    };
+    const secondMessage = {
+      id: "pending-message-2",
+      text: "Second held message",
+      attachments: [],
+      references: [],
+    };
+
+    useChatComposerStore.getState().addPendingFlexibleMessage("workspace-a", firstMessage);
+    useChatComposerStore.getState().addPendingFlexibleMessage("workspace-a", secondMessage);
+    useChatComposerStore
+      .getState()
+      .removePendingFlexibleMessage("workspace-a", firstMessage.id);
+
+    expect(useChatComposerStore.getState().pendingFlexibleMessagesByWorkspace).toEqual({
+      "workspace-a": [secondMessage],
+    });
+  });
+
   it("updates the configured link open gesture", () => {
     useChatComposerStore.getState().setLinkOpenGesture("click");
 

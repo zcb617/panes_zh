@@ -1839,6 +1839,9 @@ button.linux-window-update-control:hover {
 }
 
 .flexible-message-group-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   padding: 8px 10px;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.06);
@@ -1847,6 +1850,40 @@ button.linux-window-update-control:hover {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.flexible-message-group-item-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.flexible-message-group-withdraw {
+  flex: 0 0 auto;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  cursor: pointer;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: color var(--duration-fast) var(--ease-out), opacity var(--duration-fast) var(--ease-out);
+}
+
+.flexible-message-group-item:hover .flexible-message-group-withdraw,
+.flexible-message-group-item:focus-within .flexible-message-group-withdraw {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.flexible-message-group-withdraw:hover,
+.flexible-message-group-withdraw:focus-visible {
+  color: var(--text-1);
+  text-decoration: underline;
 }
 
 .flexible-message-group-actions {

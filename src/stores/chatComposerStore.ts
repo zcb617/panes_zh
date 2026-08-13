@@ -186,6 +186,7 @@ interface ChatComposerState {
     workspaceId: string,
     message: PendingFlexibleMessage,
   ) => void;
+  removePendingFlexibleMessage: (workspaceId: string, messageId: string) => void;
   clearPendingFlexibleMessages: (workspaceId: string) => void;
   setPendingMessageSendMode: (workspaceId: string, messageSendMode: MessageSendMode) => void;
   clearPendingMessageSendMode: (workspaceId: string) => void;
@@ -305,6 +306,29 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
         ],
       },
     })),
+  removePendingFlexibleMessage: (workspaceId, messageId) =>
+    set((state) => {
+      const messages = state.pendingFlexibleMessagesByWorkspace[workspaceId];
+      if (!messages) {
+        return state;
+      }
+
+      const remainingMessages = messages.filter((message) => message.id !== messageId);
+      if (remainingMessages.length === messages.length) {
+        return state;
+      }
+      if (remainingMessages.length === 0) {
+        const { [workspaceId]: _removed, ...rest } = state.pendingFlexibleMessagesByWorkspace;
+        return { pendingFlexibleMessagesByWorkspace: rest };
+      }
+
+      return {
+        pendingFlexibleMessagesByWorkspace: {
+          ...state.pendingFlexibleMessagesByWorkspace,
+          [workspaceId]: remainingMessages,
+        },
+      };
+    }),
   clearPendingFlexibleMessages: (workspaceId) =>
     set((state) => {
       const { [workspaceId]: _removed, ...rest } = state.pendingFlexibleMessagesByWorkspace;

@@ -399,6 +399,7 @@
     "flexibleMessageGroup": {
       "label": "待发送的消息",
       "confirm": "可以了",
+      "withdraw": "撤回",
       "confirmDescription": "将暂存消息一起发送给模型",
       "waitForResponse": "当前回复结束后再发送"
     },
