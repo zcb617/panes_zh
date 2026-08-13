@@ -30,6 +30,7 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useUiStore } from "../../stores/uiStore";
 import { useOnboardingStore } from "../../stores/onboardingStore";
 import { useUpdateStore } from "../../stores/updateStore";
+import { toast } from "../../stores/toastStore";
 import { formatRelativeTime } from "../../lib/formatters";
 import { handleDragMouseDown, handleDragDoubleClick } from "../../lib/windowDrag";
 import { createAndActivateWorkspaceThread } from "../../lib/newThreadActions";
@@ -289,10 +290,22 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
   async function executeArchiveThread(thread: Thread) {
     setArchiveThreadPrompt(null);
     const wasActive = thread.id === activeThreadId;
-    await removeThread(thread.id);
-    if (wasActive) {
-      setActiveThread(null);
-      await bindChatThread(null);
+    try {
+      await removeThread(thread.id);
+      if (wasActive) {
+        setActiveThread(null);
+        await bindChatThread(null);
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const isCodexActiveWriterConflict =
+        thread.engineId === "codex" && /already has an active writer/i.test(errorMessage);
+
+      toast.error(
+        isCodexActiveWriterConflict
+          ? t("app:sidebar.codexThreadArchiveActiveWriter")
+          : t("app:sidebar.archiveThreadFailed"),
+      );
     }
   }
 

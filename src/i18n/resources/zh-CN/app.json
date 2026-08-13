@@ -93,6 +93,8 @@
     "codexRemoteThreadDeletedMessage": "Codex 已删除会话 \"{{name}}\"。要从此项目归档其本地副本吗？",
     "codexRemoteThreadArchivedMessage": "Codex 已归档会话 \"{{name}}\"。要从此项目归档其本地副本吗？",
     "keepLocalThread": "保留在项目中",
+    "archiveThreadFailed": "归档会话失败。",
+    "codexThreadArchiveActiveWriter": "Codex 会话归档失败：该会话正在被 Codex App 占用。请关闭 Codex App 中打开的对应会话后重试。",
     "codexRemoteThreadArchiveFailed": "归档此会话的本地副本失败。",
     "archive": "归档"
   },

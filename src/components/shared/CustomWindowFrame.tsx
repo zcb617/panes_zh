@@ -37,7 +37,31 @@ const MENU_TRIGGER_STYLE = {
   gap: 6,
 } as const;
 
-function WindowUpdateControl() {
+export function getAutomaticDownloadPercent(
+  downloadedBytes: number,
+  totalBytes: number | null,
+): number {
+  if (!totalBytes || totalBytes <= 0) return 0;
+  return Math.min(99, Math.max(0, Math.round((downloadedBytes / totalBytes) * 100)));
+}
+
+export function AutomaticDownloadProgressControl({ percent }: { percent: number }) {
+  const { t } = useTranslation("app");
+
+  return (
+    <div
+      className="linux-window-update-control linux-window-update-control--progress"
+      role="status"
+      aria-live="polite"
+      aria-label={t("settingsPage.about.downloadingTitle")}
+      title={t("settingsPage.about.downloadingTitle")}
+    >
+      {`${percent}%`}
+    </div>
+  );
+}
+
+export function WindowUpdateControl() {
   const { t } = useTranslation("app");
   const updateStatus = useUpdateStore((state) => state.status);
   const downloadSource = useUpdateStore((state) => state.downloadSource);
@@ -50,9 +74,7 @@ function WindowUpdateControl() {
     downloadSource === "automatic" && updateStatus === "downloading";
   const automaticUpdateDownloaded =
     downloadSource === "automatic" && updateStatus === "downloaded";
-  const automaticDownloadPercent = totalBytes && totalBytes > 0
-    ? Math.min(99, Math.max(0, Math.round((downloadedBytes / totalBytes) * 100)))
-    : 0;
+  const automaticDownloadPercent = getAutomaticDownloadPercent(downloadedBytes, totalBytes);
 
   if (automaticUpdateDownloaded) {
     return (
@@ -70,19 +92,21 @@ function WindowUpdateControl() {
 
   if (!automaticUpdateDownloading) return null;
 
-  return (
-    <div
-      className="linux-window-update-control linux-window-update-control--progress"
-      role="status"
-      aria-live="polite"
-      aria-label={t("settingsPage.about.downloadingTitle")}
-      title={t("settingsPage.about.downloadingTitle")}
-    >
-      {downloadPhase === "installing"
-        ? t("settingsPage.about.installing")
-        : `${automaticDownloadPercent}%`}
-    </div>
-  );
+  if (downloadPhase === "installing") {
+    return (
+      <div
+        className="linux-window-update-control linux-window-update-control--progress"
+        role="status"
+        aria-live="polite"
+        aria-label={t("settingsPage.about.downloadingTitle")}
+        title={t("settingsPage.about.downloadingTitle")}
+      >
+        {t("settingsPage.about.installing")}
+      </div>
+    );
+  }
+
+  return <AutomaticDownloadProgressControl percent={automaticDownloadPercent} />;
 }
 
 export function CustomWindowFrame({ frameState }: CustomWindowFrameProps) {
@@ -192,9 +216,9 @@ export function CustomWindowFrame({ frameState }: CustomWindowFrameProps) {
               selectedLabel={t("native:menu.view")}
               triggerStyle={MENU_TRIGGER_STYLE}
             />
+            <WindowUpdateControl />
           </div>
           <div className="linux-window-chrome-drag-region" />
-          <WindowUpdateControl />
           <div className="linux-window-chrome-controls no-drag">
             <button
               type="button"

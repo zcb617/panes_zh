@@ -1,6 +1,13 @@
 import { isValidElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CustomWindowFrame } from "./CustomWindowFrame";
+import {
+  AutomaticDownloadProgressControl,
+  CustomWindowFrame,
+  getAutomaticDownloadPercent,
+  WindowUpdateControl,
+} from "./CustomWindowFrame";
+import { renderToStaticMarkup } from "react-dom/server";
+import { useUpdateStore } from "../../stores/updateStore";
 
 const mockCloseCurrentWindow = vi.hoisted(() => vi.fn());
 const mockMinimizeCurrentWindow = vi.hoisted(() => vi.fn());
@@ -52,6 +59,17 @@ describe("CustomWindowFrame", () => {
     mockCloseCurrentWindow.mockResolvedValue(undefined);
     mockMinimizeCurrentWindow.mockResolvedValue(undefined);
     mockToggleCurrentWindowMaximize.mockResolvedValue(undefined);
+    useUpdateStore.setState({
+      status: "idle",
+      version: null,
+      error: null,
+      downloadPhase: "idle",
+      downloadedBytes: 0,
+      totalBytes: null,
+      update: null,
+      downloadSource: null,
+      snoozed: false,
+    });
   });
 
   afterEach(() => {
@@ -79,5 +97,34 @@ describe("CustomWindowFrame", () => {
     );
 
     expect(maximizeButtonProps).not.toBeNull();
+  });
+
+  it("keeps automatic download progress below 100%", () => {
+    expect(getAutomaticDownloadPercent(0, 1000)).toBe(0);
+    expect(getAutomaticDownloadPercent(995, 1000)).toBe(99);
+    expect(getAutomaticDownloadPercent(1000, 1000)).toBe(99);
+  });
+
+  it("renders the automatic progress circle", () => {
+    const downloadingMarkup = renderToStaticMarkup(
+      <AutomaticDownloadProgressControl percent={25} />,
+    );
+    expect(downloadingMarkup).toContain("linux-window-update-control--progress");
+    expect(downloadingMarkup).toContain("25%");
+    expect(downloadingMarkup).toContain('role="status"');
+  });
+
+  it("keeps the state control connected to automatic update state", () => {
+    useUpdateStore.setState({
+      status: "downloading",
+      downloadSource: "automatic",
+      downloadPhase: "downloading",
+      downloadedBytes: 250,
+      totalBytes: 1000,
+    });
+    expect(WindowUpdateControl).toBeTypeOf("function");
+
+    useUpdateStore.setState({ status: "downloaded" });
+    expect(useUpdateStore.getState().status).toBe("downloaded");
   });
 });

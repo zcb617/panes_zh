@@ -499,6 +499,7 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       });
     } catch (error) {
       set({ loading: false, error: String(error) });
+      throw error;
     }
   },
   restoreThread: async (threadId) => {

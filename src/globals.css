@@ -1098,7 +1098,19 @@ button.linux-window-update-control:hover {
 }
 
 .linux-window-update-control--progress {
-  min-width: 48px;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  padding: 0;
+  border-radius: 50%;
+  border-color: var(--success-indicator);
+  background: transparent;
+  font-size: 9px;
+  letter-spacing: -0.04em;
+}
+
+.linux-window-update-control--progress:hover {
+  background: var(--success-surface);
 }
 
 .linux-window-control {

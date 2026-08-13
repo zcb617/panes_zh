@@ -3,6 +3,7 @@ import type { EngineInfo, Thread } from "../types";
 
 const mockIpc = vi.hoisted(() => ({
   attachCodexRemoteThread: vi.fn(),
+  archiveThread: vi.fn(),
   listCodexRemoteThreads: vi.fn(),
   listThreads: vi.fn(),
 }));
@@ -77,6 +78,7 @@ describe("threadStore remote Codex discovery", () => {
     });
     mockEngineState.engines = [makeCodexEngine()];
     mockIpc.attachCodexRemoteThread.mockResolvedValue(makeThread("attached"));
+    mockIpc.archiveThread.mockResolvedValue(undefined);
     mockIpc.listThreads.mockResolvedValue([makeThread("local")]);
     useThreadStore.setState({
       threads: [],
@@ -172,5 +174,23 @@ describe("threadStore remote Codex discovery", () => {
     expect(useThreadStore.getState().threads).toEqual([makeThread("local")]);
     expect(useThreadStore.getState().error).toBeUndefined();
     warning.mockRestore();
+  });
+
+  it("rethrows archive failures so the sidebar can show an engine-specific prompt", async () => {
+    const thread = makeThread("local");
+    const error = new Error("thread already has an active writer");
+    mockIpc.archiveThread.mockRejectedValueOnce(error);
+    useThreadStore.setState({
+      threads: [thread],
+      threadsByWorkspace: { "workspace-1": [thread] },
+      archivedThreadsByWorkspace: {},
+      activeThreadId: thread.id,
+      loading: false,
+      error: undefined,
+    });
+
+    await expect(useThreadStore.getState().removeThread(thread.id)).rejects.toBe(error);
+    expect(useThreadStore.getState().threads).toEqual([thread]);
+    expect(useThreadStore.getState().error).toBe(String(error));
   });
 });
