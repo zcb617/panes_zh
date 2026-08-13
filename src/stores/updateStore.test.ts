@@ -87,7 +87,7 @@ describe("updateStore", () => {
       onEvent({ event: "Finished" });
     });
     const install = vi.fn().mockResolvedValue(undefined);
-    updaterMocks.check.mockResolvedValue({ version: "0.65.2", download, install });
+    updaterMocks.check.mockResolvedValue({ version: "0.66.0", download, install });
 
     await useUpdateStore.getState().checkForUpdate("automatic");
 
@@ -96,7 +96,7 @@ describe("updateStore", () => {
     expect(updaterMocks.relaunch).not.toHaveBeenCalled();
     expect(useUpdateStore.getState()).toMatchObject({
       status: "downloaded",
-      version: "0.65.2",
+      version: "0.66.0",
       downloadSource: "automatic",
       downloadedBytes: 1000,
       totalBytes: 1000,
