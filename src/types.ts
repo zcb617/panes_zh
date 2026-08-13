@@ -1,5 +1,23 @@
 export type TrustLevel = "trusted" | "standard" | "restricted";
 
+export type UpdateProcessPhase =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "downloaded"
+  | "installing"
+  | "error";
+
+export interface UpdateProcessState {
+  phase: UpdateProcessPhase;
+  version: string | null;
+  source: "manual" | "automatic" | null;
+  downloadedBytes: number;
+  totalBytes: number | null;
+  error: string | null;
+}
+
 export interface Workspace {
   id: string;
   name: string;

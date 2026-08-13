@@ -13,4 +13,5 @@ pub mod scheduled_tasks;
 pub mod setup;
 pub mod terminal;
 pub mod threads;
+pub mod update;
 pub mod workspace;

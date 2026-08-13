@@ -847,6 +847,7 @@
       "downloadedTitle": "更新已下载",
       "downloadedDescription": "下载已完成，点击“更新”开始安装。",
       "updateButton": "更新",
+      "installButton": "安装",
       "installingTitle": "正在安装更新",
       "installingDescription": "下载完成。Panes 正在应用更新。",
       "installing": "正在安装…",

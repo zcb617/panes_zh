@@ -148,7 +148,8 @@ export function App() {
   const applyThreadUpdateLocal = useThreadStore((s) => s.applyThreadUpdateLocal);
   const commandPaletteOpen = useUiStore((s) => s.commandPaletteOpen);
   const closeCommandPalette = useUiStore((s) => s.closeCommandPalette);
-  const checkForUpdate = useUpdateStore((s) => s.checkForUpdate);
+  const runAutomaticUpdate = useUpdateStore((s) => s.runAutomaticUpdate);
+  const restoreUpdateState = useUpdateStore((s) => s.restoreUpdateState);
   const autoUpdateIntervalMinutes = useUpdateStore((s) => s.autoUpdateIntervalMinutes);
   const customWindowFrame = usesCustomWindowFrame();
   const [codexRemoteThreadPrompts, setCodexRemoteThreadPrompts] = useState<
@@ -443,23 +444,27 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    void restoreUpdateState();
+  }, [restoreUpdateState]);
+
+  useEffect(() => {
     if (autoUpdateIntervalMinutes <= 0) return;
 
     const timer = setTimeout(() => {
-      void checkForUpdate("automatic");
+      void runAutomaticUpdate();
     }, 3000);
     return () => clearTimeout(timer);
-  }, [autoUpdateIntervalMinutes, checkForUpdate]);
+  }, [autoUpdateIntervalMinutes, runAutomaticUpdate]);
 
   useEffect(() => {
     if (autoUpdateIntervalMinutes <= 0) return;
 
     const intervalId = window.setInterval(() => {
-      void checkForUpdate("automatic");
+      void runAutomaticUpdate();
     }, autoUpdateIntervalMinutes * 60_000);
 
     return () => window.clearInterval(intervalId);
-  }, [autoUpdateIntervalMinutes, checkForUpdate]);
+  }, [autoUpdateIntervalMinutes, runAutomaticUpdate]);
 
   // Handle app-level keyboard shortcuts via JavaScript keydown listeners.
   // On macOS, when a contenteditable element (CodeMirror editor) is focused,

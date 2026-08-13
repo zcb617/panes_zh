@@ -485,6 +485,13 @@ export function SettingsPage() {
             : t("app:settingsPage.about.preparingDownload"),
       };
     }
+    if (updateStatus === "installing") {
+      return {
+        icon: <Download size={17} />,
+        title: t("app:settingsPage.about.installingTitle"),
+        description: t("app:settingsPage.about.installingDescription"),
+      };
+    }
     if (updateStatus === "ready") {
       return {
         icon: <CheckCircle2 size={17} />,
@@ -1622,9 +1629,9 @@ export function SettingsPage() {
                       onClick={() => void installDownloadedUpdate()}
                     >
                       <Download size={13} />
-                      {t("app:settingsPage.about.updateButton")}
+                      {t("app:settingsPage.about.installButton")}
                     </button>
-                  ) : updateStatus === "downloading" ? (
+                  ) : updateStatus === "downloading" || updateStatus === "installing" ? (
                     <div className="usp-update-progress">
                       <span className="usp-update-progress-value">
                         {downloadPhase === "installing"

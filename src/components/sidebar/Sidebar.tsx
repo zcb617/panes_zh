@@ -123,7 +123,7 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
   const bindChatThread = useChatStore((s) => s.setActiveThread);
   const updateStatus = useUpdateStore((s) => s.status);
   const updateSnoozed = useUpdateStore((s) => s.snoozed);
-  const hasUpdate = updateStatus === "available" && !updateSnoozed;
+  const hasUpdate = (updateStatus === "available" || updateStatus === "downloaded") && !updateSnoozed;
 
   const projects = useMemo<ProjectGroup[]>(
     () =>
@@ -894,7 +894,9 @@ function CollapsedRail({
   const projects = useWorkspaceStore((s) => s.workspaces);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const setActiveWorkspace = useWorkspaceStore((s) => s.setActiveWorkspace);
-  const hasUpdate = useUpdateStore((s) => s.status === "available" && !s.snoozed);
+  const hasUpdate = useUpdateStore(
+    (s) => (s.status === "available" || s.status === "downloaded") && !s.snoozed,
+  );
   const activeView = useUiStore((s) => s.activeView);
   const setActiveView = useUiStore((s) => s.setActiveView);
   const openSettings = useUiStore((s) => s.openSettings);

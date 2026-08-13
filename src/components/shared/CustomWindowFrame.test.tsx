@@ -66,7 +66,6 @@ describe("CustomWindowFrame", () => {
       downloadPhase: "idle",
       downloadedBytes: 0,
       totalBytes: null,
-      update: null,
       downloadSource: null,
       snoozed: false,
     });
@@ -126,5 +125,16 @@ describe("CustomWindowFrame", () => {
 
     useUpdateStore.setState({ status: "downloaded" });
     expect(useUpdateStore.getState().status).toBe("downloaded");
+  });
+
+  it("shows the update action after restoring a completed download", () => {
+    useUpdateStore.setState({
+      status: "downloaded",
+      downloadSource: "automatic",
+    });
+
+    expect(useUpdateStore.getState().status).toBe("downloaded");
+    expect(useUpdateStore.getState().downloadSource).toBe("automatic");
+    expect(WindowUpdateControl).toBeTypeOf("function");
   });
 });

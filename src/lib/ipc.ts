@@ -83,11 +83,19 @@ import type {
   Thread,
   TrustLevel,
   WorkspaceGitSelectionStatus,
-  Workspace
+  Workspace,
+  UpdateProcessState,
 } from "../types";
 import type { ScheduledTask, ScheduledTaskInput } from "../types";
 
 export const ipc = {
+  getUpdateState: () => invoke<UpdateProcessState>("get_update_state"),
+  isUpdateDownloaded: () => invoke<boolean>("is_update_downloaded"),
+  checkForUpdate: (source: "manual" | "automatic") =>
+    invoke<UpdateProcessState>("check_for_update", { source }),
+  downloadUpdate: (source: "manual" | "automatic") =>
+    invoke<UpdateProcessState>("download_update", { source }),
+  installDownloadedUpdate: () => invoke<void>("install_downloaded_update"),
   getRemoteAccessStatus: () => invoke<RemoteAccessStatus>("get_remote_access_status"),
   setRemoteAccessEnabled: (enabled: boolean) =>
     invoke<RemoteAccessStatus>("set_remote_access_enabled", { enabled }),

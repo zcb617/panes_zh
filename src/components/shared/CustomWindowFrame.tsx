@@ -72,8 +72,10 @@ export function WindowUpdateControl() {
 
   const automaticUpdateDownloading =
     downloadSource === "automatic" && updateStatus === "downloading";
+  const automaticUpdateInstalling =
+    downloadSource === "automatic" && updateStatus === "installing";
   const automaticUpdateDownloaded =
-    downloadSource === "automatic" && updateStatus === "downloaded";
+    updateStatus === "downloaded";
   const automaticDownloadPercent = getAutomaticDownloadPercent(downloadedBytes, totalBytes);
 
   if (automaticUpdateDownloaded) {
@@ -90,7 +92,7 @@ export function WindowUpdateControl() {
     );
   }
 
-  if (!automaticUpdateDownloading) return null;
+  if (!automaticUpdateDownloading && !automaticUpdateInstalling) return null;
 
   if (downloadPhase === "installing") {
     return (

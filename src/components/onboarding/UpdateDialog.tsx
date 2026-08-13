@@ -19,7 +19,16 @@ interface UpdateDialogProps {
 const CLOSEABLE_STATES = new Set(["idle", "checking", "available", "error"]);
 
 export function UpdateDialog({ open, onClose }: UpdateDialogProps) {
-  const { status, version, error, checkForUpdate, downloadAndInstall, resetToIdle, snooze } =
+  const {
+    status,
+    version,
+    error,
+    checkForUpdate,
+    downloadAndInstall,
+    installDownloadedUpdate,
+    resetToIdle,
+    snooze,
+  } =
     useUpdateStore();
 
   const canClose = CLOSEABLE_STATES.has(status);
@@ -65,6 +74,10 @@ export function UpdateDialog({ open, onClose }: UpdateDialogProps) {
           />
         )}
         {status === "downloading" && <DownloadingState />}
+        {status === "installing" && <DownloadingState />}
+        {status === "downloaded" && (
+          <DownloadedState onInstall={() => void installDownloadedUpdate()} />
+        )}
         {status === "ready" && <ReadyState />}
         {status === "error" && (
           <ErrorState
@@ -142,6 +155,28 @@ function DownloadingState() {
       <p className="confirm-dialog-message" style={{ fontSize: 11.5 }}>
         {t("updates.installingMessage")}
       </p>
+    </>
+  );
+}
+
+function DownloadedState({ onInstall }: { onInstall: () => void }) {
+  const { t } = useTranslation("app");
+
+  return (
+    <>
+      <div className="update-dlg-icon update-dlg-icon--accent">
+        <Check size={18} />
+      </div>
+      <h3 className="confirm-dialog-title">{t("settingsPage.about.downloadedTitle")}</h3>
+      <p className="confirm-dialog-message">
+        {t("settingsPage.about.downloadedDescription")}
+      </p>
+      <div className="confirm-dialog-actions">
+        <button type="button" className="update-dlg-btn-accent" onClick={onInstall}>
+          <Download size={13} />
+          {t("updates.install")}
+        </button>
+      </div>
     </>
   );
 }

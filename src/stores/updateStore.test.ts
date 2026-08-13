@@ -1,24 +1,40 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const updaterMocks = vi.hoisted(() => ({
-  check: vi.fn(),
-  relaunch: vi.fn(),
+const ipcMocks = vi.hoisted(() => ({
+  getUpdateState: vi.fn(),
+  checkForUpdate: vi.fn(),
+  downloadUpdate: vi.fn(),
+  installDownloadedUpdate: vi.fn(),
 }));
 
+const relaunchMock = vi.hoisted(() => vi.fn());
 const storageMock = vi.hoisted(() => ({
   getItem: vi.fn(),
   setItem: vi.fn(),
 }));
 
-vi.mock("@tauri-apps/plugin-updater", () => ({
-  check: updaterMocks.check,
+vi.mock("../lib/ipc", () => ({
+  ipc: ipcMocks,
 }));
 
 vi.mock("@tauri-apps/plugin-process", () => ({
-  relaunch: updaterMocks.relaunch,
+  relaunch: relaunchMock,
 }));
 
-import { useUpdateStore } from "./updateStore";
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => vi.fn()),
+}));
+
+import { isUpdateDownloaded, useUpdateStore } from "./updateStore";
+
+const idleState = {
+  phase: "idle" as const,
+  version: null,
+  source: null,
+  downloadedBytes: 0,
+  totalBytes: null,
+  error: null,
+};
 
 describe("updateStore", () => {
   beforeEach(() => {
@@ -32,80 +48,79 @@ describe("updateStore", () => {
       downloadPhase: "idle",
       downloadedBytes: 0,
       totalBytes: null,
-      update: null,
       downloadSource: null,
       autoUpdateIntervalMinutes: 30,
       snoozed: false,
     });
-    updaterMocks.relaunch.mockResolvedValue(undefined);
+    ipcMocks.getUpdateState.mockResolvedValue(idleState);
+    relaunchMock.mockResolvedValue(undefined);
   });
 
-  it("tracks determinate download progress before installation", async () => {
-    const downloadAndInstall = vi.fn(async (onEvent: (event: unknown) => void) => {
-      onEvent({ event: "Started", data: { contentLength: 1000 } });
-      onEvent({ event: "Progress", data: { chunkLength: 400 } });
-      onEvent({ event: "Progress", data: { chunkLength: 600 } });
-      onEvent({ event: "Finished" });
-    });
-    updaterMocks.check.mockResolvedValue({ downloadAndInstall });
-
-    await useUpdateStore.getState().downloadAndInstall();
-
-    expect(downloadAndInstall).toHaveBeenCalledOnce();
-    expect(useUpdateStore.getState()).toMatchObject({
-      status: "ready",
-      downloadPhase: "installing",
+  it("restores a downloaded update without checking again", async () => {
+    const downloadedState = {
+      phase: "downloaded" as const,
+      version: "0.67.0",
+      source: "automatic" as const,
       downloadedBytes: 1000,
       totalBytes: 1000,
-    });
-    expect(updaterMocks.relaunch).toHaveBeenCalledOnce();
-  });
+      error: null,
+    };
+    ipcMocks.getUpdateState.mockResolvedValue(downloadedState);
 
-  it("tracks bytes when the server does not provide a total size", async () => {
-    updaterMocks.check.mockResolvedValue({
-      downloadAndInstall: async (onEvent: (event: unknown) => void) => {
-        onEvent({ event: "Started", data: {} });
-        onEvent({ event: "Progress", data: { chunkLength: 256 } });
-        onEvent({ event: "Finished" });
-      },
-    });
+    await useUpdateStore.getState().runAutomaticUpdate();
 
-    await useUpdateStore.getState().downloadAndInstall();
-
-    expect(useUpdateStore.getState()).toMatchObject({
-      status: "ready",
-      downloadPhase: "installing",
-      downloadedBytes: 256,
-      totalBytes: null,
-    });
-  });
-
-  it("downloads automatic updates without installing them", async () => {
-    const download = vi.fn(async (onEvent: (event: unknown) => void) => {
-      onEvent({ event: "Started", data: { contentLength: 1000 } });
-      onEvent({ event: "Progress", data: { chunkLength: 1000 } });
-      onEvent({ event: "Finished" });
-    });
-    const install = vi.fn().mockResolvedValue(undefined);
-    updaterMocks.check.mockResolvedValue({ version: "0.66.0", download, install });
-
-    await useUpdateStore.getState().checkForUpdate("automatic");
-
-    expect(download).toHaveBeenCalledOnce();
-    expect(install).not.toHaveBeenCalled();
-    expect(updaterMocks.relaunch).not.toHaveBeenCalled();
+    expect(ipcMocks.getUpdateState).toHaveBeenCalledOnce();
+    expect(ipcMocks.checkForUpdate).not.toHaveBeenCalled();
+    expect(ipcMocks.downloadUpdate).not.toHaveBeenCalled();
     expect(useUpdateStore.getState()).toMatchObject({
       status: "downloaded",
-      version: "0.66.0",
+      version: "0.67.0",
       downloadSource: "automatic",
+    });
+    expect(isUpdateDownloaded(useUpdateStore.getState())).toBe(true);
+  });
+
+  it("composes automatic check and download as one process", async () => {
+    ipcMocks.checkForUpdate.mockResolvedValue({
+      phase: "available",
+      version: "0.67.0",
+      source: "automatic",
+      downloadedBytes: 0,
+      totalBytes: 1000,
+      error: null,
+    });
+    ipcMocks.downloadUpdate.mockResolvedValue({
+      phase: "downloaded",
+      version: "0.67.0",
+      source: "automatic",
       downloadedBytes: 1000,
       totalBytes: 1000,
+      error: null,
     });
+
+    await useUpdateStore.getState().runAutomaticUpdate();
+
+    expect(ipcMocks.checkForUpdate).toHaveBeenCalledWith("automatic");
+    expect(ipcMocks.downloadUpdate).toHaveBeenCalledWith("automatic");
+    expect(useUpdateStore.getState().status).toBe("downloaded");
+  });
+
+  it("installs a restored downloaded update through the single operation", async () => {
+    ipcMocks.getUpdateState.mockResolvedValue({
+      phase: "downloaded",
+      version: "0.67.0",
+      source: "automatic",
+      downloadedBytes: 1000,
+      totalBytes: 1000,
+      error: null,
+    });
+    await useUpdateStore.getState().restoreUpdateState();
 
     await useUpdateStore.getState().installDownloadedUpdate();
 
-    expect(install).toHaveBeenCalledOnce();
-    expect(updaterMocks.relaunch).toHaveBeenCalledOnce();
+    expect(ipcMocks.installDownloadedUpdate).toHaveBeenCalledOnce();
+    expect(relaunchMock).toHaveBeenCalledOnce();
+    expect(useUpdateStore.getState().status).toBe("ready");
   });
 
   it("persists a zero interval to disable automatic checks", () => {

@@ -848,6 +848,7 @@
       "downloadedTitle": "Atualização baixada",
       "downloadedDescription": "O download foi concluído. Clique em “Atualizar” para instalar.",
       "updateButton": "Atualizar",
+      "installButton": "Instalar",
       "installingTitle": "Instalando atualização",
       "installingDescription": "Download concluído. O Panes está aplicando a atualização.",
       "installing": "Instalando...",

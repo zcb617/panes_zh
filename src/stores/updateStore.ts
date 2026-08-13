@@ -1,19 +1,14 @@
 import { create } from "zustand";
-import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { ipc } from "../lib/ipc";
+import type { UpdateProcessState } from "../types";
 
 export const DEFAULT_AUTO_UPDATE_INTERVAL_MINUTES = 30;
 
 const AUTO_UPDATE_INTERVAL_STORAGE_KEY = "panes:auto-update-interval-minutes";
 
-type UpdateStatus =
-  | "idle"
-  | "checking"
-  | "available"
-  | "downloading"
-  | "downloaded"
-  | "ready"
-  | "error";
+type UpdateStatus = UpdateProcessState["phase"] | "ready";
 type DownloadPhase = "idle" | "downloading" | "installing";
 type UpdateCheckMode = "manual" | "automatic";
 type UpdateDownloadSource = UpdateCheckMode | null;
@@ -45,6 +40,22 @@ function saveAutoUpdateIntervalMinutes(value: number): void {
   }
 }
 
+export function isUpdateDownloaded(state: Pick<UpdateState, "status">): boolean {
+  return state.status === "downloaded";
+}
+
+function mapUpdateState(state: UpdateProcessState): Partial<UpdateState> {
+  return {
+    status: state.phase,
+    version: state.version,
+    error: state.error,
+    downloadPhase: state.phase === "installing" ? "installing" : state.phase === "downloading" ? "downloading" : "idle",
+    downloadedBytes: state.downloadedBytes,
+    totalBytes: state.totalBytes,
+    downloadSource: state.source,
+  };
+}
+
 interface UpdateState {
   status: UpdateStatus;
   version: string | null;
@@ -53,233 +64,195 @@ interface UpdateState {
   downloadPhase: DownloadPhase;
   downloadedBytes: number;
   totalBytes: number | null;
-  update: Update | null;
   downloadSource: UpdateDownloadSource;
   autoUpdateIntervalMinutes: number;
   /** True after user clicks "Not now" — hides dot until next app launch */
   snoozed: boolean;
 
+  restoreUpdateState: () => Promise<void>;
+  runAutomaticUpdate: () => Promise<void>;
   checkForUpdate: (mode?: UpdateCheckMode) => Promise<void>;
+  downloadUpdate: (mode?: UpdateCheckMode) => Promise<void>;
   downloadAndInstall: () => Promise<void>;
+  isUpdateDownloaded: () => boolean;
   installDownloadedUpdate: () => Promise<void>;
   setAutoUpdateIntervalMinutes: (minutes: number) => void;
   resetToIdle: () => void;
   snooze: () => void;
 }
 
-export const useUpdateStore = create<UpdateState>((set, get) => {
-  async function downloadUpdate(
-    update: Update,
-    source: UpdateDownloadSource,
-    installAfterDownload: boolean,
-  ): Promise<void> {
-    set({
-      status: "downloading",
-      version: update.version,
-      update,
-      downloadSource: source,
-      error: null,
-      downloadPhase: "downloading",
-      downloadedBytes: 0,
-      totalBytes: null,
+let progressUnlisten: UnlistenFn | null = null;
+let progressListenerPromise: Promise<void> | null = null;
+let restorePromise: Promise<void> | null = null;
+let checkPromise: Promise<void> | null = null;
+let downloadPromise: Promise<void> | null = null;
+let installPromise: Promise<void> | null = null;
+let automaticUpdatePromise: Promise<void> | null = null;
+
+async function ensureProgressListener(set: (state: Partial<UpdateState>) => void): Promise<void> {
+  if (progressListenerPromise) return progressListenerPromise;
+
+  progressListenerPromise = listen<UpdateProcessState>("update-download-progress", ({ payload }) => {
+    set(mapUpdateState(payload));
+  }).then((unlisten) => {
+    progressUnlisten = unlisten;
+  });
+  await progressListenerPromise;
+}
+
+export const useUpdateStore = create<UpdateState>((set, get) => ({
+  status: "idle",
+  version: null,
+  error: null,
+  lastCheckedAt: null,
+  downloadPhase: "idle",
+  downloadedBytes: 0,
+  totalBytes: null,
+  downloadSource: null,
+  autoUpdateIntervalMinutes: readAutoUpdateIntervalMinutes(),
+  snoozed: false,
+
+  restoreUpdateState: () => {
+    if (restorePromise) return restorePromise;
+    restorePromise = (async () => {
+      try {
+        const state = await ipc.getUpdateState();
+        set({ ...mapUpdateState(state), lastCheckedAt: state.phase === "idle" ? Date.now() : get().lastCheckedAt });
+      } catch (error) {
+        set({ status: "error", error: error instanceof Error ? error.message : String(error) });
+      }
+    })().finally(() => {
+      restorePromise = null;
     });
+    return restorePromise;
+  },
 
-    const onEvent = (event: DownloadEvent) => {
-      if (event.event === "Started") {
-        set({
-          downloadPhase: "downloading",
-          downloadedBytes: 0,
-          totalBytes: event.data.contentLength ?? null,
-        });
+  runAutomaticUpdate: () => {
+    if (automaticUpdatePromise) return automaticUpdatePromise;
+    automaticUpdatePromise = (async () => {
+      const currentStatus = get().status;
+      if (["checking", "downloading", "downloaded", "installing", "ready"].includes(currentStatus)) {
         return;
       }
-      if (event.event === "Progress") {
-        set((state) => ({
-          downloadedBytes: state.downloadedBytes + event.data.chunkLength,
-        }));
+      if (currentStatus === "idle" || currentStatus === "error") {
+        await get().restoreUpdateState();
+      }
+      if (get().isUpdateDownloaded()) return;
+
+      if (get().status !== "available") {
+        await get().checkForUpdate("automatic");
+      }
+      if (get().status !== "available") return;
+
+      await get().downloadUpdate("automatic");
+    })().finally(() => {
+      automaticUpdatePromise = null;
+    });
+    return automaticUpdatePromise;
+  },
+
+  checkForUpdate: (mode = "manual") => {
+    if (checkPromise) return checkPromise;
+    checkPromise = (async () => {
+      const currentStatus = get().status;
+      if (["checking", "downloading", "downloaded", "installing", "ready"].includes(currentStatus)) {
         return;
       }
 
-      set((state) => ({
-        downloadPhase: installAfterDownload ? "installing" : "downloading",
-        downloadedBytes: state.totalBytes ?? state.downloadedBytes,
-      }));
-    };
+      try {
+        const state = await ipc.checkForUpdate(mode);
+        set({ ...mapUpdateState(state), lastCheckedAt: Date.now() });
+      } catch (error) {
+        set({ status: "error", error: error instanceof Error ? error.message : String(error), downloadPhase: "idle" });
+      }
+    })().finally(() => {
+      checkPromise = null;
+    });
+    return checkPromise;
+  },
 
-    if (installAfterDownload) {
-      await update.downloadAndInstall(onEvent);
-      set({ status: "ready" });
-      await relaunch();
+  downloadUpdate: (mode = "manual") => {
+    if (downloadPromise) return downloadPromise;
+    downloadPromise = (async () => {
+      const currentStatus = get().status;
+      if (["downloading", "downloaded", "installing", "ready"].includes(currentStatus)) return;
+
+      try {
+        await ensureProgressListener(set);
+        const state = await ipc.downloadUpdate(mode);
+        set(mapUpdateState(state));
+      } catch (error) {
+        set({ status: "error", error: error instanceof Error ? error.message : String(error), downloadPhase: "idle" });
+      }
+    })().finally(() => {
+      downloadPromise = null;
+    });
+    return downloadPromise;
+  },
+
+  downloadAndInstall: async () => {
+    if (get().isUpdateDownloaded()) {
+      await get().installDownloadedUpdate();
       return;
     }
 
-    await update.download(onEvent);
-    set({ status: "downloaded", downloadPhase: "idle" });
-  }
+    if (get().status !== "available") {
+      await get().checkForUpdate("manual");
+    }
+    if (get().status !== "available") return;
 
-  return {
-    status: "idle",
-    version: null,
-    error: null,
-    lastCheckedAt: null,
-    downloadPhase: "idle",
-    downloadedBytes: 0,
-    totalBytes: null,
-    update: null,
-    downloadSource: null,
-    autoUpdateIntervalMinutes: readAutoUpdateIntervalMinutes(),
-    snoozed: false,
+    await get().downloadUpdate("manual");
+    if (get().isUpdateDownloaded()) {
+      await get().installDownloadedUpdate();
+    }
+  },
 
-    checkForUpdate: async (mode = "manual") => {
-      const currentStatus = get().status;
-      if (["checking", "downloading", "downloaded", "ready"].includes(currentStatus)) {
-        return;
-      }
-      if (mode === "automatic" && currentStatus === "available") {
-        return;
-      }
+  isUpdateDownloaded: () => isUpdateDownloaded(get()),
 
-      set({
-        status: "checking",
-        error: null,
-        update: null,
-        downloadSource: mode,
-        downloadPhase: "idle",
-        downloadedBytes: 0,
-        totalBytes: null,
-      });
+  installDownloadedUpdate: () => {
+    if (installPromise) return installPromise;
+    installPromise = (async () => {
+      if (!get().isUpdateDownloaded()) return;
 
-      let update: Update | null;
+      set({ status: "installing", downloadPhase: "installing", error: null });
       try {
-        update = await check();
-      } catch {
-        // Silent on network errors — no degradation if the endpoint is unreachable.
-        set({
-          status: "idle",
-          update: null,
-          downloadSource: null,
-          downloadPhase: "idle",
-        });
-        return;
-      }
-
-      if (!update) {
-        set({
-          status: "idle",
-          version: null,
-          update: null,
-          downloadSource: null,
-          lastCheckedAt: Date.now(),
-          downloadPhase: "idle",
-        });
-        return;
-      }
-
-      set({ version: update.version, lastCheckedAt: Date.now() });
-
-      if (mode === "automatic") {
-        try {
-          await downloadUpdate(update, "automatic", false);
-        } catch (err) {
-          set({
-            status: "error",
-            error: err instanceof Error ? err.message : "Update failed",
-            downloadPhase: "idle",
-          });
-        }
-        return;
-      }
-
-      set({
-        status: "available",
-        update,
-        downloadSource: "manual",
-      });
-    },
-
-    downloadAndInstall: async () => {
-      const currentState = get();
-      if (["downloading", "downloaded", "ready"].includes(currentState.status)) {
-        return;
-      }
-
-      let update = currentState.update;
-      set({
-        status: "downloading",
-        error: null,
-        downloadSource: "manual",
-        downloadPhase: "downloading",
-        downloadedBytes: 0,
-        totalBytes: null,
-      });
-
-      try {
-        update ??= await check();
-        if (!update) {
-          set({
-            status: "idle",
-            version: null,
-            update: null,
-            downloadSource: null,
-            downloadPhase: "idle",
-            downloadedBytes: 0,
-            totalBytes: null,
-          });
-          return;
-        }
-        await downloadUpdate(update, "manual", true);
-      } catch (err) {
-        set({
-          status: "error",
-          error: err instanceof Error ? err.message : "Update failed",
-          downloadPhase: "idle",
-        });
-      }
-    },
-
-    installDownloadedUpdate: async () => {
-      const { status, update } = get();
-      if (status !== "downloaded" || !update) return;
-
-      set({
-        status: "downloading",
-        error: null,
-        downloadPhase: "installing",
-      });
-      try {
-        await update.install();
+        await ipc.installDownloadedUpdate();
         set({ status: "ready" });
         await relaunch();
-      } catch (err) {
-        set({
-          status: "error",
-          error: err instanceof Error ? err.message : "Update failed",
-          downloadPhase: "idle",
-        });
+      } catch (error) {
+        set({ status: "error", error: error instanceof Error ? error.message : String(error), downloadPhase: "idle" });
       }
-    },
+    })().finally(() => {
+      installPromise = null;
+    });
+    return installPromise;
+  },
 
-    setAutoUpdateIntervalMinutes: (minutes) => {
-      const normalized = normalizeAutoUpdateIntervalMinutes(minutes);
-      saveAutoUpdateIntervalMinutes(normalized);
-      set({ autoUpdateIntervalMinutes: normalized });
-    },
+  setAutoUpdateIntervalMinutes: (minutes) => {
+    const normalized = normalizeAutoUpdateIntervalMinutes(minutes);
+    saveAutoUpdateIntervalMinutes(normalized);
+    set({ autoUpdateIntervalMinutes: normalized });
+  },
 
-    resetToIdle: () => {
-      set({
-        status: "idle",
-        version: null,
-        error: null,
-        update: null,
-        downloadSource: null,
-        downloadPhase: "idle",
-        downloadedBytes: 0,
-        totalBytes: null,
-      });
-    },
+  resetToIdle: () => {
+    set({
+      status: "idle",
+      version: null,
+      error: null,
+      downloadSource: null,
+      downloadPhase: "idle",
+      downloadedBytes: 0,
+      totalBytes: null,
+    });
+  },
 
-    snooze: () => {
-      set({ snoozed: true });
-    },
-  };
-});
+  snooze: () => {
+    set({ snoozed: true });
+  },
+}));
+
+export function disposeUpdateProgressListener(): void {
+  progressUnlisten?.();
+  progressUnlisten = null;
+  progressListenerPromise = null;
+}

@@ -21,6 +21,7 @@ mod scheduled_tasks;
 mod state;
 mod terminal;
 mod terminal_notifications;
+mod update;
 mod workspace_startup;
 
 use std::sync::{
@@ -142,6 +143,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .manage(update::UpdateManager::default())
         .manage(app_state)
         .manage(computer_control_sdk)
         .menu(move |handle| build_app_menu(handle, app_locale))
@@ -358,6 +360,11 @@ pub fn run() {
             commands::app::set_notification_sound,
             commands::app::preview_notification_sound,
             commands::app::show_agent_notification,
+            commands::update::get_update_state,
+            commands::update::is_update_downloaded,
+            commands::update::check_for_update,
+            commands::update::download_update,
+            commands::update::install_downloaded_update,
             commands::files::list_dir,
             commands::files::read_file,
             commands::files::resolve_editor_file_reference,
