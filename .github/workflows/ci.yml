@@ -407,6 +407,62 @@ jobs:
           file "$APP_BINARY" | grep -Eq 'arm64|aarch64'
           file "$APP_BINARY" | grep -q 'x86_64'
 
+      - name: Verify macOS bundles contain CUA runtime
+        # Disabled by default; enable explicitly when release artifact validation is needed.
+        if: ${{ false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUNDLE_ROOT="src-tauri/target/universal-apple-darwin/release/bundle"
+          APP_BUNDLE="$(find "$BUNDLE_ROOT/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          DMG_FILE="$(find "$BUNDLE_ROOT/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          UPDATER_ARCHIVE="$(find "$BUNDLE_ROOT/macos" -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)"
+
+          if [ -z "$APP_BUNDLE" ] || [ -z "$DMG_FILE" ] || [ -z "$UPDATER_ARCHIVE" ]; then
+            echo "Unable to locate all macOS release bundles."
+            exit 1
+          fi
+
+          verify_cua_app() {
+            local app_bundle="$1"
+            local cua_root="$app_bundle/Contents/Resources/resources/cua-driver"
+            local cua_library="$cua_root/macos-universal/libcua_driver_sdk.dylib"
+            local cua_node_runtime="$cua_root/macos-universal/cua_driver_node_runtime.node"
+
+            test -f "$cua_root/manifest.json"
+            test -f "$cua_library"
+            test -f "$cua_node_runtime"
+            test -f "$cua_root/macos-universal/node-runtime-NOTICE.md"
+            cmp src-tauri/resources/cua-driver/macos-universal/libcua_driver_sdk.dylib "$cua_library"
+            cmp src-tauri/resources/cua-driver/macos-universal/cua_driver_node_runtime.node "$cua_node_runtime"
+
+            for native_runtime in "$cua_library" "$cua_node_runtime"; do
+              native_architectures="$(lipo -archs "$native_runtime")"
+              echo "$native_runtime: $native_architectures"
+              grep -qw 'x86_64' <<<"$native_architectures"
+              grep -qw 'arm64' <<<"$native_architectures"
+            done
+          }
+
+          verify_cua_app "$APP_BUNDLE"
+
+          UPDATER_FILE_LIST="$RUNNER_TEMP/panes-cua-updater-files.txt"
+          tar -tzf "$UPDATER_ARCHIVE" > "$UPDATER_FILE_LIST"
+          grep -q '/Contents/Resources/resources/cua-driver/manifest.json$' "$UPDATER_FILE_LIST"
+          grep -q '/Contents/Resources/resources/cua-driver/macos-universal/libcua_driver_sdk.dylib$' "$UPDATER_FILE_LIST"
+          grep -q '/Contents/Resources/resources/cua-driver/macos-universal/cua_driver_node_runtime.node$' "$UPDATER_FILE_LIST"
+
+          MOUNT_POINT="$(mktemp -d "$RUNNER_TEMP/panes-cua-dmg.XXXXXX")"
+          hdiutil attach "$DMG_FILE" -nobrowse -readonly -mountpoint "$MOUNT_POINT"
+          trap 'hdiutil detach "$MOUNT_POINT" >/dev/null 2>&1 || true' EXIT
+          INSTALLED_APP="$(find "$MOUNT_POINT" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [ -z "$INSTALLED_APP" ]; then
+            echo "Unable to locate Panes.app inside the macOS DMG."
+            exit 1
+          fi
+          verify_cua_app "$INSTALLED_APP"
+
       - name: Build Linux Tauri bundles
         if: matrix.platform == 'ubuntu-22.04'
         run: pnpm tauri:build
