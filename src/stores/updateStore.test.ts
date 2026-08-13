@@ -129,4 +129,23 @@ describe("updateStore", () => {
     expect(useUpdateStore.getState().autoUpdateIntervalMinutes).toBe(0);
     expect(storageMock.setItem).toHaveBeenCalledWith("panes:auto-update-interval-minutes", "0");
   });
+
+  it("shows checking before the check request returns", async () => {
+    let resolveCheck!: (state: typeof idleState) => void;
+    ipcMocks.checkForUpdate.mockReturnValue(
+      new Promise<typeof idleState>((resolve) => {
+        resolveCheck = resolve;
+      }),
+    );
+
+    const pendingCheck = useUpdateStore.getState().checkForUpdate();
+
+    expect(useUpdateStore.getState().status).toBe("checking");
+    expect(useUpdateStore.getState().error).toBeNull();
+
+    resolveCheck(idleState);
+    await pendingCheck;
+
+    expect(useUpdateStore.getState().status).toBe("idle");
+  });
 });

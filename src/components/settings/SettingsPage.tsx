@@ -520,6 +520,15 @@ export function SettingsPage() {
     };
   })();
 
+  const handleCheckForUpdate = async () => {
+    const result = await checkForUpdate();
+    if (result?.phase === "idle") {
+      toast.success(t("app:settingsPage.about.noUpdates"));
+    } else if (result?.phase === "error") {
+      toast.error(result.error || t("app:updates.failedMessage"));
+    }
+  };
+
   async function changeLocale(locale: AppLocale) {
     if (locale === activeLocale) return;
     try {
@@ -1663,7 +1672,7 @@ export function SettingsPage() {
                     <button
                       type="button"
                       className="usp-button usp-button-primary"
-                      onClick={() => void checkForUpdate()}
+                      onClick={() => void handleCheckForUpdate()}
                     >
                       <RefreshCw size={13} />
                       {t("common:actions.retry")}
@@ -1673,7 +1682,7 @@ export function SettingsPage() {
                       type="button"
                       className="usp-button"
                       disabled={updateStatus === "checking"}
-                      onClick={() => void checkForUpdate()}
+                      onClick={() => void handleCheckForUpdate()}
                     >
                       <RefreshCw size={13} className={updateStatus === "checking" ? "usp-spin" : undefined} />
                       {updateStatus === "checking"

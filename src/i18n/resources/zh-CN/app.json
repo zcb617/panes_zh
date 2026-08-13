@@ -832,6 +832,7 @@
       "automaticTitle": "自动更新",
       "automaticDescription": "Panes 会自动检查更新。你也可以随时手动检查。",
       "upToDateTitle": "Panes 已是最新版本",
+      "noUpdates": "检查完成，当前已是最新版本。",
       "autoCheckIntervalTitle": "自动检测间隔",
       "autoCheckIntervalDescription": "设置自动检测更新的时间间隔，单位为分钟；设置为 0 可关闭自动检测。",
       "autoCheckIntervalDecrease": "减少自动检测间隔",

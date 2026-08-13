@@ -12,6 +12,7 @@ type UpdateStatus = UpdateProcessState["phase"] | "ready";
 type DownloadPhase = "idle" | "downloading" | "installing";
 type UpdateCheckMode = "manual" | "automatic";
 type UpdateDownloadSource = UpdateCheckMode | null;
+type UpdateCheckResult = UpdateProcessState | null;
 
 function readAutoUpdateIntervalMinutes(): number {
   try {
@@ -71,7 +72,7 @@ interface UpdateState {
 
   restoreUpdateState: () => Promise<void>;
   runAutomaticUpdate: () => Promise<void>;
-  checkForUpdate: (mode?: UpdateCheckMode) => Promise<void>;
+  checkForUpdate: (mode?: UpdateCheckMode) => Promise<UpdateCheckResult>;
   downloadUpdate: (mode?: UpdateCheckMode) => Promise<void>;
   downloadAndInstall: () => Promise<void>;
   isUpdateDownloaded: () => boolean;
@@ -84,7 +85,7 @@ interface UpdateState {
 let progressUnlisten: UnlistenFn | null = null;
 let progressListenerPromise: Promise<void> | null = null;
 let restorePromise: Promise<void> | null = null;
-let checkPromise: Promise<void> | null = null;
+let checkPromise: Promise<UpdateCheckResult> | null = null;
 let downloadPromise: Promise<void> | null = null;
 let installPromise: Promise<void> | null = null;
 let automaticUpdatePromise: Promise<void> | null = null;
@@ -156,14 +157,32 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
     checkPromise = (async () => {
       const currentStatus = get().status;
       if (["checking", "downloading", "downloaded", "installing", "ready"].includes(currentStatus)) {
-        return;
+        return null;
       }
+
+      set({
+        status: "checking",
+        error: null,
+        downloadPhase: "idle",
+        downloadSource: mode,
+      });
 
       try {
         const state = await ipc.checkForUpdate(mode);
         set({ ...mapUpdateState(state), lastCheckedAt: Date.now() });
+        return state;
       } catch (error) {
-        set({ status: "error", error: error instanceof Error ? error.message : String(error), downloadPhase: "idle" });
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const errorState: UpdateProcessState = {
+          phase: "error",
+          version: get().version,
+          source: mode,
+          downloadedBytes: get().downloadedBytes,
+          totalBytes: get().totalBytes,
+          error: errorMessage,
+        };
+        set({ ...mapUpdateState(errorState), lastCheckedAt: Date.now() });
+        return errorState;
       }
     })().finally(() => {
       checkPromise = null;

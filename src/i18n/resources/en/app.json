@@ -833,6 +833,7 @@
       "automaticTitle": "Automatic updates",
       "automaticDescription": "Panes checks for updates automatically. You can also check at any time.",
       "upToDateTitle": "Panes is up to date",
+      "noUpdates": "Check complete. Panes is up to date.",
       "autoCheckIntervalTitle": "Automatic check interval",
       "autoCheckIntervalDescription": "Set how often Panes checks for updates, in minutes. Set to 0 to disable automatic checks.",
       "autoCheckIntervalDecrease": "Decrease automatic check interval",
