@@ -2,5 +2,13 @@ packages:
   - .
   - src-tauri/src/sidecars/claude_agent
 
+allowBuilds:
+  esbuild: true
+
+supportedArchitectures:
+  cpu:
+    - x64
+    - arm64
+
 onlyBuiltDependencies:
   - esbuild

@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": {
+      "sidecar-dist": "sidecar-dist",
+      "resources/cua-driver/manifest.json": "resources/cua-driver/manifest.json",
+      "resources/cua-driver/macos-universal": "resources/cua-driver/macos-universal"
+    }
+  }
+}

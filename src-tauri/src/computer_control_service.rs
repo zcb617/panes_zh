@@ -152,6 +152,21 @@ fn target_resource(tool: &str, arguments: &Value) -> Result<TargetResource, Stri
             return resolved_application_resource(value);
         }
     }
+    #[cfg(target_os = "macos")]
+    if let Some(bundle_id) = object
+        .and_then(|value| value.get("bundle_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(path) = resolve_macos_application_path(bundle_id, true) {
+            return Ok(application_resource(&path));
+        }
+        return Err(service_error(
+            "target_not_found",
+            "无法解析目标应用标识对应的实际应用",
+        ));
+    }
     if let Some(pid) = object
         .and_then(|value| value.get("pid"))
         .and_then(Value::as_u64)
@@ -206,6 +221,12 @@ fn target_resource(tool: &str, arguments: &Value) -> Result<TargetResource, Stri
 }
 
 fn application_resource(application: &str) -> TargetResource {
+    #[cfg(target_os = "macos")]
+    let macos_bundle_name = Path::new(application.trim()).ancestors().find_map(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| name.to_ascii_lowercase().ends_with(".app"))
+    });
     let display = Path::new(application.trim())
         .file_name()
         .and_then(|file_name| file_name.to_str())
@@ -213,6 +234,8 @@ fn application_resource(application: &str) -> TargetResource {
         .filter(|file_name| !file_name.is_empty())
         .unwrap_or_else(|| application.trim())
         .to_string();
+    #[cfg(target_os = "macos")]
+    let display = macos_bundle_name.unwrap_or(&display).to_string();
     TargetResource {
         key: format!("application:{}", display.to_lowercase()),
         display,
@@ -230,19 +253,62 @@ fn resolved_application_resource(application: &str) -> Result<TargetResource, St
     if path.is_file() {
         return Ok(application_resource(application));
     }
+    #[cfg(target_os = "macos")]
+    if path.is_dir()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".app"))
+    {
+        return Ok(application_resource(application));
+    }
 
     let is_bare_name = !application.contains('\\') && !application.contains('/');
     if is_bare_name {
-        let resolved = runtime_env::resolve_executable(application).ok_or_else(|| {
-            service_error("target_not_found", "无法解析目标名称对应的实际可执行文件名")
-        })?;
-        return Ok(application_resource(&resolved.to_string_lossy()));
+        if let Some(resolved) = runtime_env::resolve_executable(application) {
+            return Ok(application_resource(&resolved.to_string_lossy()));
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(path) = resolve_macos_application_path(application, false) {
+            return Ok(application_resource(&path));
+        }
+        return Err(service_error(
+            "target_not_found",
+            "无法解析目标名称对应的实际可执行文件名",
+        ));
     }
 
     Err(service_error(
         "target_not_found",
         "无法解析目标路径对应的实际可执行文件名",
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_application_path(application: &str, bundle_id: bool) -> Option<String> {
+    if application.contains(['\'', '"', '\n', '\r']) {
+        return None;
+    }
+    let query = if bundle_id {
+        format!("kMDItemCFBundleIdentifier == '{application}'")
+    } else {
+        let file_name = application.strip_suffix(".app").unwrap_or(application);
+        format!(
+            "kMDItemFSName == '{file_name}.app'c && kMDItemContentType == 'com.apple.application-bundle'"
+        )
+    };
+    let output = std::process::Command::new("/usr/bin/mdfind")
+        .arg(query)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|path| !path.is_empty())
+        .map(str::to_string)
 }
 
 fn authorization_matches_target(
@@ -289,8 +355,36 @@ fn process_executable_path(pid: u32) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+#[cfg(target_os = "macos")]
+fn process_executable_path(pid: u32) -> Option<String> {
+    const PROC_PIDPATHINFO_MAXSIZE: usize = 4096;
+
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_pidpath(pid: i32, buffer: *mut std::ffi::c_void, buffer_size: u32) -> i32;
+    }
+
+    let pid = i32::try_from(pid).ok()?;
+    let mut buffer = vec![0_u8; PROC_PIDPATHINFO_MAXSIZE];
+    let length = unsafe {
+        proc_pidpath(
+            pid,
+            buffer.as_mut_ptr().cast(),
+            PROC_PIDPATHINFO_MAXSIZE as u32,
+        )
+    };
+    if length <= 0 {
+        return None;
+    }
+    let length = usize::try_from(length).ok()?.min(buffer.len());
+    let path = &buffer[..length];
+    let path = path.strip_suffix(&[0]).unwrap_or(path);
+    Some(String::from_utf8_lossy(path).into_owned())
+}
+
 #[cfg(not(any(
     target_os = "windows",
+    target_os = "macos",
     all(target_os = "linux", target_arch = "x86_64")
 )))]
 fn process_executable_path(_pid: u32) -> Option<String> {
@@ -409,6 +503,37 @@ mod tests {
 
         assert_eq!(target.key, format!("application:{current_name}"));
         assert_eq!(target.scope, "application");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_pid_uses_proc_executable_name() {
+        let target = target_resource("list_windows", &json!({"pid": std::process::id()}))
+            .expect("macOS should resolve the current process through proc_pidpath");
+        let current_name = std::env::current_exe()
+            .expect("current executable path should resolve")
+            .file_name()
+            .expect("current executable should have a file name")
+            .to_string_lossy()
+            .to_lowercase();
+
+        assert_eq!(target.key, format!("application:{current_name}"));
+        assert_eq!(target.scope, "application");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_application_name_and_bundle_id_share_the_bundle_authorization() {
+        let by_name = target_resource("launch_app", &json!({"name": "Calculator"}))
+            .expect("macOS application name should resolve through system metadata");
+        let by_bundle_id =
+            target_resource("launch_app", &json!({"bundle_id": "com.apple.calculator"}))
+                .expect("macOS bundle identifier should resolve through system metadata");
+
+        assert_eq!(by_name.key, "application:calculator.app");
+        assert_eq!(by_name.key, by_bundle_id.key);
+        assert_eq!(by_name.display, by_bundle_id.display);
+        assert_eq!(by_name.scope, by_bundle_id.scope);
     }
 
     #[test]
@@ -564,17 +689,15 @@ impl ComputerControlService {
             .get("tools")
             .and_then(Value::as_array)
             .ok_or_else(|| {
-                service_error(
-                    "sdk_invalid_catalog",
-                    "CUA SDK 的工具目录没有 tools 数组",
-                )
+                service_error("sdk_invalid_catalog", "CUA SDK 的工具目录没有 tools 数组")
             })?;
 
         let mut tools = Vec::new();
         for spec in catalog_tools {
-            let name = spec.get("name").and_then(Value::as_str).ok_or_else(|| {
-                service_error("sdk_invalid_catalog", "CUA SDK 工具缺少 name")
-            })?;
+            let name = spec
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| service_error("sdk_invalid_catalog", "CUA SDK 工具缺少 name"))?;
             if spec.get("description").and_then(Value::as_str).is_none()
                 || spec.get("inputSchema").is_none()
             {

@@ -15,6 +15,7 @@ const ABI_MINOR: u16 = 1;
 pub const fn is_supported_platform() -> bool {
     cfg!(any(
         target_os = "windows",
+        target_os = "macos",
         all(target_os = "linux", target_arch = "x86_64")
     ))
 }
@@ -496,8 +497,11 @@ fn resolve_library_path(resource_dir: &Path) -> Option<PathBuf> {
     let (platform_dir, library_name) = ("windows-x86_64", "cua_driver_sdk.dll");
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     let (platform_dir, library_name) = ("linux-x86_64", "libcua_driver_sdk.so");
+    #[cfg(target_os = "macos")]
+    let (platform_dir, library_name) = ("macos-universal", "libcua_driver_sdk.dylib");
     #[cfg(not(any(
         target_os = "windows",
+        target_os = "macos",
         all(target_os = "linux", target_arch = "x86_64")
     )))]
     {
@@ -507,6 +511,7 @@ fn resolve_library_path(resource_dir: &Path) -> Option<PathBuf> {
 
     #[cfg(any(
         target_os = "windows",
+        target_os = "macos",
         all(target_os = "linux", target_arch = "x86_64")
     ))]
     {
@@ -574,12 +579,14 @@ impl std::error::Error for RuntimeError {}
 
 #[cfg(not(any(
     target_os = "windows",
+    target_os = "macos",
     all(target_os = "linux", target_arch = "x86_64")
 )))]
 struct Runtime;
 
 #[cfg(not(any(
     target_os = "windows",
+    target_os = "macos",
     all(target_os = "linux", target_arch = "x86_64")
 )))]
 impl Runtime {
@@ -608,6 +615,7 @@ impl Runtime {
 
 #[cfg(any(
     target_os = "windows",
+    target_os = "macos",
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 mod native_impl {
@@ -716,8 +724,8 @@ mod native_impl {
         fn FreeLibrary(module: *mut c_void) -> i32;
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    #[link(name = "dl")]
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_arch = "x86_64")))]
+    #[cfg_attr(all(target_os = "linux", target_arch = "x86_64"), link(name = "dl"))]
     unsafe extern "C" {
         fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
         fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
@@ -743,7 +751,7 @@ mod native_impl {
         }
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_arch = "x86_64")))]
     unsafe fn load_module(path: &Path) -> Result<*mut c_void, RuntimeError> {
         use std::{
             ffi::{CStr, CString},
@@ -780,7 +788,7 @@ mod native_impl {
         GetProcAddress(module, name)
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_arch = "x86_64")))]
     unsafe fn symbol_address(module: *mut c_void, name: *const c_char) -> *mut c_void {
         dlsym(module, name)
     }
@@ -790,7 +798,7 @@ mod native_impl {
         let _ = FreeLibrary(module);
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_arch = "x86_64")))]
     unsafe fn unload_module(module: *mut c_void) {
         let _ = dlclose(module);
     }
@@ -1127,9 +1135,55 @@ mod native_impl {
 
 #[cfg(any(
     target_os = "windows",
+    target_os = "macos",
     all(target_os = "linux", target_arch = "x86_64")
 ))]
 use native_impl::Runtime;
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::CuaDriverSdk;
+    use std::{env, path::PathBuf};
+
+    #[test]
+    fn official_macos_release_runtime_smoke() {
+        if env::var_os("PANES_CUA_SDK_SPIKE").is_none() {
+            return;
+        }
+        let resource_dir = env::var_os("PANES_CUA_SDK_RESOURCE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let sdk = CuaDriverSdk::new();
+        sdk.set_resource_dir(Some(resource_dir));
+        let info = sdk
+            .initialize()
+            .expect("macOS CUA runtime should initialize");
+        assert_eq!(info.abi_version, "1.1.0");
+        assert_eq!(info.driver_version.as_deref(), Some("0.19.3"));
+        assert!(info.embedded);
+        let tools = sdk.list_tools().expect("tool inventory should load");
+        assert!(tools
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tools| !tools.is_empty()));
+        assert!(sdk
+            .invoke("get_screen_size", &serde_json::json!({}))
+            .expect("screen size should be readable")
+            .is_object());
+        sdk.shutdown().expect("macOS CUA runtime should shut down");
+        assert!(!sdk.status().initialized);
+    }
+
+    #[test]
+    fn tool_calls_require_explicit_startup_initialization() {
+        let sdk = CuaDriverSdk::new();
+        let error = sdk
+            .invoke("get_screen_size", &serde_json::json!({}))
+            .expect_err("tool call must not initialize the CUA runtime on demand");
+        assert!(error.contains("CUA SDK runtime is not initialized"));
+        assert!(!sdk.status().initialized);
+    }
+}
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
