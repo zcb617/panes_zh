@@ -16,6 +16,7 @@ interface AttachmentChipProps {
   showSize?: boolean;
   removeLabel?: string;
   onRemove?: () => void;
+  onOpen?: () => void;
 }
 
 function getFileExtension(fileName: string): string {
@@ -79,6 +80,7 @@ export function AttachmentChip({
   showSize = false,
   removeLabel,
   onRemove,
+  onOpen,
 }: AttachmentChipProps) {
   const effectiveMimeType = getEffectiveMimeType(attachment);
   const [thumbnailSrc, setThumbnailSrc] = useState<string | null>(null);
@@ -116,10 +118,12 @@ export function AttachmentChip({
 
   const IconComponent = getAttachmentIcon(effectiveMimeType);
   const sizeBytes = attachment.sizeBytes ?? 0;
+  const canOpen = Boolean(onOpen && isImageAttachment(effectiveMimeType));
   const className = [
     "chat-attachment-chip",
     compact ? "chat-attachment-chip-compact" : "",
     thumbnailSrc && !thumbnailFailed ? "chat-attachment-chip-image" : "",
+    canOpen ? "chat-attachment-chip-openable" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -127,8 +131,20 @@ export function AttachmentChip({
   return (
     <div
       className={className}
+      role={canOpen ? "button" : undefined}
+      tabIndex={canOpen ? 0 : undefined}
+      onClick={canOpen ? onOpen : undefined}
+      onKeyDown={canOpen ? (event) => {
+        if (event.target !== event.currentTarget) {
+          return;
+        }
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen?.();
+        }
+      } : undefined}
       onContextMenu={(event) => {
-        openLocalFileContextMenu(event, attachment.filePath, null);
+        openLocalFileContextMenu(event, attachment.filePath, null, canOpen ? onOpen ?? null : null);
       }}
     >
       {thumbnailSrc && !thumbnailFailed ? (
@@ -150,7 +166,10 @@ export function AttachmentChip({
         <button
           type="button"
           className="chat-attachment-chip-remove"
-          onClick={onRemove}
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove();
+          }}
           title={removeLabel}
           aria-label={removeLabel}
         >

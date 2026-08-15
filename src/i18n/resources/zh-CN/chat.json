@@ -89,6 +89,26 @@
       "textFiles": "文本文件"
     }
   },
+  "imagePreview": {
+    "title": "用户附件",
+    "mark": "标记",
+    "ratio": "比例",
+    "zoom": "缩放",
+    "fit": "适应窗口",
+    "ratios": {
+      "original": "原图"
+    },
+    "empty": "单击待发送的图片附件以在此处预览",
+    "loading": "正在加载图片…",
+    "unavailable": "无法读取这张图片的预览",
+    "loadFailed": "图片预览加载失败",
+    "unsupported": "当前图片格式无法在预览区域显示",
+    "editMark": "编辑标记 {{number}}",
+    "commentPlaceholder": "说明这个位置…",
+    "commentLabel": "标记 {{number}} 的说明",
+    "saveMark": "保存标记",
+    "cancelMark": "取消标记"
+  },
   "permissionPicker": {
     "title": "权限",
     "policy": "策略",

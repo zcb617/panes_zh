@@ -16,13 +16,18 @@ interface MessageFocusTarget {
   requestedAt: number;
 }
 
+interface ImageAttachmentPreviewTarget {
+  workspaceId: string;
+  attachmentId: string;
+}
+
 interface FocusModeSnapshot {
   showSidebar: boolean;
   showGitPanel: boolean;
 }
 
 export type ActiveView = "chat" | "harnesses" | "extensions" | "scheduled" | "settings";
-export type ActiveRightTool = "git" | "browser";
+export type ActiveRightTool = "git" | "browser" | "attachments";
 export type SettingsSection =
   | "overview"
   | "appearance"
@@ -44,6 +49,7 @@ interface UiState {
   showGitPanel: boolean;
   gitPanelPinned: boolean;
   activeRightTool: ActiveRightTool;
+  imageAttachmentPreview: ImageAttachmentPreviewTarget | null;
   showExplorer: boolean;
   focusMode: boolean;
   focusModeSnapshot: FocusModeSnapshot | null;
@@ -64,6 +70,7 @@ interface UiState {
   toggleGitPanelPin: () => void;
   setGitPanelPinned: (pinned: boolean) => void;
   setActiveRightTool: (tool: ActiveRightTool) => void;
+  openImageAttachmentPreview: (workspaceId: string, attachmentId: string) => void;
   toggleExplorer: () => void;
   setExplorerOpen: (open: boolean) => void;
   setFocusMode: (enabled: boolean) => void;
@@ -126,6 +133,7 @@ export const useUiStore = create<UiState>((set) => ({
   showGitPanel: savedGitPanelVisible !== null ? savedGitPanelVisible === "true" : true,
   gitPanelPinned: savedGitPanelPinned !== null ? savedGitPanelPinned === "true" : true,
   activeRightTool: savedActiveRightTool ?? "git",
+  imageAttachmentPreview: null,
   showExplorer: savedExplorerOpen !== null ? savedExplorerOpen === "true" : true,
   focusMode: false,
   focusModeSnapshot: null,
@@ -207,13 +215,21 @@ export const useUiStore = create<UiState>((set) => ({
     set({ gitPanelPinned: pinned, showGitPanel: true });
   },
   setActiveRightTool: (tool) => {
-    try {
-      localStorage.setItem(ACTIVE_RIGHT_TOOL_KEY, tool);
-    } catch {
-      // The selection remains available for this session if storage is unavailable.
+    if (tool !== "attachments") {
+      try {
+        localStorage.setItem(ACTIVE_RIGHT_TOOL_KEY, tool);
+      } catch {
+        // The selection remains available for this session if storage is unavailable.
+      }
     }
     set({ activeRightTool: tool, showGitPanel: true });
   },
+  openImageAttachmentPreview: (workspaceId, attachmentId) =>
+    set({
+      activeRightTool: "attachments",
+      showGitPanel: true,
+      imageAttachmentPreview: { workspaceId, attachmentId },
+    }),
   toggleExplorer: () =>
     set((state) => {
       const next = !state.showExplorer;

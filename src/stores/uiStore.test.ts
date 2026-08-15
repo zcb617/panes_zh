@@ -41,6 +41,7 @@ describe("uiStore focus mode", () => {
       commandPaletteOpen: false,
       commandPaletteLaunch: COMMAND_PALETTE_DEFAULT_LAUNCH,
       messageFocusTarget: null,
+      imageAttachmentPreview: null,
     });
   });
 
@@ -167,6 +168,21 @@ describe("uiStore focus mode", () => {
     expect(useUiStore.getState()).toMatchObject({
       showGitPanel: true,
       gitPanelPinned: false,
+    });
+  });
+
+  it("opens a draft image in the visible user attachment tool", () => {
+    useUiStore.setState({ showGitPanel: false, activeRightTool: "git" });
+
+    useUiStore.getState().openImageAttachmentPreview("workspace-a", "image-1");
+
+    expect(useUiStore.getState()).toMatchObject({
+      showGitPanel: true,
+      activeRightTool: "attachments",
+      imageAttachmentPreview: {
+        workspaceId: "workspace-a",
+        attachmentId: "image-1",
+      },
     });
   });
 

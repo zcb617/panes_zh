@@ -108,6 +108,11 @@ import { resolveReasoningEffortForModel } from "./reasoningEffort";
 import { resolveUsageStatusKey } from "./usageStatus";
 import { formatWorkingDuration } from "./workingDuration";
 import { formatTextAnnotationsForSubmission } from "./textAnnotations";
+import {
+  formatImageAttachmentAnnotationsForSubmission,
+  hasImageAttachmentAnnotations,
+  stripImageAttachmentAnnotationsForSubmission,
+} from "./imageAttachmentAnnotations";
 import { ToolInputQuestionnaire } from "./ToolInputQuestionnaire";
 import {
   buildMcpElicitationApprovalResponse,
@@ -1992,6 +1997,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   );
   const setWorkspaceReferences = useChatComposerStore(
     (state) => state.setWorkspaceReferences,
+  );
+  const canSubmitComposer = Boolean(
+    input.trim() || textAnnotations.length > 0 || hasImageAttachmentAnnotations(attachments),
   );
   const sendShortcut = useChatComposerStore((state) => state.sendShortcut);
   const chatInputMode = useChatComposerStore((state) => state.chatInputMode);
@@ -4629,12 +4637,23 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     submittedPlanMode: boolean,
   ): Promise<boolean> {
     // if ((!input.trim() && textAnnotations.length === 0) || !activeWorkspaceId) return false;
-    if ((!submittedText.trim() && submittedTextAnnotations.length === 0) || !activeWorkspaceId) return false;
+    // if ((!submittedText.trim() && submittedTextAnnotations.length === 0) || !activeWorkspaceId) return false;
+    if (
+      (!submittedText.trim()
+        && submittedTextAnnotations.length === 0
+        && !hasImageAttachmentAnnotations(submittedAttachments))
+      || !activeWorkspaceId
+    ) return false;
     const preflightStartedAt = performance.now();
     // const text = formatTextAnnotationsForSubmission(input, textAnnotations);
-    const text = formatTextAnnotationsForSubmission(submittedText, submittedTextAnnotations);
+    // const text = formatTextAnnotationsForSubmission(submittedText, submittedTextAnnotations);
+    const text = formatImageAttachmentAnnotationsForSubmission(
+      formatTextAnnotationsForSubmission(submittedText, submittedTextAnnotations),
+      submittedAttachments,
+    );
     // const currentAttachments = [...attachments];
     const currentAttachments = [...submittedAttachments];
+    const transportAttachments = stripImageAttachmentAnnotationsForSubmission(currentAttachments);
     // const currentTextAnnotations = [...textAnnotations];
     const currentTextAnnotations = [...submittedTextAnnotations];
     // const currentReferences = [...references];
@@ -4653,7 +4672,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       const inputItems = await resolveCodexInputItems(text, "codex", currentReferences);
       const steered = await steer(text, {
         threadIdOverride: activeThreadId,
-        attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
+        // attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
+        attachments: transportAttachments.length > 0 ? transportAttachments : undefined,
         inputItems,
         planMode: submittedPlanMode,
       });
@@ -4831,7 +4851,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       engineId: submitEngineId,
       modelId: submitModelId,
       reasoningEffort: submitReasoningEffort,
-      attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
+      // attachments: currentAttachments.length > 0 ? currentAttachments : undefined,
+      attachments: transportAttachments.length > 0 ? transportAttachments : undefined,
       inputItems,
       planMode: submitPlanMode,
     });
@@ -4858,7 +4879,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
     if (
-      (!input.trim() && textAnnotations.length === 0) ||
+      !canSubmitComposer ||
       !activeWorkspaceId ||
       isSubmittingRef.current
     ) {
@@ -4873,6 +4894,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       submittedText,
       submittedTextAnnotations,
     );
+    const submittedMessageWithImageAnnotations =
+      formatImageAttachmentAnnotationsForSubmission(submittedMessage, submittedAttachments);
     if (sessionMessageSendMode === "flexible") {
       if (activeChatSessionId) {
         setThreadMessageSendMode(activeChatSessionId, sessionMessageSendMode);
@@ -4895,7 +4918,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       setPendingSubmission(
         createPendingSubmissionMessage(
           threadId ?? activeThread?.id ?? "pending",
-          submittedMessage,
+          submittedMessageWithImageAnnotations,
           submittedAttachments,
           submittedReferences,
           planMode,
@@ -4960,7 +4983,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     setPendingSubmission(
       createPendingSubmissionMessage(
         threadId ?? activeThread?.id ?? "pending",
-        submittedText,
+        formatImageAttachmentAnnotationsForSubmission(submittedText, submittedAttachments),
         submittedAttachments,
         submittedReferences,
         planMode,
@@ -5039,7 +5062,10 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         engineId: prompt.engineId,
         modelId: prompt.modelId,
         reasoningEffort: prompt.effort,
-        attachments: prompt.attachments.length > 0 ? prompt.attachments : undefined,
+        // attachments: prompt.attachments.length > 0 ? prompt.attachments : undefined,
+        attachments: prompt.attachments.length > 0
+          ? stripImageAttachmentAnnotationsForSubmission(prompt.attachments)
+          : undefined,
         inputItems: prompt.inputItems ?? undefined,
         planMode: promptPlanMode,
       });
@@ -5558,6 +5584,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
 
   const openFileInEditor = useFileStore((s) => s.openFile);
   const openUsageLimitsModal = useUiStore((s) => s.openUsageLimitsModal);
+  const openImageAttachmentPreview = useUiStore((s) => s.openImageAttachmentPreview);
 
   const diffFileRootPath = useMemo(
     () =>
@@ -6900,6 +6927,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                           showSize
                           removeLabel={t("attachments.remove")}
                           onRemove={() => removeAttachment(attachment.id)}
+                          onOpen={activeWorkspaceId
+                            ? () => openImageAttachmentPreview(activeWorkspaceId, attachment.id)
+                            : undefined}
                         />
                       );
                     })}
@@ -7408,8 +7438,10 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                 {(!streaming || canSteerActiveTurn || sessionMessageSendMode === "flexible") && !showSpecialInputComposer && (
                 <button
                   type="submit"
-                  className={`chat-send-btn${activeWorkspaceId && input.trim() ? " chat-send-btn--ready" : ""}`}
-                  disabled={!activeWorkspaceId || !input.trim() || isSubmitting}
+                  /* className used input text only before image annotations */
+                  className={`chat-send-btn${activeWorkspaceId && canSubmitComposer ? " chat-send-btn--ready" : ""}`}
+                  /* disabled used input text only before image annotations */
+                  disabled={!activeWorkspaceId || !canSubmitComposer || isSubmitting}
                   title={
                     isSubmitting
                       ? t("panel.sendingMessage")

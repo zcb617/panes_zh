@@ -1603,6 +1603,14 @@ export interface ChatTextAnnotation {
   comment: string;
 }
 
+export interface ImageAttachmentAnnotation {
+  id: string;
+  number: number;
+  xPercent: number;
+  yPercent: number;
+  comment: string;
+}
+
 export interface ChatAttachment {
   id: string;
   fileName: string;
@@ -1610,6 +1618,7 @@ export interface ChatAttachment {
   sizeBytes: number;
   mimeType?: string;
   browserAnnotation?: BrowserAnnotationMetadata;
+  imageAnnotations?: ImageAttachmentAnnotation[];
 }
 
 export interface AttachmentPreview {

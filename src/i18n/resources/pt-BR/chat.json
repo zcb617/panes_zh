@@ -89,6 +89,26 @@
       "textFiles": "Arquivos de texto"
     }
   },
+  "imagePreview": {
+    "title": "Anexos do usuário",
+    "mark": "Marcar",
+    "ratio": "Proporção",
+    "zoom": "Zoom",
+    "fit": "Ajustar",
+    "ratios": {
+      "original": "Original"
+    },
+    "empty": "Clique em uma imagem pendente para visualizá-la aqui",
+    "loading": "Carregando imagem…",
+    "unavailable": "Não foi possível ler a prévia desta imagem",
+    "loadFailed": "Falha ao carregar a prévia da imagem",
+    "unsupported": "Este formato de imagem não pode ser exibido na prévia",
+    "editMark": "Editar marcador {{number}}",
+    "commentPlaceholder": "Descreva esta posição…",
+    "commentLabel": "Descrição do marcador {{number}}",
+    "saveMark": "Salvar marcador",
+    "cancelMark": "Cancelar marcador"
+  },
   "permissionPicker": {
     "title": "Permissões",
     "policy": "Política",

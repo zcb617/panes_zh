@@ -19,6 +19,7 @@ interface LocalFileContextMenuState {
   rawTarget: string;
   path: string;
   sourceLeafId: string | null;
+  openInApp: (() => void) | null;
   triggerRect: {
     top: number;
     bottom: number;
@@ -107,6 +108,7 @@ export function useChatFileContextMenu() {
     event: ReactMouseEvent<HTMLElement>,
     rawTarget: string,
     sourceLeafId: string | null,
+    openInApp: (() => void) | null = null,
   ) => {
     if (classifyLinkTarget(rawTarget) !== "local") {
       return;
@@ -141,6 +143,7 @@ export function useChatFileContextMenu() {
       rawTarget,
       path,
       sourceLeafId,
+      openInApp,
       triggerRect,
       top: position.top,
       left: position.left,
@@ -177,8 +180,12 @@ export function useChatFileContextMenu() {
         type="button"
         className="git-action-menu-item chat-file-context-menu-item"
         onClick={() => {
-          const { rawTarget, sourceLeafId } = fileContextMenu;
+          const { rawTarget, sourceLeafId, openInApp } = fileContextMenu;
           closeFileContextMenu();
+          if (openInApp) {
+            openInApp();
+            return;
+          }
           void navigateLinkTarget(rawTarget, {
             shiftKey: useChatComposerStore.getState().linkOpenGesture === "shift-click",
             sourceLeafId,

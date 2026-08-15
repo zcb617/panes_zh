@@ -89,6 +89,26 @@
       "textFiles": "Text files"
     }
   },
+  "imagePreview": {
+    "title": "User attachments",
+    "mark": "Mark",
+    "ratio": "Ratio",
+    "zoom": "Zoom",
+    "fit": "Fit",
+    "ratios": {
+      "original": "Original"
+    },
+    "empty": "Click a pending image attachment to preview it here",
+    "loading": "Loading image…",
+    "unavailable": "This image preview could not be read",
+    "loadFailed": "Failed to load the image preview",
+    "unsupported": "This image format cannot be displayed in the preview",
+    "editMark": "Edit marker {{number}}",
+    "commentPlaceholder": "Describe this position…",
+    "commentLabel": "Description for marker {{number}}",
+    "saveMark": "Save marker",
+    "cancelMark": "Cancel marker"
+  },
   "permissionPicker": {
     "title": "Permissions",
     "policy": "Policy",

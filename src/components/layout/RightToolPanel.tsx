@@ -1,6 +1,7 @@
 import { useUiStore } from "../../stores/uiStore";
 import { BrowserPanel } from "../browser/BrowserPanel";
 import { GitPanel } from "../git/GitPanel";
+import { ImageAttachmentPreviewPanel } from "../chat/ImageAttachmentPreviewPanel";
 
 export function RightToolPanel() {
   const activeRightTool = useUiStore((state) => state.activeRightTool);
@@ -25,12 +26,22 @@ export function RightToolPanel() {
         >
           浏览器
         </button>
+        <button
+          type="button"
+          className={activeRightTool === "attachments" ? "right-tool-tab-active" : ""}
+          onClick={() => setActiveRightTool("attachments")}
+          aria-pressed={activeRightTool === "attachments"}
+        >
+          用户附件
+        </button>
       </nav>
       <div className="right-tool-content">
         {activeRightTool === "git" ? (
           <GitPanel />
-        ) : (
+        ) : activeRightTool === "browser" ? (
           <BrowserPanel />
+        ) : (
+          <ImageAttachmentPreviewPanel />
         )}
       </div>
     </section>
