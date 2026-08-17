@@ -2393,6 +2393,11 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       return null;
     }
   }, [customApprovalPolicyText]);
+  const activeThreadHasRemoteSession =
+    activeWorkspace?.locationKind === "ssh" && Boolean(activeThread?.engineThreadId);
+  const activeThreadRuntimeLocked =
+    activeWorkspace?.locationKind === "ssh" &&
+    Boolean(activeThread?.engineThreadId || (activeThread?.messageCount ?? 0) > 0);
   const activeThreadMatchesComposer = useMemo(() => {
     if (!activeThread || !activeWorkspaceId || !selectedModelId) {
       return false;
@@ -2404,6 +2409,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       activeThread.repoId === activeScopeRepoId;
     const engineMatch = activeThread.engineId === selectedEngineId;
     const modelMatch =
+      activeThreadHasRemoteSession ||
       selectedEngineId === "codex" ||
       activeThread.modelId === selectedModelId ||
       readThreadLastModelId(activeThread) === selectedModelId;
@@ -2412,6 +2418,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }, [
     activeRepo?.id,
     activeThread,
+    activeThreadHasRemoteSession,
     activeWorkspaceId,
     selectedEngineId,
     selectedModelId,
@@ -5074,23 +5081,53 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       ? activeThread.workspaceId === activeWorkspaceId &&
         activeThread.repoId === activeScopeRepoId
       : false;
-    const activeThreadModelMatch = activeThread
-      ? submitEngineId === "codex" ||
-        activeThread.modelId === submitModelId ||
-        readThreadLastModelId(activeThread) === submitModelId
-      : false;
+    /*
+     * 旧逻辑要求当前模型与会话创建时模型相同，才会复用会话：
+     * const activeThreadModelMatch = activeThread
+     *   ? activeThreadHasRemoteSession ||
+     *     submitEngineId === "codex" ||
+     *     activeThread.modelId === submitModelId ||
+     *     readThreadLastModelId(activeThread) === submitModelId
+     *   : false;
+     *
+     * 这会使手动新建的同一 CLI 会话在首次发送时因模型不同被误判为不可复用，
+     * 从而额外创建“工作区对话”。同一 CLI 支持切换具体模型，因此不再以模型
+     * 是否相同决定会话是否复用；CLI 是否相同仍由 activeThreadEngineMatch 限制。
+     */
     const activeThreadEngineMatch = activeThread
       ? activeThread.engineId === submitEngineId
       : false;
+    const activeThreadCanChangeEngine =
+      activeWorkspace?.locationKind === "ssh" &&
+      Boolean(activeThread) &&
+      activeThread?.engineThreadId === null &&
+      activeThread?.messageCount === 0;
 
     let targetThreadId =
       threadId &&
       activeThreadInScope &&
-      activeThreadEngineMatch &&
-      activeThreadModelMatch
+      (activeThreadEngineMatch || activeThreadCanChangeEngine)
         ? threadId
         : null;
     let createdThread = false;
+
+    if (targetThreadId && !activeThreadEngineMatch) {
+      try {
+        const reconfiguredThread = await ipc.reconfigureUnstartedThreadRuntime(
+          targetThreadId,
+          submitEngineId,
+          submitModelId,
+          submitReasoningEffort,
+          submitEngineId === "codex" && selectedServiceTier !== "inherit"
+            ? selectedServiceTier
+            : null,
+        );
+        applyThreadUpdateLocal(reconfiguredThread);
+      } catch (error) {
+        toast.error(String(error));
+        return false;
+      }
+    }
 
     if (!targetThreadId) {
       const createdThreadId = await createThread({
@@ -7658,13 +7695,23 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                     disabled={!activeWorkspaceId}
                   />
                   <ModelPicker
-                    engines={engines}
+                    engines={
+                      activeThreadRuntimeLocked
+                        ? engines.filter((engine) => engine.id === activeThread?.engineId)
+                        : engines
+                    }
                     health={health}
                     selectedEngineId={selectedEngineId}
                     selectedModelId={selectedModelId ?? selectedModel?.id ?? ""}
                     selectedEffort={selectedEffort}
                     selectedServiceTier={selectedServiceTier}
                     onEngineModelChange={(engineId, modelId) => {
+                      if (
+                        activeThreadRuntimeLocked &&
+                        engineId !== activeThread?.engineId
+                      ) {
+                        return;
+                      }
                       manuallyOverrodeThreadSelectionRef.current = true;
                       setHasExplicitComposerRuntime(true);
                       selectedEngineIdRef.current = engineId;

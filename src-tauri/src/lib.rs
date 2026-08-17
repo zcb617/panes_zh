@@ -479,6 +479,7 @@ pub fn run() {
             commands::threads::list_opencode_remote_sessions,
             commands::threads::attach_opencode_remote_session,
             commands::threads::create_thread,
+            commands::threads::reconfigure_unstarted_thread_runtime,
             commands::threads::rename_thread,
             commands::threads::confirm_workspace_thread,
             commands::threads::set_thread_reasoning_effort,

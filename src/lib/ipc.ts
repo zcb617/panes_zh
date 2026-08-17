@@ -365,6 +365,20 @@ export const ipc = {
       reasoningEffort: reasoningEffort ?? null,
       serviceTier: serviceTier ?? null,
     }),
+  reconfigureUnstartedThreadRuntime: (
+    threadId: string,
+    engineId: string,
+    modelId: string,
+    reasoningEffort?: string | null,
+    serviceTier?: string | null,
+  ) =>
+    invoke<Thread>("reconfigure_unstarted_thread_runtime", {
+      threadId,
+      engineId,
+      modelId,
+      reasoningEffort: reasoningEffort ?? null,
+      serviceTier: serviceTier ?? null,
+    }),
   renameThread: (threadId: string, title: string) =>
     invoke<Thread>("rename_thread", {
       threadId,

@@ -286,6 +286,74 @@ pub fn set_engine_thread_id(
     Ok(())
 }
 
+/// 重新配置尚未启动的会话运行时。
+///
+/// 仅允许未建立远端会话、没有消息计数且消息表中也没有记录的会话切换 CLI。
+/// `message_count` 是冗余统计值，不能作为唯一依据；消息表检查用于阻止统计尚未
+/// 刷新时覆盖已有对话历史。
+pub fn reconfigure_unstarted_thread_runtime(
+    db: &Database,
+    thread_id: &str,
+    engine_id: &str,
+    model_id: &str,
+    metadata: Option<&serde_json::Value>,
+) -> anyhow::Result<ThreadDto> {
+    let mut conn = db.connect()?;
+    let tx = conn
+        .transaction()
+        .context("failed to begin unstarted thread runtime reconfiguration transaction")?;
+    let metadata_json = metadata.map(serde_json::Value::to_string);
+    let updated_count = tx
+        .execute(
+            "UPDATE threads
+             SET engine_id = ?1,
+                 model_id = ?2,
+                 engine_metadata_json = ?3
+             WHERE id = ?4
+               AND engine_thread_id IS NULL
+               AND message_count = 0
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM messages
+                 WHERE messages.thread_id = threads.id
+               )",
+            params![engine_id, model_id, metadata_json, thread_id],
+        )
+        .context("failed to reconfigure unstarted thread runtime")?;
+
+    if updated_count == 0 {
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM threads WHERE id = ?1",
+                params![thread_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .context("failed to inspect thread before runtime reconfiguration")?
+            .is_some();
+        if exists {
+            anyhow::bail!("thread has already started and its CLI tool cannot be changed");
+        }
+        anyhow::bail!("thread not found: {thread_id}");
+    }
+
+    let updated = tx
+        .query_row(
+            "SELECT id, workspace_id, repo_id, engine_id, model_id, engine_thread_id,
+                    engine_metadata_json, COALESCE(title, ''), status, message_count,
+                    total_tokens, created_at, last_activity_at
+             FROM threads
+             WHERE id = ?1",
+            params![thread_id],
+            map_thread_row,
+        )
+        .context("failed to load reconfigured unstarted thread")?;
+    tx.commit()
+        .context("failed to commit unstarted thread runtime reconfiguration transaction")?;
+
+    Ok(updated)
+}
+
 pub fn delete_thread(db: &Database, thread_id: &str) -> anyhow::Result<()> {
     let conn = db.connect()?;
     let affected = conn
@@ -685,6 +753,74 @@ mod tests {
             Some(&json!({"version": "new"}))
         );
         assert_eq!(metadata.get("sshRemote"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn reconfigure_unstarted_thread_runtime_reuses_the_same_empty_thread() {
+        let db = test_db();
+        let thread = test_thread(&db, "New thread");
+        let metadata = json!({"opencodePermissionMode": "ask"});
+
+        let updated = reconfigure_unstarted_thread_runtime(
+            &db,
+            &thread.id,
+            "opencode",
+            "opencode-model",
+            Some(&metadata),
+        )
+        .unwrap();
+
+        assert_eq!(updated.id, thread.id);
+        assert_eq!(updated.title, "New thread");
+        assert_eq!(updated.engine_id, "opencode");
+        assert_eq!(updated.model_id, "opencode-model");
+        assert_eq!(updated.engine_metadata, Some(metadata));
+    }
+
+    #[test]
+    fn reconfigure_unstarted_thread_runtime_rejects_started_threads() {
+        let db = test_db();
+        let remote_thread = test_thread(&db, "Remote thread");
+        set_engine_thread_id(&db, &remote_thread.id, "remote-thread-1").unwrap();
+
+        let remote_error = reconfigure_unstarted_thread_runtime(
+            &db,
+            &remote_thread.id,
+            "opencode",
+            "opencode-model",
+            None,
+        )
+        .unwrap_err();
+        assert!(remote_error
+            .to_string()
+            .contains("thread has already started"));
+
+        let message_thread = test_thread(&db, "Message thread");
+        messages::insert_user_message(
+            &db,
+            &message_thread.id,
+            "Do not change this CLI",
+            None,
+            Some("codex"),
+            Some("gpt-5.3-codex"),
+            None,
+        )
+        .unwrap();
+
+        let stale_counter_thread = get_thread(&db, &message_thread.id).unwrap().unwrap();
+        assert_eq!(stale_counter_thread.message_count, 0);
+
+        let message_error = reconfigure_unstarted_thread_runtime(
+            &db,
+            &message_thread.id,
+            "opencode",
+            "opencode-model",
+            None,
+        )
+        .unwrap_err();
+        assert!(message_error
+            .to_string()
+            .contains("thread has already started"));
     }
 
     #[test]

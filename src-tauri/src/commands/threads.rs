@@ -1139,6 +1139,186 @@ async fn create_thread_inner(
     .await
 }
 
+/// 将尚未启动的会话改为用户首次发送时选择的 CLI 运行时。
+///
+/// 已建立远端会话或已经写入消息的会话不允许跨 CLI 修改，防止把没有兼容历史
+/// 上下文的 CLI 误当成原会话继续使用。
+#[tauri::command]
+pub async fn reconfigure_unstarted_thread_runtime(
+    state: State<'_, AppState>,
+    thread_id: String,
+    engine_id: String,
+    model_id: String,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+) -> Result<ThreadDto, String> {
+    let db = state.db.clone();
+    let (thread, target_workspace) = run_db(db.clone(), {
+        let thread_id = thread_id.clone();
+        move |db| {
+            let thread = db::threads::get_thread(db, &thread_id)?
+                .ok_or_else(|| anyhow::anyhow!("thread not found: {thread_id}"))?;
+            let workspace = db::workspaces::find_workspace_by_id(db, &thread.workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {}", thread.workspace_id))?;
+            Ok((thread, workspace))
+        }
+    })
+    .await?;
+
+    if thread.engine_thread_id.is_some() || thread.message_count != 0 {
+        return Err("thread has already started and its CLI tool cannot be changed".to_string());
+    }
+
+    let normalized_service_tier = if engine_id == "codex" {
+        normalize_thread_service_tier(service_tier)?
+    } else {
+        let candidate = service_tier
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if candidate.is_some() {
+            return Err("service tier is only supported for Codex threads".to_string());
+        }
+        None
+    };
+    let normalized_model_id = model_id.trim();
+    if normalized_model_id.is_empty() {
+        return Err("model id cannot be empty".to_string());
+    }
+    if target_workspace.location_kind == "ssh"
+        && !matches!(engine_id.as_str(), "codex" | "opencode" | "claude")
+    {
+        return Err(format!("SSH 远端项目当前阶段尚未接入 {engine_id} 正式对话"));
+    }
+    let validation_models = if target_workspace.location_kind == "ssh" {
+        Some(match engine_id.as_str() {
+            "codex" => {
+                let context = CliExecutionContext::from_workspace(&target_workspace)
+                    .map_err(err_to_string)?;
+                let codex = CliToolFactory::new(state.inner().clone())
+                    .create("codex")
+                    .expect("Codex CLI factory mapping must exist");
+                let cli: &dyn CliTool = codex.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .map_err(err_to_string)?
+            }
+            "opencode" => {
+                let context = CliExecutionContext::from_workspace(&target_workspace)
+                    .map_err(err_to_string)?;
+                let opencode = CliToolFactory::new(state.inner().clone())
+                    .create("opencode")
+                    .expect("OpenCode CLI factory mapping must exist");
+                let cli: &dyn CliTool = opencode.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .map_err(err_to_string)?
+            }
+            "claude" => {
+                let context = CliExecutionContext::from_workspace(&target_workspace)
+                    .map_err(err_to_string)?;
+                let claude = CliToolFactory::new(state.inner().clone())
+                    .create("claude")
+                    .expect("Claude CLI factory mapping must exist");
+                let cli: &dyn CliTool = claude.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .map_err(err_to_string)?
+            }
+            _ => unreachable!(),
+        })
+    } else if engine_id == "claude" {
+        let context =
+            CliExecutionContext::from_workspace(&target_workspace).map_err(err_to_string)?;
+        let claude = CliToolFactory::new(state.inner().clone())
+            .create("claude")
+            .expect("Claude CLI factory mapping must exist");
+        let cli: &dyn CliTool = claude.as_ref();
+        cli.models_for_validation(&context, normalized_model_id)
+            .await
+            .ok()
+    } else {
+        state
+            .engines
+            .models_for_validation(&engine_id, normalized_model_id)
+            .await
+            .ok()
+    };
+    let effective_model_id = validate_model_for_engine_from_catalog(
+        &engine_id,
+        normalized_model_id,
+        validation_models.as_deref(),
+    )?;
+    let normalized_reasoning_effort = reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let validated_reasoning_effort =
+        if let Some(requested_effort) = normalized_reasoning_effort.as_deref() {
+            Some(validate_reasoning_effort_from_catalog(
+                &effective_model_id,
+                requested_effort,
+                validation_models.as_deref(),
+            )?)
+        } else {
+            None
+        };
+
+    let default_autonomy_preset = tokio::task::spawn_blocking(|| {
+        AppConfig::load_or_create()
+            .map(|config| config.default_autonomy_preset().map(ToOwned::to_owned))
+            .map_err(err_to_string)
+    })
+    .await
+    .map_err(err_to_string)??;
+    let mut metadata = serde_json::Map::new();
+    if let Some(value) = validated_reasoning_effort {
+        metadata.insert("reasoningEffort".to_string(), json!(value));
+    }
+    if let Some(value) = normalized_service_tier {
+        metadata.insert("serviceTier".to_string(), json!(value));
+    }
+    if let Some(preset) = default_autonomy_preset.as_deref() {
+        let codex_external_sandbox = if engine_id == "codex" {
+            codex_external_sandbox_for_workspace(state.inner(), &target_workspace).await?
+        } else {
+            false
+        };
+        let policy = autonomy_policy_for_preset(&engine_id, preset, codex_external_sandbox)?;
+        metadata.insert(
+            approval_policy_metadata_key(&engine_id).to_string(),
+            policy.approval_policy,
+        );
+        if let Some(sandbox_mode) = policy.sandbox_mode {
+            metadata.insert("sandboxMode".to_string(), json!(sandbox_mode));
+        }
+        if let Some(allow_network) = policy.allow_network {
+            metadata.insert("sandboxAllowNetwork".to_string(), json!(allow_network));
+        }
+    }
+
+    if let Some(existing_metadata) = thread.engine_metadata.as_ref().and_then(Value::as_object) {
+        for key in ["manualTitle", "manualTitleUpdatedAt"] {
+            if let Some(value) = existing_metadata.get(key) {
+                metadata.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    let metadata = (!metadata.is_empty()).then_some(Value::Object(metadata));
+
+    run_db(db, move |db| {
+        db::threads::reconfigure_unstarted_thread_runtime(
+            db,
+            &thread_id,
+            &engine_id,
+            &effective_model_id,
+            metadata.as_ref(),
+        )
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn confirm_workspace_thread(
     state: State<'_, AppState>,
