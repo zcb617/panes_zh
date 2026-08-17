@@ -31,7 +31,7 @@ interface RemoteWorkspaceFormProps {
   setSelectedDirectory: (value: string | null) => void;
   loadingPath: boolean;
   error: string | null;
-  projectNameEdited: boolean;
+  // 历史属性（已停用）：projectNameEdited: boolean;
   loadPath: (path: string, parent?: boolean) => Promise<void>;
   onCreate: () => Promise<void>;
   canCreate: boolean;
@@ -55,7 +55,7 @@ function RemoteWorkspaceForm({
   setSelectedDirectory,
   loadingPath,
   error,
-  projectNameEdited,
+  // 历史解构（已停用）：projectNameEdited,
   loadPath,
   onCreate,
   canCreate,
@@ -230,7 +230,9 @@ function RemoteWorkspaceForm({
               onClick={() => {
                 setSelectedDirectory(directory.path);
                 setPathInput(directory.path);
-                if (!projectNameEdited) setProjectName(directory.name);
+                // 历史逻辑（已停用）：if (!projectNameEdited) setProjectName(directory.name);
+                // 选择目录后，目录末级名称覆盖此前手工输入的项目名称。
+                setProjectName(projectNameFromRemoteDirectory(directory.path));
               }}
               onDoubleClick={() => directory.enterable && void loadPath(directory.path)}
             >
@@ -265,6 +267,13 @@ function directoryName(path: string): string {
   const normalized = path.trim().replace(/\/+$/, "") || "/";
   if (normalized === "/") return "/";
   return normalized.slice(normalized.lastIndexOf("/") + 1) || "/";
+}
+
+/**
+ * 远端目录是项目名称的业务来源；目录发生变化时，必须覆盖此前手工输入的名称。
+ */
+export function projectNameFromRemoteDirectory(path: string): string {
+  return directoryName(path);
 }
 
 export function CreateWorkspaceModal({
@@ -433,7 +442,9 @@ export function CreateWorkspaceModal({
       setPathInput(resolved.path);
       setDirectories(items);
       setSelectedDirectory(resolved.path);
-      if (!nameEdited) setProjectName(resolved.name || directoryName(resolved.path));
+      // 历史逻辑（已停用）：if (!nameEdited) setProjectName(resolved.name || directoryName(resolved.path));
+      // 进入或切换目录后，目录末级名称覆盖此前手工输入的项目名称。
+      setProjectName(projectNameFromRemoteDirectory(resolved.path));
     } catch (loadError) {
       if (request === requestSeq.current) setError(String(loadError));
     } finally {
@@ -532,37 +543,39 @@ export function CreateWorkspaceModal({
             </footer>
           </>
         ) : (
-          <RemoteWorkspaceForm
-            connections={enabledConnections}
-            connectionId={connectionId}
-            setConnectionId={(value) => {
-              setNameEdited(false);
-              setConnectionId(value);
-              try {
-                window.localStorage.setItem(LAST_REMOTE_CONNECTION_KEY, value);
-              } catch {
-                // Ignore storage failures; the current selection remains usable.
-              }
-            }}
-            projectName={projectName}
-            setProjectName={(value) => { setNameEdited(true); setProjectName(value); }}
-            pathInput={pathInput}
-            setPathInput={setPathInput}
-            currentPath={currentPath}
-            homePath={homePath}
-            directories={directories}
-            selectedDirectory={selectedDirectory}
-            setSelectedDirectory={setSelectedDirectory}
-            loadingPath={loadingPath}
-            error={error}
-            projectNameEdited={nameEdited}
-            loadPath={loadPath}
-            onCreate={createRemoteProject}
-            canCreate={canCreateRemote}
-            creating={creating}
-            onOpenConnections={onOpenConnections}
-            t={t}
-          />
+          <>
+            {/* 历史传值（已停用）：projectNameEdited={nameEdited} */}
+            <RemoteWorkspaceForm
+              connections={enabledConnections}
+              connectionId={connectionId}
+              setConnectionId={(value) => {
+                setNameEdited(false);
+                setConnectionId(value);
+                try {
+                  window.localStorage.setItem(LAST_REMOTE_CONNECTION_KEY, value);
+                } catch {
+                  // Ignore storage failures; the current selection remains usable.
+                }
+              }}
+              projectName={projectName}
+              setProjectName={(value) => { setNameEdited(true); setProjectName(value); }}
+              pathInput={pathInput}
+              setPathInput={setPathInput}
+              currentPath={currentPath}
+              homePath={homePath}
+              directories={directories}
+              selectedDirectory={selectedDirectory}
+              setSelectedDirectory={setSelectedDirectory}
+              loadingPath={loadingPath}
+              error={error}
+              loadPath={loadPath}
+              onCreate={createRemoteProject}
+              canCreate={canCreateRemote}
+              creating={creating}
+              onOpenConnections={onOpenConnections}
+              t={t}
+            />
+          </>
         )}
       </section>
     </div>,
