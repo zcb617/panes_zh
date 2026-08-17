@@ -161,6 +161,7 @@ pub async fn resolve_ssh_directory(
 
 #[tauri::command]
 pub async fn create_ssh_workspace(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     connection_id: String,
     name: String,
@@ -182,7 +183,7 @@ pub async fn create_ssh_workspace(
         .next()
         .map(|directory| directory.path)
         .ok_or_else(|| "远端目录解析失败".to_string())?;
-    run_db(state.db.clone(), move |db| {
+    let workspace = run_db(state.db.clone(), move |db| {
         db::workspaces::create_ssh_workspace(
             db,
             &connection_id,
@@ -191,7 +192,28 @@ pub async fn create_ssh_workspace(
             normalize_scan_depth(scan_depth),
         )
     })
-    .await
+    .await?;
+
+    let sync_app = app.clone();
+    let sync_db = state.db.clone();
+    let workspace_id = workspace.id.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) =
+            crate::remote_project_session_refresh_service::refresh_ssh_remote_project_sessions(
+                &sync_app,
+                sync_db.into(),
+                &workspace_id,
+            )
+            .await
+        {
+            log::warn!(
+                "新增 SSH 远端项目后刷新会话失败: workspace_id={} error={error:#}",
+                workspace_id
+            );
+        }
+    });
+
+    Ok(workspace)
 }
 
 #[tauri::command]
