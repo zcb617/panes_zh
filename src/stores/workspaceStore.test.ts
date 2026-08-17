@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Repo, Workspace } from "../types";
 
 const mockIpc = vi.hoisted(() => ({
-  archiveWorkspace: vi.fn(),
+  // archiveWorkspace: vi.fn(),
+  deleteWorkspace: vi.fn(),
   getRepos: vi.fn(),
   listArchivedWorkspaces: vi.fn(),
   listWorkspaces: vi.fn(),
@@ -81,7 +82,8 @@ describe("workspaceStore.removeWorkspace", () => {
       error: undefined,
     });
 
-    mockIpc.archiveWorkspace.mockResolvedValue(undefined);
+    // mockIpc.archiveWorkspace.mockResolvedValue(undefined);
+    mockIpc.deleteWorkspace.mockResolvedValue(undefined);
     mockIpc.getRepos.mockResolvedValue([]);
     mockIpc.listArchivedWorkspaces.mockResolvedValue([]);
     mockIpc.listWorkspaces.mockResolvedValue([]);
@@ -93,7 +95,7 @@ describe("workspaceStore.removeWorkspace", () => {
     mockTerminalStoreState.prepareWorkspaceActivation.mockResolvedValue(undefined);
   });
 
-  it("prepares the replacement workspace when archiving the active workspace", async () => {
+  it("prepares the replacement workspace when removing the active workspace", async () => {
     const workspaceA = makeWorkspace("ws-a", "/workspace/a");
     const workspaceB = makeWorkspace("ws-b", "/workspace/b");
     const repoB = makeRepo("repo-b", "ws-b", "/workspace/b/repo");
@@ -112,11 +114,60 @@ describe("workspaceStore.removeWorkspace", () => {
 
     await useWorkspaceStore.getState().removeWorkspace(workspaceA.id);
 
-    expect(mockIpc.archiveWorkspace).toHaveBeenCalledWith(workspaceA.id);
+    // expect(mockIpc.archiveWorkspace).toHaveBeenCalledWith(workspaceA.id);
+    expect(mockIpc.deleteWorkspace).toHaveBeenCalledWith(workspaceA.id);
     expect(mockTerminalStoreState.prepareWorkspaceActivation).toHaveBeenCalledWith(workspaceB.id);
     expect(mockIpc.getRepos).toHaveBeenCalledWith(workspaceB.id);
     expect(useWorkspaceStore.getState().activeWorkspaceId).toBe(workspaceB.id);
     expect(useWorkspaceStore.getState().repos).toEqual([repoB]);
+    expect(useWorkspaceStore.getState().archivedWorkspaces).toEqual([]);
+  });
+
+  it("removes an SSH workspace through the same system deletion operation", async () => {
+    const remoteWorkspace: Workspace = {
+      ...makeWorkspace("ws-ssh", "/home/user/project"),
+      locationKind: "ssh",
+      sshConnectionId: "ssh-1",
+    };
+
+    useWorkspaceStore.setState({
+      workspaces: [remoteWorkspace],
+      archivedWorkspaces: [],
+      activeWorkspaceId: remoteWorkspace.id,
+      repos: [],
+      activeRepoId: null,
+      reposLoading: false,
+      loading: false,
+      error: undefined,
+    });
+
+    const removed = await useWorkspaceStore.getState().removeWorkspace(remoteWorkspace.id);
+
+    expect(removed).toBe(true);
+    expect(mockIpc.deleteWorkspace).toHaveBeenCalledWith(remoteWorkspace.id);
+    expect(useWorkspaceStore.getState().workspaces).toEqual([]);
+    expect(useWorkspaceStore.getState().activeWorkspaceId).toBeNull();
+  });
+
+  it("keeps the project selected when system deletion fails", async () => {
+    const workspace = makeWorkspace("ws-failed", "/workspace/failed");
+    mockIpc.deleteWorkspace.mockRejectedValueOnce(new Error("delete failed"));
+    useWorkspaceStore.setState({
+      workspaces: [workspace],
+      archivedWorkspaces: [],
+      activeWorkspaceId: workspace.id,
+      repos: [],
+      activeRepoId: null,
+      reposLoading: false,
+      loading: false,
+      error: undefined,
+    });
+
+    const removed = await useWorkspaceStore.getState().removeWorkspace(workspace.id);
+
+    expect(removed).toBe(false);
+    expect(useWorkspaceStore.getState().workspaces).toEqual([workspace]);
+    expect(useWorkspaceStore.getState().activeWorkspaceId).toBe(workspace.id);
   });
 });
 

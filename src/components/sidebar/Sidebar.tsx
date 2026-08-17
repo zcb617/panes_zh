@@ -279,7 +279,8 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
   async function executeArchiveWorkspace(project: Workspace) {
     setArchiveWorkspacePrompt(null);
     const wasActive = project.id === activeWorkspaceId;
-    await removeWorkspace(project.id);
+    const removed = await removeWorkspace(project.id);
+    if (!removed) return;
     if (wasActive) {
       setActiveThread(null);
       await bindChatThread(null);
@@ -832,15 +833,15 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
       {createPortal(
         <ConfirmDialog
           open={archiveWorkspacePrompt !== null}
-          title={t("app:sidebar.archiveWorkspaceTitle")}
+          title={t("app:sidebar.removeWorkspaceTitle")}
           message={
             archiveWorkspacePrompt
-              ? t("app:sidebar.archiveWorkspaceMessage", {
+              ? t("app:sidebar.removeWorkspaceMessage", {
                   name: getWorkspaceLabel(archiveWorkspacePrompt.workspace),
                 })
               : ""
           }
-          confirmLabel={t("app:sidebar.archive")}
+          confirmLabel={t("app:sidebar.remove")}
           onConfirm={() => {
             if (archiveWorkspacePrompt) void executeArchiveWorkspace(archiveWorkspacePrompt.workspace);
           }}

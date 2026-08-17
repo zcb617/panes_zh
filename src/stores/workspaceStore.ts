@@ -26,7 +26,7 @@ interface WorkspaceState {
     rootPath: string,
     scanDepth?: number,
   ) => Promise<Workspace | null>;
-  removeWorkspace: (workspaceId: string) => Promise<void>;
+  removeWorkspace: (workspaceId: string) => Promise<boolean>;
   restoreWorkspace: (workspaceId: string) => Promise<void>;
   loadRepos: (workspaceId: string) => Promise<void>;
   setActiveWorkspace: (workspaceId: string) => Promise<void>;
@@ -227,10 +227,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
   removeWorkspace: async (workspaceId) => {
     set({ loading: true, error: undefined });
+    let removedFromSystem = false;
     try {
-      await ipc.archiveWorkspace(workspaceId);
+      // 历史实现只归档项目；移除项目必须永久删除本地保存的工作区记录。
+      // await ipc.archiveWorkspace(workspaceId);
+      await ipc.deleteWorkspace(workspaceId);
+      removedFromSystem = true;
       const wasActiveWorkspace = get().activeWorkspaceId === workspaceId;
-      const removed = get().workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+      // const removed = get().workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
       const remaining = get().workspaces.filter((workspace) => workspace.id !== workspaceId);
       const nextActive =
         wasActiveWorkspace
@@ -239,15 +243,29 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
       set((state) => ({
         workspaces: remaining,
+        /*
         archivedWorkspaces: removed
           ? [
               removed,
               ...state.archivedWorkspaces.filter((workspace) => workspace.id !== workspaceId),
             ]
           : state.archivedWorkspaces,
+        */
+        archivedWorkspaces: state.archivedWorkspaces.filter((workspace) => workspace.id !== workspaceId),
         activeWorkspaceId: nextActive,
         loading: false,
       }));
+
+      const lastRepoByWorkspace = readLastRepoByWorkspace();
+      if (lastRepoByWorkspace[workspaceId]) {
+        delete lastRepoByWorkspace[workspaceId];
+        writeLastRepoByWorkspace(lastRepoByWorkspace);
+      }
+      if (nextActive) {
+        localStorage.setItem(LAST_WORKSPACE_KEY, nextActive);
+      } else {
+        localStorage.removeItem(LAST_WORKSPACE_KEY);
+      }
 
       if (nextActive) {
         const nextWorkspace = remaining.find((workspace) => workspace.id === nextActive);
@@ -258,8 +276,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       } else {
         set({ repos: [], activeRepoId: null, reposLoading: false });
       }
+      return true;
     } catch (error) {
       set({ loading: false, error: String(error) });
+      return removedFromSystem;
     }
   },
   restoreWorkspace: async (workspaceId) => {

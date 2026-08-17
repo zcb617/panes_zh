@@ -228,6 +228,7 @@
   "more": {
     "options": "工作区选项",
     "settings": "工作区设置",
-    "archive": "归档工作区"
+    "archive": "归档工作区",
+    "removeProject": "移除本项目"
   }
 }

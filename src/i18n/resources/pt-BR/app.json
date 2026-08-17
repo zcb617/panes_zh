@@ -88,6 +88,8 @@
     "themeFailed": "Falha ao atualizar o tema.",
     "archiveWorkspaceTitle": "Arquivar workspace",
     "archiveWorkspaceMessage": "Arquivar o workspace \"{{name}}\" e ocultar seus repositórios/threads/mensagens da sidebar? Você poderá reabrir esta pasta depois para restaurá-lo.",
+    "removeWorkspaceTitle": "Remover este projeto",
+    "removeWorkspaceMessage": "Remova o projeto \"{{name}}\" do Panes e exclua permanentemente suas configurações de repositório, conversas, mensagens e tarefas agendadas. Isso não exclui o diretório do projeto local ou remoto, nem a conexão SSH, e não pode ser desfeito.",
     "archiveThreadTitle": "Arquivar thread",
     "archiveThreadMessage": "Arquivar a thread \"{{name}}\"? Ela ficará oculta desta lista de projetos.",
     "codexRemoteThreadRemovedTitle": "Conversa do Codex alterada",
@@ -97,7 +99,8 @@
     "archiveThreadFailed": "Não foi possível arquivar a thread.",
     "codexThreadArchiveActiveWriter": "Falha ao arquivar a thread do Codex: ela está sendo usada pelo Codex App. Feche a thread correspondente no Codex App e tente novamente.",
     "codexRemoteThreadArchiveFailed": "Não foi possível arquivar a cópia local desta conversa.",
-    "archive": "Arquivar"
+    "archive": "Arquivar",
+    "remove": "Remover"
   },
   "commandPalette": {
     "placeholder": "Busque comandos, threads, workspaces ou arquivos...",

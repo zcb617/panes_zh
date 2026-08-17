@@ -88,6 +88,8 @@
     "themeFailed": "Failed to update theme.",
     "archiveWorkspaceTitle": "Archive workspace",
     "archiveWorkspaceMessage": "Archive workspace \"{{name}}\" and hide its repos/threads/messages from the sidebar? You can reopen this folder later to restore it.",
+    "removeWorkspaceTitle": "Remove this project",
+    "removeWorkspaceMessage": "Remove project \"{{name}}\" from Panes and permanently delete its saved repository settings, threads, messages, and scheduled tasks. This does not delete the local or remote project directory, nor its SSH connection, and cannot be undone.",
     "archiveThreadTitle": "Archive thread",
     "archiveThreadMessage": "Archive thread \"{{name}}\"? It will be hidden from this project list.",
     "codexRemoteThreadRemovedTitle": "Codex conversation changed",
@@ -97,7 +99,8 @@
     "archiveThreadFailed": "Failed to archive the thread.",
     "codexThreadArchiveActiveWriter": "Codex thread archiving failed: this thread is being used by Codex App. Close the corresponding thread in Codex App and try again.",
     "codexRemoteThreadArchiveFailed": "Failed to archive the local copy of this conversation.",
-    "archive": "Archive"
+    "archive": "Archive",
+    "remove": "Remove"
   },
   "commandPalette": {
     "placeholder": "Search commands, threads, workspaces, or files...",

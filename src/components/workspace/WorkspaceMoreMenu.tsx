@@ -2,9 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import {
-  Archive,
   MoreHorizontal,
   Settings2,
+  Trash2,
 } from "lucide-react";
 import type { Workspace } from "../../types";
 
@@ -110,8 +110,8 @@ export function WorkspaceMoreMenu({
               className="git-action-menu-item git-action-menu-item-danger"
               onClick={() => handleItem(onArchive)}
             >
-              <Archive size={13} />
-              {t("more.archive")}
+              <Trash2 size={13} />
+              {t("more.removeProject")}
             </button>
           </div>,
           document.body,

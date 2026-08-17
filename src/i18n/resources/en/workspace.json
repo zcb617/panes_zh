@@ -228,6 +228,7 @@
   "more": {
     "options": "Workspace options",
     "settings": "Workspace settings",
-    "archive": "Archive workspace"
+    "archive": "Archive workspace",
+    "removeProject": "Remove this project"
   }
 }
