@@ -1,4 +1,4 @@
-import { lstat, realpath } from "node:fs/promises";
+import { access, lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -62,6 +62,24 @@ async function inspectClaudeSdkPnpmLayout(repoRoot) {
     };
   }
 
+  const remoteLinuxSdkBinary = path.join(
+    sdkPackageDir,
+    "@anthropic-ai",
+    "claude-agent-sdk-linux-x64",
+    "claude",
+  );
+  try {
+    await access(remoteLinuxSdkBinary);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        valid: false,
+        reason: "Claude Agent SDK Linux x64 runtime is missing from node_modules.",
+      };
+    }
+    throw error;
+  }
+
   return {
     valid: true,
     sdkEntryPoint,
@@ -71,7 +89,7 @@ async function inspectClaudeSdkPnpmLayout(repoRoot) {
 
 function rebuildDependencies(repoRoot) {
   return new Promise((resolve, reject) => {
-    const child = spawn("pnpm", ["install", "--frozen-lockfile", "--force"], {
+    const child = spawn("pnpm", ["install", "--frozen-lockfile"], {
       cwd: repoRoot,
       stdio: "inherit",
       shell: process.platform === "win32",
