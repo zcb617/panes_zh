@@ -102,7 +102,7 @@ export function buildSlashCommandsFromExtensions(
 ): CliSlashCommand[] {
   const result: CliSlashCommand[] = [];
   for (const item of items) {
-    if (ctx.inputMode !== "classic" && item.kind !== "command") {
+    if (ctx.inputMode !== "classic") {
       continue;
     }
 
