@@ -1,3 +1,4 @@
+pub mod cli_service_lifecycle;
 pub mod cli_tunnel_registry;
 pub mod config;
 pub mod errors;

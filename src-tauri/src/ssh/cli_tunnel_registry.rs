@@ -126,6 +126,11 @@ enum RemoteCliServiceState {
 pub(crate) struct RemoteCliServiceLifecycle {
     service_state: RemoteCliServiceState,
     pub(crate) service_generation: u64,
+    /// 应用启动后对远端 CLI 服务持有的一次常驻占用。
+    ///
+    /// 它按“SSH 连接配置 + CLI”隔离，正常运行期间只有 `0` 或 `1`：
+    /// 启动阶段成功建立服务后为 `1`，只有显式停止、移除连接或退出 Panes 时才归零。
+    resident_use_count: u32,
     temporary_use_count: u32,
     persistent_session_uses: HashMap<String, u32>,
 }
@@ -135,6 +140,7 @@ impl Default for RemoteCliServiceLifecycle {
         Self {
             service_state: RemoteCliServiceState::Stopped,
             service_generation: 0,
+            resident_use_count: 0,
             temporary_use_count: 0,
             persistent_session_uses: HashMap::new(),
         }
@@ -143,7 +149,9 @@ impl Default for RemoteCliServiceLifecycle {
 
 impl RemoteCliServiceLifecycle {
     fn has_no_active_uses(&self) -> bool {
-        self.temporary_use_count == 0 && self.persistent_session_uses.is_empty()
+        self.resident_use_count == 0
+            && self.temporary_use_count == 0
+            && self.persistent_session_uses.is_empty()
     }
 
     fn release_persistent_session_use(&mut self, thread_id: &str) -> bool {
@@ -496,6 +504,7 @@ impl SshCliTunnelRegistry {
 
         if let Some(tunnel) = removed {
             let mut lifecycle = tunnel.service_lifecycle.lock().await;
+            lifecycle.resident_use_count = 0;
             lifecycle.temporary_use_count = 0;
             lifecycle.persistent_session_uses.clear();
             if let Err(error) =
@@ -524,7 +533,15 @@ impl SshCliTunnelRegistry {
             format!("未找到 SSH CLI 隧道: connection_id={connection_id} cli_id={cli_id}")
         })?;
         let mut lifecycle = tunnel.service_lifecycle.lock().await;
-        ensure_remote_cli_service_running(tunnel.as_ref(), &mut lifecycle).await?;
+        let acquired_resident_use = lifecycle.resident_use_count == 0;
+        lifecycle.resident_use_count = 1;
+        if let Err(error) = ensure_remote_cli_service_running(tunnel.as_ref(), &mut lifecycle).await
+        {
+            if acquired_resident_use {
+                lifecycle.resident_use_count = 0;
+            }
+            return Err(error);
+        }
         drop(lifecycle);
         Ok(tunnel)
     }
@@ -539,9 +556,10 @@ impl SshCliTunnelRegistry {
         };
         let mut lifecycle = tunnel.service_lifecycle.lock().await;
         anyhow::ensure!(
-            lifecycle.has_no_active_uses(),
+            lifecycle.temporary_use_count == 0 && lifecycle.persistent_session_uses.is_empty(),
             "SSH 远端 CLI 服务仍被占用，不能直接关闭: connection_id={connection_id} cli_id={cli_id}"
         );
+        lifecycle.resident_use_count = 0;
         close_remote_cli_service_if_unused(tunnel.as_ref(), &mut lifecycle).await
     }
 
@@ -629,6 +647,7 @@ impl SshCliTunnelRegistry {
         };
         for tunnel in tunnels {
             let mut lifecycle = tunnel.service_lifecycle.lock().await;
+            lifecycle.resident_use_count = 0;
             lifecycle.temporary_use_count = 0;
             lifecycle.persistent_session_uses.clear();
             if let Err(error) =
@@ -1091,6 +1110,7 @@ mod tests {
         let mut lifecycle = RemoteCliServiceLifecycle {
             service_state: RemoteCliServiceState::Running,
             service_generation: 1,
+            resident_use_count: 0,
             temporary_use_count: 1,
             persistent_session_uses: HashMap::from([(String::from("thread-a"), 1)]),
         };
@@ -1103,10 +1123,29 @@ mod tests {
     }
 
     #[test]
+    fn resident_use_must_be_released_before_service_can_close() {
+        let mut lifecycle = RemoteCliServiceLifecycle {
+            service_state: RemoteCliServiceState::Running,
+            service_generation: 1,
+            resident_use_count: 1,
+            temporary_use_count: 1,
+            persistent_session_uses: HashMap::from([(String::from("thread-a"), 1)]),
+        };
+
+        lifecycle.temporary_use_count -= 1;
+        assert!(lifecycle.release_persistent_session_use("thread-a"));
+        assert!(!lifecycle.has_no_active_uses());
+
+        lifecycle.resident_use_count -= 1;
+        assert!(lifecycle.has_no_active_uses());
+    }
+
+    #[test]
     fn persistent_session_use_is_reference_counted_by_thread_id() {
         let mut lifecycle = RemoteCliServiceLifecycle {
             service_state: RemoteCliServiceState::Running,
             service_generation: 1,
+            resident_use_count: 0,
             temporary_use_count: 0,
             persistent_session_uses: HashMap::from([(String::from("thread-a"), 2)]),
         };
