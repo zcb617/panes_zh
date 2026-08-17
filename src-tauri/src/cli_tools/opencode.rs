@@ -907,6 +907,9 @@ impl CliTool for OpenCodeCli {
                 ..Default::default()
             })
             .collect::<Vec<_>>();
+        // OpenCode 当前运行时目录只区分 Agent、Command 和 MCP；没有独立的 Skill 目录。
+        // 用户在 OpenCode 里看到的 /xxx 项来自 OpenCode 自己的 Command 目录，不能强行标成 skill。
+        // 因此这里保留 OpenCode 原生业务对象：Command -> kind=command，MCP -> kind=mcp。
         items.extend(
             runtime
                 .commands
@@ -1025,6 +1028,8 @@ impl CliTool for OpenCodeCli {
                     item.group = Some("agents".to_string());
                 }
                 "command" => {
+                    // OpenCode 的具体 Command 是可直接插入输入框的 /xxx 项，不是面板入口。
+                    // 是否打开面板由 panel 字段决定；这里没有 panel，所以点击后插入 insert_text。
                     item.insert_text = Some(format!("/{} ", item.name));
                     item.group = Some("commands".to_string());
                 }
@@ -1035,6 +1040,8 @@ impl CliTool for OpenCodeCli {
                 _ => {}
             }
         }
+        // 这里补的是 OpenCode 的一级面板入口。
+        // 它们同样是 kind=command，但带 panel 字段；前端会按 panel 打开对应面板。
         let panel_ids = ["agents", "commands", "sessions"];
         items.extend(panel_ids.into_iter().map(|id| ExtensionItemDto {
             id: id.to_string(),
