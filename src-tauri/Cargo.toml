@@ -72,3 +72,7 @@ custom-protocol = ["tauri/custom-protocol"]
 [profile.dev]
 # Keep local debug builds inspectable without letting `target/` explode as quickly.
 debug = 1
+
+[profile.release]
+# Reuse compiler state across repeated local release acceptance builds.
+incremental = true
