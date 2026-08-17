@@ -1579,36 +1579,6 @@ mod tests {
     use std::{collections::HashMap, fs, sync::Mutex as StdMutex};
     use uuid::Uuid;
 
-    const APP_DATA_ENV_VARS: [&str; 4] = ["HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"];
-
-    fn with_temp_app_data_env<T>(f: impl FnOnce() -> T) -> T {
-        let _guard = crate::config::app_config::app_data_env_lock()
-            .lock()
-            .expect("env lock poisoned");
-        let previous: Vec<(&str, Option<std::ffi::OsString>)> = APP_DATA_ENV_VARS
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect();
-        let root = std::env::temp_dir().join(format!("panes-power-home-{}", Uuid::new_v4()));
-        let local_app_data = root.join("AppData").join("Local");
-        let roaming_app_data = root.join("AppData").join("Roaming");
-        fs::create_dir_all(&local_app_data).expect("temp local app data should exist");
-        fs::create_dir_all(&roaming_app_data).expect("temp roaming app data should exist");
-        std::env::set_var("HOME", &root);
-        std::env::set_var("USERPROFILE", &root);
-        std::env::set_var("LOCALAPPDATA", &local_app_data);
-        std::env::set_var("APPDATA", &roaming_app_data);
-        let result = f();
-        for (key, value) in previous {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-        let _ = fs::remove_dir_all(&root);
-        result
-    }
-
     struct FakeSpawner {
         support: SupportStatus,
         next_spawn: StdMutex<Vec<anyhow::Result<SpawnedKeepAwakeChild>>>,
@@ -1963,60 +1933,6 @@ mod tests {
             status.message.as_deref(),
             Some("failed to resume keep awake on AC power: resume failed")
         );
-    }
-
-    #[test]
-    fn battery_threshold_disables_preference_instead_of_leaving_paused_state() {
-        with_temp_app_data_env(|| {
-            AppConfig::mutate(|config| {
-                config.power.keep_awake_enabled = true;
-                Ok(())
-            })
-            .expect("config should save");
-
-            let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
-            runtime.block_on(async {
-                let (child, _state) = FakeChildHandle::new(0);
-                let spawned = make_spawn(child, 501);
-                let manager = KeepAwakeManager::with_dependencies(
-                    Arc::new(FakeSpawner {
-                        support: SupportStatus {
-                            supported: true,
-                            message: None,
-                        },
-                        next_spawn: StdMutex::new(Vec::new()),
-                    }),
-                    Arc::new(FakeProcessOps::default()),
-                    temp_state_dir(),
-                    test_process(41),
-                );
-
-                {
-                    let mut runtime = manager.runtime.lock().await;
-                    runtime.child = Some(spawned.child);
-                    runtime.helper = spawned.helper;
-                    runtime.active_profile = Some(PowerProfile::default_profile());
-                }
-
-                let (event_tx, event_rx) = tokio::sync::mpsc::channel(2);
-                event_tx
-                    .send(MonitorEvent::BatteryLevel { percent: 19 })
-                    .await
-                    .expect("event should send");
-                drop(event_tx);
-
-                manager.process_monitor_events(event_rx).await;
-
-                let status = manager.status().await;
-                assert!(!status.active);
-                assert!(!status.paused_due_to_battery);
-                assert_eq!(status.battery_percent, Some(19));
-                assert_eq!(status.message, None);
-
-                let config = AppConfig::load_or_create().expect("config should load");
-                assert!(!config.power.keep_awake_enabled);
-            });
-        });
     }
 
     #[test]

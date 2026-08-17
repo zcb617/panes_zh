@@ -241,6 +241,109 @@ describe("claude-agent-sdk-server sidecar", () => {
     });
   });
 
+  it("keeps a Claude session handle alive until the remote component destroys it", async () => {
+    const harness = await spawnHarness({
+      persistentInput: true,
+      sessionId: "persistent-session",
+    });
+
+    harness.send({
+      id: "create-persistent-session",
+      method: "create_session_handle",
+      params: {
+        threadId: "thread-persistent",
+        handleId: "handle-persistent",
+        prompt: "first message",
+        cwd: repoRoot,
+      },
+    });
+
+    await expect(
+      harness.waitFor(
+        (event) =>
+          event.id === "create-persistent-session" &&
+          event.type === "session_handle_created",
+      ),
+    ).resolves.toMatchObject({
+      threadId: "thread-persistent",
+      handleId: "handle-persistent",
+      reused: false,
+    });
+    await harness.waitFor(
+      (event) =>
+        event.id === "create-persistent-session" && event.type === "turn_completed",
+    );
+
+    harness.send({
+      id: "reuse-persistent-session",
+      method: "create_session_handle",
+      params: {
+        threadId: "thread-persistent",
+        handleId: "handle-must-not-replace-existing",
+        prompt: "unused message",
+        cwd: repoRoot,
+      },
+    });
+    await expect(
+      harness.waitFor(
+        (event) =>
+          event.id === "reuse-persistent-session" &&
+          event.type === "session_handle_created",
+      ),
+    ).resolves.toMatchObject({
+      threadId: "thread-persistent",
+      handleId: "handle-persistent",
+      reused: true,
+    });
+
+    harness.send({
+      id: "send-persistent-session-message",
+      method: "send_session_message",
+      params: {
+        threadId: "thread-persistent",
+        prompt: "second message",
+        cwd: repoRoot,
+      },
+    });
+    await expect(
+      harness.waitFor(
+        (event) =>
+          event.id === "send-persistent-session-message" &&
+          event.type === "session_message_accepted",
+      ),
+    ).resolves.toMatchObject({
+      threadId: "thread-persistent",
+      handleId: "handle-persistent",
+      accepted: true,
+    });
+    await expect(
+      harness.waitFor(
+        (event) =>
+          event.id === "create-persistent-session" &&
+          event.type === "text_delta" &&
+          event.content === "second message",
+      ),
+    ).resolves.toMatchObject({ content: "second message" });
+
+    harness.send({
+      id: "destroy-persistent-session",
+      method: "destroy_session_handle",
+      params: { threadId: "thread-persistent" },
+    });
+
+    await expect(
+      harness.waitFor(
+        (event) =>
+          event.id === "destroy-persistent-session" &&
+          event.type === "session_handle_destroyed",
+      ),
+    ).resolves.toMatchObject({
+      threadId: "thread-persistent",
+      handleId: "handle-persistent",
+      success: true,
+    });
+  });
+
   it("denies Write in read-only mode even when writableRoots are present", async () => {
     const harness = await spawnHarness({
       steps: [

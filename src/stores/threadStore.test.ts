@@ -164,6 +164,19 @@ describe("threadStore remote Codex discovery", () => {
     expect(useThreadStore.getState().threads).toEqual([makeThread("local")]);
   });
 
+  it("keeps the explicit new-conversation selection during a workspace refresh", async () => {
+    mockIpc.listCodexRemoteThreads.mockResolvedValueOnce({
+      threads: [],
+      nextCursor: null,
+    });
+    useThreadStore.setState({ activeThreadId: null });
+
+    await useThreadStore.getState().refreshThreads("workspace-1");
+
+    expect(useThreadStore.getState().threads).toEqual([makeThread("local")]);
+    expect(useThreadStore.getState().activeThreadId).toBeNull();
+  });
+
   it("keeps local threads visible when remote Codex discovery fails", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     mockIpc.listCodexRemoteThreads.mockRejectedValueOnce(new Error("Codex unavailable"));

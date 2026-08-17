@@ -77,6 +77,10 @@ import { useGitStore } from "../../stores/gitStore";
 import { useTerminalStore, type LayoutMode } from "../../stores/terminalStore";
 import { toast } from "../../stores/toastStore";
 import { ipc } from "../../lib/ipc";
+// 旧的斜杠菜单适配器已由统一的 buildSlashCommandsFromExtensions 替代。
+// import { resolveCliSlashMenuAdapter } from "../../cli-tools/registry";
+import { buildSlashCommandsFromExtensions } from "../../cli-tools/build-slash-commands";
+import type { CliSlashCommand } from "../../cli-tools/contracts/slash-command";
 import {
   autonomyPresetExecutionPolicyRequest,
   autonomyPresetPatch,
@@ -130,6 +134,7 @@ import {
   requiresCustomApprovalPayload,
 } from "./toolInputApproval";
 import { ModelPicker } from "./ModelPicker";
+import { RuntimeTargetPicker } from "./RuntimeTargetPicker";
 import { AttachmentChip } from "./AttachmentChip";
 import {
   type CodexConfigPatch,
@@ -139,7 +144,7 @@ import {
 import { PermissionPicker } from "./PermissionPicker";
 import { OpenCodeAgentPicker } from "./OpenCodeAgentPicker";
 // CodexReviewPicker and CodexThreadPicker replaced by slash commands (ChatSlashMenu + ChatCommandPanel)
-import { ChatSlashMenu, type SlashCommand } from "./ChatSlashMenu";
+import { ChatSlashMenu } from "./ChatSlashMenu";
 import { ChatCommandPanel, type ActiveSlashCommand } from "./ChatCommandPanel";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { Dropdown } from "../shared/Dropdown";
@@ -155,10 +160,12 @@ import type {
   ChatTextAnnotation,
   CodexApprovalsReviewer,
   CodexApp,
+  CodexPlugin,
   CodexSkill,
   ContentBlock,
   EngineHealth,
   EngineModel,
+  ExtensionItem,
   ExtensionProviderId,
   Message,
   OpenCodeRemoteSession,
@@ -175,11 +182,12 @@ const EMPTY_CHAT_INPUT_REFERENCES: ChatInputReference[] = [];
 const EMPTY_CHAT_TEXT_ANNOTATIONS: ChatTextAnnotation[] = [];
 const EMPTY_PENDING_FLEXIBLE_MESSAGES: PendingFlexibleMessage[] = [];
 
-type ClassicSlashCommand = SlashCommand & {
-  reference?: ChatInputReference;
-  panel?: ActiveSlashCommand;
-  insertText?: string;
-};
+// 旧的经典输入菜单项目结构保留在此处作为迁移记录；现在由 CLI 菜单契约统一描述选择动作。
+// type ClassicSlashCommand = SlashCommand & {
+//   reference?: ChatInputReference;
+//   panel?: ActiveSlashCommand;
+//   insertText?: string;
+// };
 
 interface TextAnnotationPopover {
   selectedText: string;
@@ -649,27 +657,31 @@ function scheduleIdleTask(callback: () => void): () => void {
   return () => window.clearTimeout(timeoutId);
 }
 
-function prewarmEngineTransport(engineId: string): Promise<void> {
+function prewarmEngineTransport(
+  engineId: string,
+  workspaceId: string,
+): Promise<void> {
+  const targetEngineKey = `${workspaceId}:${engineId}`;
   const now = Date.now();
-  const lastAttemptAt = lastPrewarmAttemptAtByEngine.get(engineId) ?? 0;
+  const lastAttemptAt = lastPrewarmAttemptAtByEngine.get(targetEngineKey) ?? 0;
   if (now - lastAttemptAt < ENGINE_PREWARM_THROTTLE_MS) {
     return Promise.resolve();
   }
 
-  const existingTask = inflightPrewarmByEngine.get(engineId);
+  const existingTask = inflightPrewarmByEngine.get(targetEngineKey);
   if (existingTask) {
     return existingTask;
   }
 
-  lastPrewarmAttemptAtByEngine.set(engineId, now);
-  const task = ipc.prewarmEngine(engineId)
+  lastPrewarmAttemptAtByEngine.set(targetEngineKey, now);
+  const task = ipc.prewarmEngine(engineId, workspaceId)
     .catch(() => {
       // Ignore prewarm failures; engine health/setup surfaces the actionable state.
     })
     .finally(() => {
-      inflightPrewarmByEngine.delete(engineId);
+      inflightPrewarmByEngine.delete(targetEngineKey);
     });
-  inflightPrewarmByEngine.set(engineId, task);
+  inflightPrewarmByEngine.set(targetEngineKey, task);
   return task;
 }
 
@@ -1266,6 +1278,7 @@ interface MessageRowProps {
   isHighlighted: boolean;
   assistantLabel: string;
   assistantEngineId: string;
+  preparingLabel?: string;
   onApproval: (approvalId: string, response: ApprovalResponse) => void;
   onLoadActionOutput: (messageId: string, actionId: string) => Promise<void>;
   onEditResend?: (text: string) => void;
@@ -1366,6 +1379,7 @@ function MessageRowView({
   isHighlighted,
   assistantLabel,
   assistantEngineId,
+  preparingLabel,
   onApproval,
   onLoadActionOutput,
   onEditResend,
@@ -1564,7 +1578,7 @@ function MessageRowView({
                 const ThinkIcon = thinkingVariant.icon;
                 return <ThinkIcon size={12} className="thinking-icon-active" style={{ color: "var(--info)" }} />;
               })()}
-              <span>{t(thinkingVariant.key)}</span>
+              <span>{preparingLabel ?? t(thinkingVariant.key)}</span>
               <span className="chat-streaming-dots">
                 <span />
                 <span />
@@ -1586,6 +1600,7 @@ const MessageRow = memo(
     prev.isHighlighted === next.isHighlighted &&
     prev.assistantLabel === next.assistantLabel &&
     prev.assistantEngineId === next.assistantEngineId &&
+    prev.preparingLabel === next.preparingLabel &&
     prev.onApproval === next.onApproval &&
     prev.onLoadActionOutput === next.onLoadActionOutput &&
     prev.onEditResend === next.onEditResend &&
@@ -1824,14 +1839,22 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const selectedModelIdRef = useRef<string | null>(selectedModelId);
   const selectedEffortRef = useRef(selectedEffort);
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
+  const [codexPlugins, setCodexPlugins] = useState<CodexPlugin[]>([]);
   const [codexApps, setCodexApps] = useState<CodexApp[]>([]);
   const [codexReferenceCatalogState, setCodexReferenceCatalogState] =
     useState<CodexReferenceCatalogState>({
       skillsLoaded: false,
       appsLoaded: false,
     });
+  const [codexReferenceCatalogLoading, setCodexReferenceCatalogLoading] = useState(false);
+  const [codexReferenceCatalogError, setCodexReferenceCatalogError] =
+    useState<string | null>(null);
   const [openCodeCatalog, setOpenCodeCatalog] = useState<OpenCodeRuntimeCatalog | null>(null);
   const [openCodeCatalogLoaded, setOpenCodeCatalogLoaded] = useState(false);
+  const [openCodeCatalogLoading, setOpenCodeCatalogLoading] = useState(false);
+  const [openCodeCatalogError, setOpenCodeCatalogError] = useState<string | null>(null);
+  const openCodeCatalogRetriedAfterHealthRef = useRef<string | null>(null);
+  const [cliExtensionItems, setCliExtensionItems] = useState<ExtensionItem[]>([]);
   const [selectedOpenCodeAgent, setSelectedOpenCodeAgent] = useState("build");
   const selectedOpenCodeAgentRef = useRef(selectedOpenCodeAgent);
   const [selectedPersonality, setSelectedPersonality] = useState<CodexPersonalityValue>("inherit");
@@ -1855,6 +1878,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     respondApproval,
     hydrateActionOutput,
     streaming,
+    preparingEngineId,
+    preparingAttachments,
     turnStartedAt,
     usageLimits,
     usageLimitsLoading,
@@ -1874,6 +1899,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       respondApproval: state.respondApproval,
       hydrateActionOutput: state.hydrateActionOutput,
       streaming: state.streaming,
+      preparingEngineId: state.preparingEngineId,
+      preparingAttachments: state.preparingAttachments,
       turnStartedAt: state.turnStartedAt,
       usageLimits: state.usageLimits,
       usageLimitsLoading: state.usageLimitsLoading,
@@ -1892,7 +1919,11 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const useTitlebarSafeInset = !embedded && isMac && focusMode && !showSidebar;
   const engines = useEngineStore((s) => s.engines);
   const health = useEngineStore((s) => s.health);
+  const enginesLoading = useEngineStore((s) => s.loading);
+  const engineLoadError = useEngineStore((s) => s.error);
+  const loadEngines = useEngineStore((s) => s.load);
   const ensureEngineHealth = useEngineStore((s) => s.ensureHealth);
+  const engineWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const onboardingOpen = useOnboardingStore((s) => s.open);
   const onboardingSelectedChatEngines = useOnboardingStore((s) => s.selectedChatEngines);
   // The health warning is only a heuristic; the backend answer is what
@@ -1903,7 +1934,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     const heuristic = codexUsesExternalSandbox(health);
     setCodexExternalSandboxActive((prev) => prev || heuristic);
     void ipc
-      .codexUsesExternalSandbox()
+      .codexUsesExternalSandbox(engineWorkspaceId)
       .then((active) => {
         if (!disposed) {
           setCodexExternalSandboxActive(active);
@@ -1913,7 +1944,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     return () => {
       disposed = true;
     };
-  }, [health]);
+  }, [engineWorkspaceId, health]);
   const codexProtocolDiagnostics = health.codex?.protocolDiagnostics;
   const preferredOnboardingChatSelection = useMemo(
     () => resolvePreferredOnboardingChatSelection(onboardingSelectedChatEngines, engines),
@@ -1968,7 +1999,12 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       renameThread: state.renameThread,
     })),
   );
-  const activeChatSessionId = threadId ?? activeThread?.id ?? null;
+  const activeChatSessionId = activeThread?.id ?? threadId ?? null;
+  const flexibleMessageSessionKey = activeChatSessionId
+    ? `thread:${activeChatSessionId}`
+    : activeWorkspaceId
+      ? `new:${activeWorkspaceId}`
+      : null;
   const gitStatus = useGitStore((s) => s.status);
   const input = useChatComposerStore((state) =>
     activeWorkspaceId ? state.draftByWorkspace[activeWorkspaceId] ?? "" : "",
@@ -2015,8 +2051,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     return state.messageSendMode;
   });
   const pendingFlexibleMessages = useChatComposerStore((state) =>
-    activeWorkspaceId
-      ? state.pendingFlexibleMessagesByWorkspace[activeWorkspaceId] ?? EMPTY_PENDING_FLEXIBLE_MESSAGES
+    flexibleMessageSessionKey
+      ? state.pendingFlexibleMessagesBySession[flexibleMessageSessionKey] ??
+        EMPTY_PENDING_FLEXIBLE_MESSAGES
       : EMPTY_PENDING_FLEXIBLE_MESSAGES,
   );
   const addPendingFlexibleMessage = useChatComposerStore(
@@ -2117,11 +2154,11 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   );
   const withdrawFlexibleMessage = useCallback(
     (message: PendingFlexibleMessage) => {
-      if (!activeWorkspaceId) {
+      if (!activeWorkspaceId || !flexibleMessageSessionKey) {
         return;
       }
 
-      removePendingFlexibleMessage(activeWorkspaceId, message.id);
+      removePendingFlexibleMessage(flexibleMessageSessionKey, message.id);
       setInput(message.text);
       setAttachments(message.attachments);
       setTextAnnotations([]);
@@ -2130,6 +2167,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     },
     [
       activeWorkspaceId,
+      flexibleMessageSessionKey,
       removePendingFlexibleMessage,
       setAttachments,
       setInput,
@@ -2153,6 +2191,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const manuallyOverrodeThreadSelectionRef = useRef(false);
   const manualThreadBindTargetRef = useRef<string | null>(null);
   const lastSyncedThreadIdRef = useRef<string | null>(null);
+  const unavailableSavedModelNoticeRef = useRef<string | null>(null);
   const highlightTimeoutRef = useRef<number | null>(null);
   const prependLoadInFlightRef = useRef(false);
   const threadActivatedAtRef = useRef(0);
@@ -2246,7 +2285,10 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     () => availableModels.filter((m) => !m.hidden),
     [availableModels],
   );
-  const codexReferenceRoot = activeRepo?.path ?? activeWorkspace?.rootPath ?? null;
+  const codexReferenceRoot =
+    activeRepo?.workspaceId === activeWorkspaceId
+      ? activeRepo.path
+      : activeWorkspace?.rootPath ?? null;
   const openCodeRuntimeRoot = codexReferenceRoot;
   const extensionProviderId: ExtensionProviderId =
     selectedEngineId === "claude"
@@ -2430,6 +2472,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       ),
     [openCodeCatalog?.agents],
   );
+  /* 旧的 OpenCode 菜单在 ChatPanel 集中创建，迁移后由 opencode/slash-menu.ts 独立负责。
   const openCodeSlashCommands = useMemo<SlashCommand[]>(
     () =>
       selectedEngineId === "opencode"
@@ -2447,44 +2490,154 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         : [],
     [openCodeCatalog?.commands, selectedEngineId, t],
   );
+  */
 
   const loadCodexReferenceCatalogs = useCallback(async (): Promise<{
     skills: CodexSkill[];
+    plugins: CodexPlugin[];
     apps: CodexApp[];
     skillsLoaded: boolean;
+    pluginsLoaded: boolean;
     appsLoaded: boolean;
   }> => {
     if (!codexReferenceRoot) {
       return {
         skills: [],
+        plugins: [],
         apps: [],
         skillsLoaded: false,
+        pluginsLoaded: false,
         appsLoaded: false,
       };
     }
 
-    const [skillsResult, appsResult] = await Promise.allSettled([
-      ipc.listCodexSkills(codexReferenceRoot),
-      ipc.listCodexApps(),
+    // Apps/连接器不属于 Panes 管理的 Skill、Plugin、MCP 能力范围。
+    // const [skillsResult, appsResult] = await Promise.allSettled([
+    //   ipc.listCodexSkills(codexReferenceRoot, activeWorkspaceId),
+    //   ipc.listCodexApps(activeWorkspaceId),
+    // ]);
+    const [skillsResult, pluginsResult] = await Promise.allSettled([
+      ipc.listCodexSkills(codexReferenceRoot, activeWorkspaceId),
+      ipc.listCodexPlugins(codexReferenceRoot, activeWorkspaceId),
     ]);
     const skillsLoaded = skillsResult.status === "fulfilled";
-    const appsLoaded = appsResult.status === "fulfilled";
+    const pluginsLoaded = pluginsResult.status === "fulfilled";
+    // const appsLoaded = appsResult.status === "fulfilled";
+    const appsLoaded = true;
     const skills =
       skillsResult.status === "fulfilled"
         ? skillsResult.value.filter((skill) => skill.enabled)
         : [];
-    const apps =
-      appsResult.status === "fulfilled"
-        ? appsResult.value.filter((app) => app.isEnabled && app.isAccessible)
-        : [];
+    const plugins =
+      pluginsResult.status === "fulfilled" ? pluginsResult.value : [];
+    // const apps =
+    //   appsResult.status === "fulfilled"
+    //     ? appsResult.value.filter((app) => app.isEnabled && app.isAccessible)
+    //     : [];
+    const apps: CodexApp[] = [];
 
     return {
       skills,
+      plugins,
       apps,
       skillsLoaded,
+      pluginsLoaded,
       appsLoaded,
     };
-  }, [codexReferenceRoot]);
+  }, [activeWorkspaceId, codexReferenceRoot]);
+
+  const refreshCodexReferenceCatalogs = useCallback(async (): Promise<void> => {
+    const requestWorkspaceId = activeWorkspaceId;
+    setCodexReferenceCatalogLoading(true);
+    setCodexReferenceCatalogError(null);
+    const { skills, plugins, apps, skillsLoaded, pluginsLoaded, appsLoaded } =
+      await loadCodexReferenceCatalogs();
+    if (useWorkspaceStore.getState().activeWorkspaceId !== requestWorkspaceId) {
+      return;
+    }
+    if (skillsLoaded) {
+      setCodexSkills(skills);
+    }
+    if (pluginsLoaded) {
+      setCodexPlugins(plugins);
+    }
+    if (appsLoaded) {
+      setCodexApps(apps);
+    }
+    setCodexReferenceCatalogState({ skillsLoaded, appsLoaded });
+    // Apps/连接器的加载状态不再参与 Panes 运行时能力判断。
+    // if (!skillsLoaded || !appsLoaded) {
+    if (!skillsLoaded || !pluginsLoaded) {
+      setCodexReferenceCatalogError(
+        t(
+          skillsLoaded || pluginsLoaded
+            ? "runtimeTarget.capabilitiesPartial"
+            : "runtimeTarget.capabilitiesReadFailed",
+        ),
+      );
+    }
+    setCodexReferenceCatalogLoading(false);
+  }, [activeWorkspaceId, loadCodexReferenceCatalogs, t]);
+
+  const loadOpenCodeRuntimeCatalog = useCallback(async (): Promise<void> => {
+    if (selectedEngineId !== "opencode" || !activeWorkspaceId || !openCodeRuntimeRoot) {
+      setOpenCodeCatalog(null);
+      setOpenCodeCatalogLoaded(false);
+      setOpenCodeCatalogLoading(false);
+      setOpenCodeCatalogError(null);
+      return;
+    }
+
+    const requestWorkspaceId = activeWorkspaceId;
+    setOpenCodeCatalog(null);
+    setOpenCodeCatalogLoaded(false);
+    setOpenCodeCatalogLoading(true);
+    setOpenCodeCatalogError(null);
+    try {
+      const catalog = await ipc.getOpenCodeRuntimeCatalog(
+        openCodeRuntimeRoot,
+        requestWorkspaceId,
+      );
+      if (useWorkspaceStore.getState().activeWorkspaceId !== requestWorkspaceId) {
+        return;
+      }
+      setOpenCodeCatalog(catalog);
+      setOpenCodeCatalogLoaded(true);
+    } catch (error) {
+      if (useWorkspaceStore.getState().activeWorkspaceId !== requestWorkspaceId) {
+        return;
+      }
+      setOpenCodeCatalog({ agents: [], commands: [], mcpServers: [] });
+      setOpenCodeCatalogLoaded(false);
+      setOpenCodeCatalogError(String(error));
+      console.warn("Failed to load OpenCode runtime catalog", error);
+    } finally {
+      if (useWorkspaceStore.getState().activeWorkspaceId === requestWorkspaceId) {
+        setOpenCodeCatalogLoading(false);
+      }
+    }
+  }, [activeWorkspaceId, openCodeRuntimeRoot, selectedEngineId]);
+
+  const loadCliExtensions = useCallback(async (): Promise<void> => {
+    if (!selectedEngineId || !activeWorkspaceId) {
+      setCliExtensionItems([]);
+      return;
+    }
+    const requestWorkspaceId = activeWorkspaceId;
+    try {
+      const items = await ipc.getCliExtensions(selectedEngineId, requestWorkspaceId);
+      if (useWorkspaceStore.getState().activeWorkspaceId !== requestWorkspaceId) {
+        return;
+      }
+      setCliExtensionItems(items);
+    } catch (error) {
+      if (useWorkspaceStore.getState().activeWorkspaceId !== requestWorkspaceId) {
+        return;
+      }
+      setCliExtensionItems([]);
+      console.warn("Failed to load CLI extensions", error);
+    }
+  }, [activeWorkspaceId, selectedEngineId]);
 
   const resolveCodexInputItems = useCallback(
     async (
@@ -3349,7 +3502,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       .filter((engineId) => engines.some((engine) => engine.id === engineId))
       .map((engineId) =>
         scheduleIdleTask(() => {
-          void prewarmEngineTransport(engineId);
+          void prewarmEngineTransport(engineId, activeWorkspaceId);
         }),
       );
 
@@ -3359,81 +3512,99 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }, [activeWorkspaceId, activeThread?.engineId, engines, selectedEngineId]);
 
   useEffect(() => {
+    // 旧逻辑跳过 SSH 项目的扩展目录，导致 Claude Code 等远端 CLI 没有自己的
+    // Skill/MCP 菜单。目录请求现在携带 workspaceId，并由当前 CLI 解析执行目标。
+    // if (activeWorkspace?.locationKind === "ssh") {
+    //   return;
+    // }
     void loadExtensionCatalog(extensionContext);
   }, [extensionContext, loadExtensionCatalog]);
 
   useEffect(() => {
-    if (selectedEngineId !== "codex" || !activeWorkspaceId || !codexReferenceRoot) {
+    if (
+      selectedEngineId !== "codex" ||
+      !activeWorkspaceId ||
+      !codexReferenceRoot ||
+      health.codex?.available !== true
+      // 阶段计划 5 前 SSH 项目不读取 Codex Skills/Apps；现在由 workspace 上下文路由远端。
+      // || activeWorkspace?.locationKind === "ssh"
+    ) {
       setCodexSkills([]);
+      setCodexPlugins([]);
       setCodexApps([]);
       setCodexReferenceCatalogState({
         skillsLoaded: false,
         appsLoaded: false,
       });
+      setCodexReferenceCatalogLoading(false);
+      setCodexReferenceCatalogError(null);
       return;
     }
 
     setCodexSkills([]);
+    setCodexPlugins([]);
     setCodexApps([]);
     setCodexReferenceCatalogState({
       skillsLoaded: false,
       appsLoaded: false,
     });
+    setCodexReferenceCatalogError(null);
 
-    let disposed = false;
-    void loadCodexReferenceCatalogs().then(({ skills, apps, skillsLoaded, appsLoaded }) => {
-      if (disposed) {
-        return;
-      }
-      if (skillsLoaded) {
-        setCodexSkills(skills);
-      }
-      if (appsLoaded) {
-        setCodexApps(apps);
-      }
-      setCodexReferenceCatalogState({
-        skillsLoaded,
-        appsLoaded,
-      });
-    });
-
-    return () => {
-      disposed = true;
-    };
-  }, [activeWorkspaceId, codexReferenceRoot, loadCodexReferenceCatalogs, selectedEngineId]);
+    // 阶段计划 5 前在这里单独维护一份 Skills/Apps 写入逻辑；现在与目标详情的
+    // “刷新”按钮共用同一个目标化刷新入口。
+    void refreshCodexReferenceCatalogs();
+  }, [
+    activeWorkspaceId,
+    codexReferenceRoot,
+    health.codex?.available,
+    refreshCodexReferenceCatalogs,
+    selectedEngineId,
+  ]);
 
   useEffect(() => {
-    if (selectedEngineId !== "opencode" || !activeWorkspaceId || !openCodeRuntimeRoot) {
-      setOpenCodeCatalog(null);
-      setOpenCodeCatalogLoaded(false);
+    // 阶段计划 5 前会在 SSH tunnel 就绪前立即查询，导致首次进入远端项目稳定失败。
+    // 现在先清除上一目标的目录，等当前目标健康检查成功后再读取。
+    if (selectedEngineId !== "opencode") {
+      void loadOpenCodeRuntimeCatalog();
       return;
     }
-
-    let disposed = false;
+    if (health.opencode?.available === true) {
+      void loadOpenCodeRuntimeCatalog();
+      return;
+    }
     setOpenCodeCatalog(null);
     setOpenCodeCatalogLoaded(false);
-    void ipc
-      .getOpenCodeRuntimeCatalog(openCodeRuntimeRoot)
-      .then((catalog) => {
-        if (disposed) {
-          return;
-        }
-        setOpenCodeCatalog(catalog);
-        setOpenCodeCatalogLoaded(true);
-      })
-      .catch((error) => {
-        if (disposed) {
-          return;
-        }
-        setOpenCodeCatalog({ agents: [], commands: [], mcpServers: [] });
-        setOpenCodeCatalogLoaded(false);
-        console.warn("Failed to load OpenCode runtime catalog", error);
-      });
+    setOpenCodeCatalogLoading(false);
+    setOpenCodeCatalogError(null);
+  }, [health.opencode?.available, loadOpenCodeRuntimeCatalog, selectedEngineId]);
 
-    return () => {
-      disposed = true;
-    };
-  }, [activeWorkspaceId, openCodeRuntimeRoot, selectedEngineId]);
+  useEffect(() => {
+    if (!selectedEngineId || !activeWorkspaceId) {
+      return;
+    }
+    void loadCliExtensions();
+  }, [activeWorkspaceId, selectedEngineId, loadCliExtensions]);
+
+  useEffect(() => {
+    if (
+      selectedEngineId === "opencode" &&
+      health.opencode?.available === true &&
+      Boolean(openCodeCatalogError) &&
+      !openCodeCatalogLoaded &&
+      openCodeCatalogRetriedAfterHealthRef.current !== activeWorkspaceId
+    ) {
+      // 首次目录查询可能早于 SSH tunnel 就绪；健康检查成功后自动重试一次。
+      openCodeCatalogRetriedAfterHealthRef.current = activeWorkspaceId;
+      void loadOpenCodeRuntimeCatalog();
+    }
+  }, [
+    activeWorkspaceId,
+    health.opencode?.available,
+    loadOpenCodeRuntimeCatalog,
+    openCodeCatalogError,
+    openCodeCatalogLoaded,
+    selectedEngineId,
+  ]);
 
   useEffect(() => {
     if (
@@ -3449,13 +3620,16 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
 
     let disposed = false;
     void loadCodexReferenceCatalogs().then(
-      ({ skills, apps, skillsLoaded, appsLoaded }) => {
+      ({ skills, plugins, apps, skillsLoaded, pluginsLoaded, appsLoaded }) => {
         if (disposed) {
           return;
         }
 
         if (skillsLoaded) {
           setCodexSkills(skills);
+        }
+        if (pluginsLoaded) {
+          setCodexPlugins(plugins);
         }
         if (appsLoaded) {
           setCodexApps(apps);
@@ -3606,14 +3780,43 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       setSelectedModelId(preferredModelId);
     } else if (threadModelExists) {
       setSelectedModelId(activeThread.modelId);
+    } else if (threadEngine && threadEngine.models.length > 0) {
+      const fallbackModel =
+        threadEngine.models.find((model) => model.isDefault && !model.hidden) ??
+        threadEngine.models.find((model) => !model.hidden) ??
+        threadEngine.models[0];
+      setSelectedModelId(fallbackModel.id);
+      if (activeWorkspace?.locationKind === "ssh") {
+        const noticeKey = `${activeThread.id}:${preferredModelId}:${fallbackModel.id}`;
+        if (unavailableSavedModelNoticeRef.current !== noticeKey) {
+          unavailableSavedModelNoticeRef.current = noticeKey;
+          toast.warning(
+            t("modelPicker.savedModelUnavailable", {
+              previous: preferredModelId,
+              fallback: fallbackModel.displayName,
+            }),
+          );
+        }
+        setThreadLastModelLocal(activeThread.id, fallbackModel.id);
+        void ipc
+          .setSshRemoteThreadSelectedModel(activeThread.id, fallbackModel.id)
+          .then((updatedThread) => applyThreadUpdateLocal(updatedThread))
+          .catch((error) => {
+            console.warn("Failed to persist SSH fallback model", error);
+          });
+      }
     }
   }, [
     activeThread?.id,
     activeThread?.engineId,
     activeThread?.modelId,
     activeThread?.engineMetadata,
+    activeWorkspace?.locationKind,
+    applyThreadUpdateLocal,
     engines,
     selectedEngineId,
+    setThreadLastModelLocal,
+    t,
   ]);
 
   useEffect(() => {
@@ -4204,6 +4407,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const isOpenCodeEngine = selectedEngineId === "opencode";
   const activePlanMode = planMode && !isOpenCodeEngine;
 
+  /* 旧实现把三个 CLI 的项目合并到同一个数组，再用 disabled 隐藏不可用能力。
+   * 它会让不属于当前 CLI 的命令仍出现在“/”菜单中，保留为迁移记录。
   const slashCommands: SlashCommand[] = useMemo(
     () => [
       ...[
@@ -4322,27 +4527,43 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     const commandItems = slashCommands
       .filter((command) => command.id !== "skills" && command.id !== "mcp")
       .map((command) => ({ ...command, group: commandGroup }));
-    const skillItems = effectiveExtensionItems
-      .filter(
-        (item) =>
-          item.kind === "skill" && (isCodexEngine || selectedEngineId === "claude"),
-      )
-      .map((skill) => ({
-          id: `skill:${skill.id}`,
-          name: skill.name,
-          description: skill.description || skill.scope,
-          icon: Sparkles,
-          group: skillGroup,
-          searchTerms: [skill.id, skill.path ?? "", skill.scope],
-          reference: isCodexEngine
-            ? {
-                type: "skill" as const,
-                name: skill.name,
-                path: skill.path || skill.id,
-              }
-            : undefined,
-          insertText: selectedEngineId === "claude" ? `/${skill.name} ` : undefined,
-        }));
+    const skillItems =
+      activeWorkspace?.locationKind === "ssh" && isCodexEngine
+        ? codexSkills.map((skill) => ({
+            id: `skill:${skill.path}`,
+            name: skill.name,
+            description: skill.description || skill.scope,
+            icon: Sparkles,
+            group: skillGroup,
+            searchTerms: [skill.path, skill.scope],
+            reference: {
+              type: "skill" as const,
+              name: skill.name,
+              path: skill.path,
+            },
+          }))
+        : effectiveExtensionItems
+            .filter(
+              (item) =>
+                item.kind === "skill" &&
+                (isCodexEngine || selectedEngineId === "claude"),
+            )
+            .map((skill) => ({
+              id: `skill:${skill.id}`,
+              name: skill.name,
+              description: skill.description || skill.scope,
+              icon: Sparkles,
+              group: skillGroup,
+              searchTerms: [skill.id, skill.path ?? "", skill.scope],
+              reference: isCodexEngine
+                ? {
+                    type: "skill" as const,
+                    name: skill.name,
+                    path: skill.path || skill.id,
+                  }
+                : undefined,
+              insertText: selectedEngineId === "claude" ? `/${skill.name} ` : undefined,
+            }));
     const appItems = isCodexEngine
       ? codexApps.map((app) => ({
           id: `app:${app.id}`,
@@ -4390,15 +4611,48 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         }))
       : [];
 
+    const remoteCodexPluginItems =
+      activeWorkspace?.locationKind === "ssh" && isCodexEngine
+        ? codexPlugins.map((plugin) => ({
+            id: `plugin:${plugin.id}`,
+            name: plugin.name,
+            description: plugin.description || plugin.id,
+            icon: Puzzle,
+            group: pluginGroup,
+            searchTerms: [plugin.id, plugin.developerName ?? ""],
+            panel: { type: "plugins" as const },
+          }))
+        : [];
+    const remoteCodexMcpItems =
+      activeWorkspace?.locationKind === "ssh" && isCodexEngine
+        ? (codexProtocolDiagnostics?.mcpServers ?? []).map((server) => ({
+            id: `mcp:${server.name}`,
+            name: server.name,
+            description: `${server.authStatus} · ${server.toolCount} tools`,
+            icon: Server,
+            group: mcpGroup,
+            searchTerms: [server.authStatus],
+            panel: { type: "mcp" as const },
+          }))
+        : [];
+
     return [
       ...commandItems,
       ...skillItems,
       ...appItems,
-      ...pluginItems,
-      ...mcpItems,
+      ...(activeWorkspace?.locationKind === "ssh" && isCodexEngine
+        ? remoteCodexPluginItems
+        : pluginItems),
+      ...(activeWorkspace?.locationKind === "ssh" && isCodexEngine
+        ? remoteCodexMcpItems
+        : mcpItems),
     ];
   }, [
+    activeWorkspace?.locationKind,
     codexApps,
+    codexPlugins,
+    codexProtocolDiagnostics?.mcpServers,
+    codexSkills,
     effectiveExtensionItems,
     isCodexEngine,
     isOpenCodeEngine,
@@ -4424,7 +4678,41 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         c.description.toLowerCase().includes(q),
     );
   }, [chatInputMode, displayedSlashCommands, slashMenuQuery]);
+  */
 
+  // 旧的斜杠菜单按 CLI 工具分别解析；现在统一由 buildSlashCommandsFromExtensions
+  // 按 ExtensionItemDto 的 kind/insert_text/panel 规则解析，不再保留三套适配器。
+  // const cliSlashMenuAdapter = resolveCliSlashMenuAdapter(selectedEngineId);
+  const displayedSlashCommands = useMemo<CliSlashCommand[]>(() => {
+    return buildSlashCommandsFromExtensions(cliExtensionItems, {
+      inputMode: chatInputMode,
+      t,
+      canManageActiveCodexThread,
+      canUseNativeCodexHistoryTools,
+    });
+  }, [
+    canManageActiveCodexThread,
+    canUseNativeCodexHistoryTools,
+    chatInputMode,
+    cliExtensionItems,
+    t,
+  ]);
+  const filteredSlashCommands = useMemo(() => {
+    if (chatInputMode === "classic") {
+      return filterClassicSlashItems(displayedSlashCommands, slashMenuQuery);
+    }
+
+    if (!slashMenuQuery) return displayedSlashCommands;
+    const query = slashMenuQuery.toLowerCase();
+    return displayedSlashCommands.filter(
+      (command) =>
+        command.name.toLowerCase().startsWith(query) ||
+        command.id.startsWith(query) ||
+        command.description.toLowerCase().includes(query),
+    );
+  }, [chatInputMode, displayedSlashCommands, slashMenuQuery]);
+
+  /* 旧的选择处理依赖 ChatPanel 识别 Codex、OpenCode 和 Claude Code 的命令标识。
   function handleSlashCommandSelect(commandId: string) {
     setSlashMenuOpen(false);
     setSlashMenuQuery("");
@@ -4533,6 +4821,81 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     setInput("");
     setActiveCommandPanel({ type: commandId } as ActiveSlashCommand);
     setCommandPanelError(null);
+  }
+  */
+
+  function handleSlashCommandSelect(commandId: string) {
+    setSlashMenuOpen(false);
+    setSlashMenuQuery("");
+
+    const command = displayedSlashCommands.find((item) => item.id === commandId);
+    if (!command || command.disabled || !command.action) {
+      return;
+    }
+
+    const cursorPosition = inputRef.current?.selectionStart ?? input.length;
+    const replacement =
+      chatInputMode === "classic"
+        ? removeClassicSlashToken(input, cursorPosition)
+        : { value: input, cursorPosition };
+    if (command.action.type === "reference") {
+      const selectedReference = command.action.reference;
+      setReferences((currentReferences) =>
+        currentReferences.some(
+          (reference) =>
+            reference.type === selectedReference.type &&
+            reference.path === selectedReference.path,
+        )
+          ? currentReferences
+          : [...currentReferences, selectedReference],
+      );
+      setInput(replacement.value);
+      requestAnimationFrame(() => {
+        const element = inputRef.current;
+        element?.focus();
+        element?.setSelectionRange(replacement.cursorPosition, replacement.cursorPosition);
+      });
+      return;
+    }
+
+    if (command.action.type === "insert") {
+      if (chatInputMode !== "classic") {
+        setInput(command.action.text);
+        requestAnimationFrame(() => inputRef.current?.focus());
+        return;
+      }
+      const prefix = replacement.value.slice(0, replacement.cursorPosition);
+      const suffix = replacement.value.slice(replacement.cursorPosition);
+      const nextInput = `${prefix}${command.action.text}${suffix}`;
+      const nextCursor = prefix.length + command.action.text.length;
+      setInput(nextInput);
+      requestAnimationFrame(() => {
+        inputRef.current?.focus();
+        inputRef.current?.setSelectionRange(nextCursor, nextCursor);
+      });
+      return;
+    }
+
+    if (command.action.type === "panel") {
+      setInput(chatInputMode === "classic" ? replacement.value : "");
+      setActiveCommandPanel(command.action.panel);
+      setCommandPanelError(null);
+      requestAnimationFrame(() => {
+        const element = inputRef.current;
+        element?.focus();
+        if (chatInputMode === "classic") {
+          element?.setSelectionRange(replacement.cursorPosition, replacement.cursorPosition);
+        }
+      });
+      return;
+    }
+
+    setInput("");
+    const nextTier = selectedServiceTier === "fast" ? "inherit" : "fast";
+    handleCommandPanelConfirm(
+      { type: "fast" },
+      { serviceTier: nextTier },
+    );
   }
 
   async function handleCommandPanelConfirm(
@@ -4855,6 +5218,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       attachments: transportAttachments.length > 0 ? transportAttachments : undefined,
       inputItems,
       planMode: submitPlanMode,
+      remoteAttachmentUpload:
+        activeWorkspace?.locationKind === "ssh" && currentAttachments.length > 0,
     });
     if (sent) {
       pendingPlanImplementationThreadIdRef.current = submitPlanMode ? targetThreadId : null;
@@ -4897,12 +5262,15 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     const submittedMessageWithImageAnnotations =
       formatImageAttachmentAnnotationsForSubmission(submittedMessage, submittedAttachments);
     if (sessionMessageSendMode === "flexible") {
+      if (!flexibleMessageSessionKey) {
+        return;
+      }
       if (activeChatSessionId) {
         setThreadMessageSendMode(activeChatSessionId, sessionMessageSendMode);
       } else {
         setPendingMessageSendMode(activeWorkspaceId, sessionMessageSendMode);
       }
-      addPendingFlexibleMessage(activeWorkspaceId, {
+      addPendingFlexibleMessage(flexibleMessageSessionKey, {
         id: crypto.randomUUID(),
         text: submittedMessage,
         attachments: submittedAttachments,
@@ -4964,6 +5332,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   async function submitFlexibleMessages() {
     if (
       !activeWorkspaceId ||
+      !flexibleMessageSessionKey ||
       pendingFlexibleMessages.length === 0 ||
       isSubmittingRef.current ||
       (streaming && !canSteerActiveTurn)
@@ -5001,7 +5370,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         planMode,
       );
       if (accepted) {
-        clearPendingFlexibleMessages(activeWorkspaceId);
+        clearPendingFlexibleMessages(flexibleMessageSessionKey);
       }
     } finally {
       setPendingSubmission(null);
@@ -6271,6 +6640,17 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                         isHighlighted={message.id === highlightedMessageId}
                         assistantLabel={assistantIdentity?.label ?? ""}
                         assistantEngineId={assistantIdentity?.engineId ?? ""}
+                        preparingLabel={
+                          activeWorkspace?.locationKind === "ssh" &&
+                          preparingAttachments &&
+                          message.id === messages[messages.length - 1]?.id
+                            ? t("panel.uploadingRemoteAttachments")
+                            : activeWorkspace?.locationKind === "ssh" &&
+                                preparingEngineId === "claude" &&
+                                message.id === messages[messages.length - 1]?.id
+                              ? t("panel.preparingRemoteEngine", { engine: "Claude Code" })
+                              : undefined
+                        }
                         onApproval={handleApproval}
                         onLoadActionOutput={handleLoadActionOutput}
                         onEditResend={handleEditResend}
@@ -6297,6 +6677,17 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                   isHighlighted={message.id === highlightedMessageId}
                   assistantLabel={assistantIdentity?.label ?? ""}
                   assistantEngineId={assistantIdentity?.engineId ?? ""}
+                  preparingLabel={
+                    activeWorkspace?.locationKind === "ssh" &&
+                    preparingAttachments &&
+                    message.id === messages[messages.length - 1]?.id
+                      ? t("panel.uploadingRemoteAttachments")
+                      : activeWorkspace?.locationKind === "ssh" &&
+                          preparingEngineId === "claude" &&
+                          message.id === messages[messages.length - 1]?.id
+                        ? t("panel.preparingRemoteEngine", { engine: "Claude Code" })
+                        : undefined
+                  }
                   onApproval={handleApproval}
                   onLoadActionOutput={handleLoadActionOutput}
                   onEditResend={handleEditResend}
@@ -6955,7 +7346,28 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                         ? codexSkills
                         : (codexProtocolDiagnostics?.skills ?? [])
                     }
-                    pluginMarketplaces={codexProtocolDiagnostics?.pluginMarketplaces}
+                    extensionSkills={
+                      selectedEngineId === "claude"
+                        ? effectiveExtensionItems.filter((item) => item.kind === "skill")
+                        : undefined
+                    }
+                    pluginMarketplaces={
+                      activeWorkspace?.locationKind === "ssh" &&
+                      selectedEngineId === "codex"
+                        ? [
+                            {
+                              name: "SSH",
+                              path: codexReferenceRoot ?? "",
+                              plugins: codexPlugins,
+                            },
+                          ]
+                        : codexProtocolDiagnostics?.pluginMarketplaces
+                    }
+                    extensionPlugins={
+                      selectedEngineId === "claude"
+                        ? effectiveExtensionItems.filter((item) => item.kind === "plugin")
+                        : undefined
+                    }
                     openCodeAgents={openCodeCatalog?.agents}
                     openCodeCommands={openCodeCatalog?.commands}
                     openCodeMcpServers={
@@ -6970,6 +7382,11 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                       selectedEngineId === "opencode"
                         ? undefined
                         : codexProtocolDiagnostics?.mcpServers
+                    }
+                    extensionMcpServers={
+                      selectedEngineId === "claude"
+                        ? effectiveExtensionItems.filter((item) => item.kind === "mcp")
+                        : undefined
                     }
                     experimentalFeatures={codexProtocolDiagnostics?.experimentalFeatures}
                     onConfirm={handleCommandPanelConfirm}
@@ -7199,6 +7616,47 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
               {/* Engine + Model + Effort selector */}
               {!showSpecialInputComposer && (
                 <>
+                  <RuntimeTargetPicker
+                    engineId={selectedEngineId}
+                    engineName={
+                      selectedEngineId === "claude"
+                        ? "Claude Code"
+                        : selectedEngine?.name ?? selectedEngineId
+                    }
+                    codexSkills={codexSkills}
+                    codexPlugins={codexPlugins}
+                    /* Apps/连接器不属于 Panes 管理的运行时能力。
+                    codexApps={codexApps} */
+                    openCodeCatalog={openCodeCatalog}
+                    capabilitiesLoading={
+                      selectedEngineId === "opencode"
+                        ? openCodeCatalogLoading
+                        : selectedEngineId === "codex"
+                          ? codexReferenceCatalogLoading
+                          : false
+                    }
+                    capabilitiesError={
+                      selectedEngineId === "opencode"
+                        ? openCodeCatalogError
+                        : selectedEngineId === "codex"
+                          ? codexReferenceCatalogError
+                          : null
+                    }
+                    capabilitiesPartial={
+                      selectedEngineId === "codex" &&
+                      Boolean(codexReferenceCatalogError) &&
+                      (codexReferenceCatalogState.skillsLoaded ||
+                        codexReferenceCatalogState.appsLoaded)
+                    }
+                    onRefreshCapabilities={
+                      selectedEngineId === "opencode"
+                        ? loadOpenCodeRuntimeCatalog
+                        : selectedEngineId === "codex"
+                          ? refreshCodexReferenceCatalogs
+                          : undefined
+                    }
+                    disabled={!activeWorkspaceId}
+                  />
                   <ModelPicker
                     engines={engines}
                     health={health}
@@ -7226,6 +7684,23 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                         selectedEffortRef.current = nextEffort;
                         setSelectedEffort(nextEffort);
                       }
+                      if (
+                        activeWorkspace?.locationKind === "ssh" &&
+                        activeThread?.workspaceId === activeWorkspaceId &&
+                        activeThread.engineId === engineId
+                      ) {
+                        setThreadLastModelLocal(activeThread.id, modelId);
+                        void ipc
+                          .setSshRemoteThreadSelectedModel(activeThread.id, modelId)
+                          .then((updatedThread) => {
+                            if (selectedModelIdRef.current === modelId) {
+                              applyThreadUpdateLocal(updatedThread);
+                            }
+                          })
+                          .catch((error) => {
+                            toast.error(String(error));
+                          });
+                      }
                     }}
                     onEffortChange={(effort) => void onReasoningEffortChange(effort)}
                     onServiceTierChange={(serviceTier) => {
@@ -7250,7 +7725,10 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                         });
                       void updateServiceTier();
                     }}
-                    disabled={availableModels.length === 0}
+                    loading={enginesLoading}
+                    error={engineLoadError}
+                    onRetry={() => loadEngines(activeWorkspaceId)}
+                    disabled={!activeWorkspaceId}
                   />
                 </>
               )}

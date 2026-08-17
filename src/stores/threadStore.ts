@@ -42,6 +42,8 @@ interface ThreadState {
   renameThread: (threadId: string, title: string) => Promise<void>;
   ensureThreadForScope: (input: EnsureThreadInput) => Promise<string | null>;
   refreshThreads: (workspaceId: string) => Promise<void>;
+  /** 仅从本地数据库重载指定 workspace 的线程，不触发远端会话发现。 */
+  reloadThreadsFromLocalDatabase: (workspaceId: string) => Promise<void>;
   refreshArchivedThreads: (workspaceId: string) => Promise<void>;
   refreshAllThreads: (workspaceIds: string[]) => Promise<void>;
   removeThread: (threadId: string) => Promise<void>;
@@ -388,14 +390,36 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       set({
         threadsByWorkspace,
         threads,
+        // 旧逻辑会在 activeThreadId 为 null 时自动选中刷新结果的第一条会话：
+        // activeThreadId:
+        //   active && threads.some((item) => item.id === active)
+        //     ? active
+        //     : workspaceThreads[0]?.id ?? null,
+        // null 表示用户明确停留在“新对话”，后台同步不得把输入目标切换到旧会话。
         activeThreadId:
-          active && threads.some((item) => item.id === active)
-            ? active
-            : workspaceThreads[0]?.id ?? null,
+          active && threads.some((item) => item.id === active) ? active : null,
         loading: false
       });
     } catch (error) {
       set({ loading: false, error: String(error) });
+    }
+  },
+  reloadThreadsFromLocalDatabase: async (workspaceId) => {
+    try {
+      // 同步通知只代表本地数据库已更新；这里禁止触发任何远端 CLI 会话发现。
+      const workspaceThreads = await ipc.listThreads(workspaceId);
+      const threadsByWorkspace = mergeWorkspaceThreads(
+        get().threadsByWorkspace,
+        workspaceId,
+        workspaceThreads,
+      );
+      set({
+        threadsByWorkspace,
+        threads: flattenThreadsByWorkspace(threadsByWorkspace),
+      });
+    } catch (error) {
+      // 不修改线程集合，保留通知到达前的内存数据，并让调用方决定如何提示用户。
+      throw error;
     }
   },
   refreshArchivedThreads: async (workspaceId) => {
@@ -436,23 +460,43 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
         }),
       );
 
-      const threadsByWorkspace = results.reduce<Record<string, Thread[]>>((acc, item) => {
-        acc[item.workspaceId] = item.threads;
-        return acc;
-      }, {});
-      const threads = flattenThreadsByWorkspace(threadsByWorkspace);
-      const active = get().activeThreadId;
-      const savedId = localStorage.getItem(LAST_THREAD_KEY);
-      const restoredId =
-        (active && threads.some((item) => item.id === active)) ? active
-        : (savedId && threads.some((item) => item.id === savedId)) ? savedId
-        : null;
+      // const threadsByWorkspace = results.reduce<Record<string, Thread[]>>((acc, item) => {
+      //   acc[item.workspaceId] = item.threads;
+      //   return acc;
+      // }, {});
+      // const threads = flattenThreadsByWorkspace(threadsByWorkspace);
+      // const active = get().activeThreadId;
+      // const savedId = localStorage.getItem(LAST_THREAD_KEY);
+      // const restoredId =
+      //   (active && threads.some((item) => item.id === active)) ? active
+      //   : (savedId && threads.some((item) => item.id === savedId)) ? savedId
+      //   : null;
+      //
+      // set({
+      //   threadsByWorkspace,
+      //   threads,
+      //   activeThreadId: restoredId,
+      //   loading: false,
+      // });
+      set((state) => {
+        const threadsByWorkspace = results.reduce<Record<string, Thread[]>>((acc, item) => {
+          acc[item.workspaceId] = item.threads;
+          return acc;
+        }, { ...state.threadsByWorkspace });
+        const threads = flattenThreadsByWorkspace(threadsByWorkspace);
+        const active = state.activeThreadId;
+        const savedId = localStorage.getItem(LAST_THREAD_KEY);
+        const restoredId =
+          (active && threads.some((item) => item.id === active)) ? active
+          : (savedId && threads.some((item) => item.id === savedId)) ? savedId
+          : null;
 
-      set({
-        threadsByWorkspace,
-        threads,
-        activeThreadId: restoredId,
-        loading: false,
+        return {
+          threadsByWorkspace,
+          threads,
+          activeThreadId: restoredId,
+          loading: false,
+        };
       });
     } catch (error) {
       set({ loading: false, error: String(error) });

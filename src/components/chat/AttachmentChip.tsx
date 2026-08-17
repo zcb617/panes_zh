@@ -8,6 +8,7 @@ interface AttachmentChipData {
   filePath: string;
   sizeBytes?: number;
   mimeType?: string;
+  isRemote?: boolean;
 }
 
 interface AttachmentChipProps {
@@ -92,7 +93,11 @@ export function AttachmentChip({
     setThumbnailSrc(null);
     setThumbnailFailed(false);
 
-    if (!isImageAttachment(effectiveMimeType) || !attachment.filePath) {
+    if (
+      attachment.isRemote ||
+      !isImageAttachment(effectiveMimeType) ||
+      !attachment.filePath
+    ) {
       return () => {
         cancelled = true;
       };
@@ -114,7 +119,7 @@ export function AttachmentChip({
     return () => {
       cancelled = true;
     };
-  }, [attachment.filePath, effectiveMimeType]);
+  }, [attachment.filePath, attachment.isRemote, effectiveMimeType]);
 
   const IconComponent = getAttachmentIcon(effectiveMimeType);
   const sizeBytes = attachment.sizeBytes ?? 0;
@@ -144,7 +149,14 @@ export function AttachmentChip({
         }
       } : undefined}
       onContextMenu={(event) => {
-        openLocalFileContextMenu(event, attachment.filePath, null, canOpen ? onOpen ?? null : null);
+        if (!attachment.isRemote) {
+          openLocalFileContextMenu(
+            event,
+            attachment.filePath,
+            null,
+            canOpen ? onOpen ?? null : null,
+          );
+        }
       }}
     >
       {thumbnailSrc && !thumbnailFailed ? (

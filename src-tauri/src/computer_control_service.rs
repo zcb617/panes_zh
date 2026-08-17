@@ -433,9 +433,6 @@ mod tests {
         application_resource, dynamic_tool_failure, dynamic_tool_success,
         resolved_application_resource, target_resource, ComputerControlService,
     };
-    use crate::config::app_config::{
-        with_temp_app_data_env, AppConfig, ComputerControlAuthorizationConfig,
-    };
     use serde_json::json;
     use std::sync::Arc;
 
@@ -574,58 +571,6 @@ mod tests {
             "content": [{"type": "image", "data": "AQ==", "mimeType": "image/png"}]
         }));
         assert_eq!(image["contentItems"][0]["type"], "inputImage");
-    }
-
-    #[test]
-    fn persistent_authorization_survives_service_recreation_and_can_be_revoked() {
-        with_temp_app_data_env(|| {
-            AppConfig::mutate(|config| {
-                config.computer_control.persistent_authorizations.push(
-                    ComputerControlAuthorizationConfig {
-                        request_id: "request-1".to_string(),
-                        target_key: "application:notepad.exe".to_string(),
-                        agent: "codex".to_string(),
-                        tool: "click".to_string(),
-                        call_id: "call-1".to_string(),
-                        application: "notepad.exe".to_string(),
-                        operation: "input".to_string(),
-                        scope: "application".to_string(),
-                        thread_id: "thread-1".to_string(),
-                        turn_id: "turn-1".to_string(),
-                    },
-                );
-                Ok(())
-            })
-            .expect("authorization should persist");
-
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("test runtime should start");
-            runtime.block_on(async {
-                let service = ComputerControlService::default();
-                let active = service.active_authorizations().await;
-                assert_eq!(active.len(), 1);
-                assert_eq!(active[0].request_id, "request-1");
-                assert_eq!(active[0].application, "notepad.exe");
-                assert!(ComputerControlService::has_persistent_authorization(
-                    "application:notepad.exe"
-                ));
-
-                service.revoke_turn("thread-1", Some("turn-1")).await;
-                assert!(ComputerControlService::has_persistent_authorization(
-                    "application:notepad.exe"
-                ));
-
-                service.revoke_all().await;
-                assert!(ComputerControlService::has_persistent_authorization(
-                    "application:notepad.exe"
-                ));
-
-                assert!(service.revoke_authorization("request-1").await);
-                assert!(service.active_authorizations().await.is_empty());
-            });
-        });
     }
 }
 

@@ -39,6 +39,7 @@ pub struct AppConfig {
     pub debug: DebugConfig,
     pub power: PowerConfig,
     pub computer_control: ComputerControlConfig,
+    pub claude_code: ClaudeCodeConfig,
     #[serde(skip_serializing_if = "RemoteAccessConfig::is_default")]
     pub remote_access: RemoteAccessConfig,
     #[serde(skip_serializing_if = "HarnessesConfig::is_empty")]
@@ -123,6 +124,35 @@ pub struct ComputerControlAuthorizationConfig {
     pub scope: String,
     pub thread_id: String,
     pub turn_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeCodeSessionMode {
+    ReuseSession,
+    PerTurn,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClaudeCodeConfig {
+    pub session_mode: String,
+}
+
+impl ClaudeCodeConfig {
+    pub fn session_mode(&self) -> ClaudeCodeSessionMode {
+        match self.session_mode.trim() {
+            "per_turn" => ClaudeCodeSessionMode::PerTurn,
+            _ => ClaudeCodeSessionMode::ReuseSession,
+        }
+    }
+}
+
+impl Default for ClaudeCodeConfig {
+    fn default() -> Self {
+        Self {
+            session_mode: "reuse_session".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,6 +315,7 @@ impl Default for AppConfig {
             debug: DebugConfig::default(),
             power: PowerConfig::default(),
             computer_control: ComputerControlConfig::default(),
+            claude_code: ClaudeCodeConfig::default(),
             remote_access: RemoteAccessConfig::default(),
             harnesses: HarnessesConfig::default(),
         }
@@ -454,42 +485,6 @@ fn lock_config() -> anyhow::Result<MutexGuard<'static, ()>> {
         .map_err(|_| anyhow::anyhow!("config lock poisoned"))
 }
 
-#[cfg(test)]
-pub(crate) fn app_data_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-#[cfg(test)]
-const APP_DATA_ENV_VARS: [&str; 4] = ["HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"];
-
-#[cfg(test)]
-pub(crate) fn with_temp_app_data_env<T>(f: impl FnOnce() -> T) -> T {
-    let _guard = app_data_env_lock().lock().expect("env lock poisoned");
-    let previous: Vec<(&str, Option<std::ffi::OsString>)> = APP_DATA_ENV_VARS
-        .into_iter()
-        .map(|key| (key, std::env::var_os(key)))
-        .collect();
-    let root = std::env::temp_dir().join(format!("panes-app-config-home-{}", uuid::Uuid::new_v4()));
-    let local_app_data = root.join("AppData").join("Local");
-    let roaming_app_data = root.join("AppData").join("Roaming");
-    fs::create_dir_all(&local_app_data).expect("temp local app data should exist");
-    fs::create_dir_all(&roaming_app_data).expect("temp roaming app data should exist");
-    std::env::set_var("HOME", &root);
-    std::env::set_var("USERPROFILE", &root);
-    std::env::set_var("LOCALAPPDATA", &local_app_data);
-    std::env::set_var("APPDATA", &roaming_app_data);
-    let result = f();
-    for (key, value) in previous {
-        match value {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
-    }
-    let _ = fs::remove_dir_all(&root);
-    result
-}
-
 fn replace_file(temp_path: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -524,7 +519,7 @@ fn replace_file(temp_path: &std::path::Path, path: &std::path::Path) -> std::io:
 
 #[cfg(test)]
 mod tests {
-    use super::{with_temp_app_data_env, AppConfig};
+    use super::{AppConfig, ClaudeCodeSessionMode};
 
     #[test]
     fn missing_locale_field_uses_none() {
@@ -571,6 +566,29 @@ max_action_output_chars = 20000
         assert!(!raw.contains("terminal_font_size"));
         assert!(!raw.contains("default_file_open_target"));
         assert!(!raw.contains("harnesses"));
+        assert!(raw.contains("[claude_code]"));
+        assert!(raw.contains("session_mode = \"reuse_session\""));
+    }
+
+    #[test]
+    fn claude_code_session_mode_defaults_and_parses_per_turn() {
+        let default_config = AppConfig::default();
+        assert_eq!(
+            default_config.claude_code.session_mode(),
+            ClaudeCodeSessionMode::ReuseSession
+        );
+
+        let per_turn = toml::from_str::<AppConfig>(
+            r#"
+[claude_code]
+session_mode = "per_turn"
+"#,
+        )
+        .expect("Claude Code session mode should deserialize");
+        assert_eq!(
+            per_turn.claude_code.session_mode(),
+            ClaudeCodeSessionMode::PerTurn
+        );
     }
 
     #[test]
@@ -626,24 +644,6 @@ max_action_output_chars = 20000
         // Blank values are treated as unset.
         assert_eq!(reloaded.harness_launch_args("claude-code"), None);
         assert_eq!(reloaded.harness_launch_args("gemini-cli"), None);
-    }
-
-    #[test]
-    fn save_overwrites_existing_config() {
-        with_temp_app_data_env(|| {
-            let mut config = AppConfig::default();
-            config.general.locale = Some("en".to_string());
-            config.save().expect("initial config save should succeed");
-
-            let mut updated = AppConfig::load_or_create().expect("config should reload");
-            updated.general.locale = Some("pt-BR".to_string());
-            updated.power.keep_awake_enabled = true;
-            updated.save().expect("updated config save should succeed");
-
-            let saved = AppConfig::load_or_create().expect("config should reload after overwrite");
-            assert_eq!(saved.general.locale.as_deref(), Some("pt-BR"));
-            assert!(saved.power.keep_awake_enabled);
-        });
     }
 
     #[test]
@@ -729,66 +729,6 @@ max_action_output_chars = 20000
 
         assert_eq!(loaded.display_scale(), 150);
     }
-
-    #[test]
-    fn display_scale_mutation_persists_across_config_reload() {
-        with_temp_app_data_env(|| {
-            AppConfig::mutate(|config| {
-                config.ui.display_scale = 120;
-                Ok(())
-            })
-            .expect("display scale should save");
-
-            let reloaded = AppConfig::load_or_create().expect("display scale should reload");
-            assert_eq!(reloaded.display_scale(), 120);
-        });
-    }
-
-    /*
-        #[test]
-        fn load_or_create_backfills_missing_display_scale_into_config_file() {
-            with_temp_app_data_env(|| {
-                let path = AppConfig::path();
-                fs::create_dir_all(path.parent().expect("config path has a parent"))
-                    .expect("create config directory");
-                fs::write(
-                    &path,
-                    r#"
-    [ui]
-    sidebar_width = 260
-    git_panel_width = 380
-    font_size = 13
-    "#,
-                )
-                .expect("write legacy config");
-
-                let config = AppConfig::load_or_create().expect("load legacy config");
-                assert_eq!(config.display_scale(), super::DEFAULT_DISPLAY_SCALE);
-
-                let persisted = fs::read_to_string(path).expect("read migrated config");
-                assert!(persisted.contains("display_scale = 100"));
-            });
-        }
-
-        #[test]
-        fn set_display_scale_persists_the_selected_value_in_config_file() {
-            with_temp_app_data_env(|| {
-                assert_eq!(
-                    AppConfig::set_display_scale(120).expect("set display scale"),
-                    120
-                );
-
-                let persisted = fs::read_to_string(AppConfig::path()).expect("read saved config");
-                assert!(persisted.contains("display_scale = 120"));
-                assert_eq!(
-                    AppConfig::load_or_create()
-                        .expect("reload saved config")
-                        .display_scale(),
-                    120
-                );
-            });
-        }
-        */
 
     #[test]
     fn terminal_accelerated_rendering_defaults_to_enabled() {

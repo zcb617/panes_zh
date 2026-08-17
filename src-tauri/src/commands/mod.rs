@@ -11,6 +11,7 @@ pub mod power;
 pub mod remote;
 pub mod scheduled_tasks;
 pub mod setup;
+pub mod ssh_connections;
 pub mod terminal;
 pub mod threads;
 pub mod update;

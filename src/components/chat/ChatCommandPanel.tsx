@@ -16,6 +16,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import type { CliSlashCommandPanel } from "../../cli-tools/contracts/slash-command";
 import { ipc } from "../../lib/ipc";
 import type {
   CodexExperimentalFeature,
@@ -24,6 +25,7 @@ import type {
   CodexReviewDelivery,
   CodexReviewTarget,
   CodexSkill,
+  ExtensionItem,
   OpenCodeAgent,
   OpenCodeCommand,
   OpenCodeMcpServer,
@@ -36,20 +38,22 @@ type ReviewTargetMode =
   | "commit"
   | "custom";
 
-export type ActiveSlashCommand =
-  | { type: "review" }
-  | { type: "fork" }
-  | { type: "rollback" }
-  | { type: "compact" }
-  | { type: "fast" }
-  | { type: "personality" }
-  | { type: "skills" }
-  | { type: "plugins" }
-  | { type: "agents" }
-  | { type: "commands" }
-  | { type: "sessions" }
-  | { type: "mcp" }
-  | { type: "experimental" };
+// 旧的输入框面板联合类型保留在此处作为迁移记录；现在由 CLI 菜单契约统一定义。
+// export type ActiveSlashCommand =
+//   | { type: "review" }
+//   | { type: "fork" }
+//   | { type: "rollback" }
+//   | { type: "compact" }
+//   | { type: "fast" }
+//   | { type: "personality" }
+//   | { type: "skills" }
+//   | { type: "plugins" }
+//   | { type: "agents" }
+//   | { type: "commands" }
+//   | { type: "sessions" }
+//   | { type: "mcp" }
+//   | { type: "experimental" };
+export type ActiveSlashCommand = CliSlashCommandPanel | { type: "fast" };
 
 export interface SlashCommandPayload {
   target?: CodexReviewTarget;
@@ -70,7 +74,9 @@ interface ChatCommandPanelProps {
   personalitySupported?: boolean;
   /** Data for info panels */
   skills?: CodexSkill[];
+  extensionSkills?: ExtensionItem[];
   pluginMarketplaces?: CodexPluginMarketplace[];
+  extensionPlugins?: ExtensionItem[];
   openCodeAgents?: OpenCodeAgent[];
   openCodeCommands?: OpenCodeCommand[];
   openCodeMcpServers?: OpenCodeMcpServer[];
@@ -78,6 +84,7 @@ interface ChatCommandPanelProps {
   selectedModelId?: string | null;
   onAttachOpenCodeSession?: (session: OpenCodeRemoteSession) => Promise<void>;
   mcpServers?: CodexMcpServer[];
+  extensionMcpServers?: ExtensionItem[];
   experimentalFeatures?: CodexExperimentalFeature[];
   onConfirm: (
     command: ActiveSlashCommand,
@@ -95,7 +102,9 @@ export function ChatCommandPanel({
   currentPersonality,
   personalitySupported,
   skills,
+  extensionSkills,
   pluginMarketplaces,
+  extensionPlugins,
   openCodeAgents,
   openCodeCommands,
   openCodeMcpServers,
@@ -103,6 +112,7 @@ export function ChatCommandPanel({
   selectedModelId,
   onAttachOpenCodeSession,
   mcpServers,
+  extensionMcpServers,
   experimentalFeatures,
   onConfirm,
   onDismiss,
@@ -191,11 +201,17 @@ export function ChatCommandPanel({
           icon={Scissors}
           title={t("slashCommands.panels.skills.title")}
           emptyLabel={t("slashCommands.panels.skills.empty")}
-          items={(skills ?? []).map((s) => ({
-            name: s.name,
-            detail: s.description || s.scope,
-            enabled: s.enabled,
-          }))}
+          items={extensionSkills
+            ? extensionSkills.map((skill) => ({
+                name: skill.name,
+                detail: skill.description || skill.scope,
+                enabled: skill.enabled !== false,
+              }))
+            : (skills ?? []).map((s) => ({
+                name: s.name,
+                detail: s.description || s.scope,
+                enabled: s.enabled,
+              }))}
           onDismiss={onDismiss}
         />
       );
@@ -205,19 +221,25 @@ export function ChatCommandPanel({
           icon={Puzzle}
           title={t("slashCommands.panels.plugins.title")}
           emptyLabel={t("slashCommands.panels.plugins.empty")}
-          items={(pluginMarketplaces ?? []).flatMap((marketplace) =>
-            marketplace.plugins.map((plugin) => ({
-              name: plugin.name,
-              detail: [
-                plugin.description,
-                plugin.capabilities.length > 0 ? plugin.capabilities.join(", ") : null,
-                marketplace.name,
-              ]
-                .filter(Boolean)
-                .join(" · "),
-              enabled: plugin.enabled && plugin.installed,
-            })),
-          )}
+          items={extensionPlugins
+            ? extensionPlugins.map((plugin) => ({
+                name: plugin.name,
+                detail: plugin.description || plugin.marketplace || plugin.scope,
+                enabled: plugin.enabled !== false,
+              }))
+            : (pluginMarketplaces ?? []).flatMap((marketplace) =>
+                marketplace.plugins.map((plugin) => ({
+                  name: plugin.name,
+                  detail: [
+                    plugin.description,
+                    plugin.capabilities.length > 0 ? plugin.capabilities.join(", ") : null,
+                    marketplace.name,
+                  ]
+                    .filter(Boolean)
+                    .join(" · "),
+                  enabled: plugin.enabled && plugin.installed,
+                })),
+              )}
           onDismiss={onDismiss}
         />
       );
@@ -268,7 +290,13 @@ export function ChatCommandPanel({
           title={t("slashCommands.panels.mcp.title")}
           emptyLabel={t("slashCommands.panels.mcp.empty")}
           items={
-            openCodeMcpServers
+            extensionMcpServers
+              ? extensionMcpServers.map((server) => ({
+                  name: server.name,
+                  detail: server.description || server.health,
+                  badge: server.authState || server.health,
+                }))
+              : openCodeMcpServers
               ? openCodeMcpServers.map((server) => ({
                   name: server.name,
                   detail: server.detail ?? server.status,

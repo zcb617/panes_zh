@@ -23,6 +23,7 @@ import type {
   CodexRemoteThreadPage,
   ContentBlock,
   CodexApp,
+  CodexPlugin,
   CodexSkill,
   DependencyReport,
   EngineCheckResult,
@@ -38,6 +39,7 @@ import type {
   GitWorktree,
   EngineHealth,
   EngineInfo,
+  ExecutionTarget,
   ExtensionAction,
   ExtensionActionResult,
   ExtensionCatalog,
@@ -57,12 +59,18 @@ import type {
   PowerSettings,
   PowerSettingsInput,
   RemoteAccessStatus,
+  SshConnection,
+  SshConfigHost,
+  SshConnectionInput,
+  SshConnectionImportResult,
+  SshConnectionTest,
   Message,
   MessageWindow,
   MessageWindowCursor,
   OpenCodeRemoteSessionPage,
   OpenCodeRuntimeCatalog,
   ReadFileResult,
+  WriteFileResult,
   ResolvedEditorFileReference,
   Repo,
   SearchResult,
@@ -85,6 +93,7 @@ import type {
   WorkspaceGitSelectionStatus,
   Workspace,
   UpdateProcessState,
+  SshRemoteDirectory,
 } from "../types";
 import type { ScheduledTask, ScheduledTaskInput } from "../types";
 
@@ -96,6 +105,23 @@ export const ipc = {
   downloadUpdate: (source: "manual" | "automatic") =>
     invoke<UpdateProcessState>("download_update", { source }),
   installDownloadedUpdate: () => invoke<void>("install_downloaded_update"),
+  listSshConnections: () => invoke<SshConnection[]>("list_ssh_connections"),
+  listDeletedSshConnections: () => invoke<SshConnection[]>("list_deleted_ssh_connections"),
+  scanSshConfigHosts: () => invoke<SshConfigHost[]>("scan_ssh_config_hosts"),
+  importSshConfigHosts: (aliases: string[]) =>
+    invoke<SshConnectionImportResult[]>("import_ssh_config_hosts", { aliases }),
+  createManualSshConnection: (input: SshConnectionInput) =>
+    invoke<SshConnection>("create_manual_ssh_connection", { input }),
+  updateSshConnection: (connectionId: string, input: SshConnectionInput) =>
+    invoke<SshConnection>("update_ssh_connection", { connectionId, input }),
+  testSshConnection: (connectionId: string) =>
+    invoke<SshConnectionTest>("test_ssh_connection", { connectionId }),
+  setSshConnectionEnabled: (connectionId: string, enabled: boolean) =>
+    invoke<SshConnection>("set_ssh_connection_enabled", { connectionId, enabled }),
+  deleteSshConnection: (connectionId: string) =>
+    invoke<void>("delete_ssh_connection", { connectionId }),
+  restoreSshConnection: (connectionId: string) =>
+    invoke<SshConnection>("restore_ssh_connection", { connectionId }),
   getRemoteAccessStatus: () => invoke<RemoteAccessStatus>("get_remote_access_status"),
   setRemoteAccessEnabled: (enabled: boolean) =>
     invoke<RemoteAccessStatus>("set_remote_access_enabled", { enabled }),
@@ -164,6 +190,23 @@ export const ipc = {
     invoke<void>("show_agent_notification", { title, body }),
   listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
   listArchivedWorkspaces: () => invoke<Workspace[]>("list_archived_workspaces"),
+  getSshConnectionHome: (connectionId: string) =>
+    invoke<SshConnectionTest>("get_ssh_connection_home", { connectionId }),
+  listSshDirectories: (connectionId: string, path: string) =>
+    invoke<SshRemoteDirectory[]>("list_ssh_directories", { connectionId, path }),
+  resolveSshDirectory: (connectionId: string, path: string, parent = false) =>
+    invoke<SshRemoteDirectory>("resolve_ssh_directory", { connectionId, path, parent }),
+  createSshWorkspace: (
+    connectionId: string,
+    name: string,
+    rootPath: string,
+    scanDepth?: number,
+  ) => invoke<Workspace>("create_ssh_workspace", {
+    connectionId,
+    name,
+    rootPath,
+    scanDepth: scanDepth ?? null,
+  }),
   openWorkspace: (path: string, scanDepth?: number) =>
     invoke<Workspace>("open_workspace", {
       path,
@@ -335,6 +378,8 @@ export const ipc = {
     modelId?: string | null,
   ) =>
     invoke<void>("set_thread_reasoning_effort", { threadId, reasoningEffort, modelId: modelId ?? null }),
+  setSshRemoteThreadSelectedModel: (threadId: string, modelId: string) =>
+    invoke<Thread>("set_ssh_remote_thread_selected_model", { threadId, modelId }),
   setThreadExecutionPolicy: (
     threadId: string,
     patch: {
@@ -399,52 +444,96 @@ export const ipc = {
   compactCodexThread: (threadId: string) =>
     invoke<Thread>("compact_codex_thread", { threadId }),
   deleteThread: (threadId: string) => invoke<void>("delete_thread", { threadId }),
-  listEngines: () => invoke<EngineInfo[]>("list_engines"),
-  getChatProviderUsage: () =>
-    invoke<ChatProviderUsage[]>("get_chat_provider_usage"),
-  engineHealth: (engineId: string) => invoke<EngineHealth>("engine_health", { engineId }),
-  prewarmEngine: (engineId: string) => invoke<void>("prewarm_engine", { engineId }),
+  getExecutionTarget: (workspaceId?: string | null) =>
+    invoke<ExecutionTarget>("get_execution_target", {
+      workspaceId: workspaceId ?? null,
+    }),
+  listEngines: (workspaceId?: string | null) =>
+    invoke<EngineInfo[]>("list_engines", { workspaceId: workspaceId ?? null }),
+  getEngineInfo: (engineId: string, workspaceId?: string | null) =>
+    invoke<EngineInfo>("get_engine_info", {
+      engineId,
+      workspaceId: workspaceId ?? null,
+    }),
+  getChatProviderUsage: (
+    workspaceId?: string | null,
+    engineId?: string | null,
+  ) =>
+    invoke<ChatProviderUsage[]>("get_chat_provider_usage", {
+      workspaceId: workspaceId ?? null,
+      engineId: engineId ?? null,
+    }),
+  engineHealth: (engineId: string, workspaceId?: string | null) =>
+    invoke<EngineHealth>("engine_health", { engineId, workspaceId: workspaceId ?? null }),
+  prewarmEngine: (engineId: string, workspaceId?: string | null) =>
+    invoke<void>("prewarm_engine", { engineId, workspaceId: workspaceId ?? null }),
   runEngineCheck: (engineId: string, command: string) =>
     invoke<EngineCheckResult>("run_engine_check", { engineId, command }),
-  listCodexSkills: (cwd: string) =>
-    invoke<CodexSkill[]>("list_codex_skills", { cwd }),
-  listCodexApps: () => invoke<CodexApp[]>("list_codex_apps"),
-  getOpenCodeRuntimeCatalog: (cwd: string) =>
-    invoke<OpenCodeRuntimeCatalog>("get_opencode_runtime_catalog", { cwd }),
+  listCodexSkills: (cwd: string, workspaceId?: string | null) =>
+    invoke<CodexSkill[]>("list_codex_skills", {
+      cwd,
+      workspaceId: workspaceId ?? null,
+    }),
+  listCodexApps: (workspaceId?: string | null) =>
+    invoke<CodexApp[]>("list_codex_apps", {
+      workspaceId: workspaceId ?? null,
+    }),
+  listCodexPlugins: (cwd: string, workspaceId?: string | null) =>
+    invoke<CodexPlugin[]>("list_codex_plugins", {
+      cwd,
+      workspaceId: workspaceId ?? null,
+    }),
+  getOpenCodeRuntimeCatalog: (cwd: string, workspaceId?: string | null) =>
+    invoke<OpenCodeRuntimeCatalog>("get_opencode_runtime_catalog", {
+      cwd,
+      workspaceId: workspaceId ?? null,
+    }),
   getExtensionCatalog: (
     providerId: ExtensionProviderId,
+    workspaceId?: string | null,
     cwd?: string | null,
   ) =>
     invoke<ExtensionCatalog>("get_extension_catalog", {
       providerId,
+      workspaceId: workspaceId ?? null,
       cwd: cwd ?? null,
+    }),
+  getCliExtensions: (cliId: string, workspaceId?: string | null) =>
+    invoke<ExtensionItem[]>("get_cli_extensions", {
+      cliId,
+      workspaceId: workspaceId ?? null,
     }),
   scheduleExtensionCatalogWorkspaceRefresh: (workspaceId: string) =>
     invoke<void>("schedule_extension_catalog_workspace_refresh", { workspaceId }),
   requestExtensionCatalogRefresh: (
     providerId: ExtensionProviderId,
+    workspaceId?: string | null,
     cwd?: string | null,
     kinds?: ExtensionKind[],
   ) =>
     invoke<ExtensionCatalog>("request_extension_catalog_refresh", {
       providerId,
+      workspaceId: workspaceId ?? null,
       cwd: cwd ?? null,
       kinds: kinds ?? null,
     }),
   getExtensionDetails: (
     providerId: ExtensionProviderId,
+    workspaceId: string | null | undefined,
     kind: ExtensionKind,
     extensionId: string,
     cwd?: string | null,
   ) =>
     invoke<ExtensionItem>("get_extension_details", {
       providerId,
+      workspaceId: workspaceId ?? null,
       kind,
       extensionId,
       cwd: cwd ?? null,
     }),
   performExtensionAction: (
     providerId: ExtensionProviderId,
+    workspaceId: string | null | undefined,
     kind: ExtensionKind,
     extensionId: string,
     action: ExtensionAction,
@@ -453,6 +542,7 @@ export const ipc = {
   ) =>
     invoke<ExtensionActionResult>("perform_extension_action", {
       providerId,
+      workspaceId: workspaceId ?? null,
       kind,
       extensionId,
       action,
@@ -584,8 +674,16 @@ export const ipc = {
   getFileTree: (repoPath: string) => invoke<FileTreeEntry[]>("get_file_tree", { repoPath }),
   getFileTreePage: (repoPath: string, offset?: number, limit?: number) =>
     invoke<FileTreePage>("get_file_tree_page", { repoPath, offset: offset ?? null, limit: limit ?? null }),
-  listDir: (repoPath: string, dirPath: string) =>
-    invoke<FileTreeEntry[]>("list_dir", { repoPath, dirPath }),
+  listDir: (
+    repoPath: string,
+    dirPath: string,
+    workspaceId?: string | null,
+  ) =>
+    invoke<FileTreeEntry[]>("list_dir", {
+      repoPath,
+      dirPath,
+      workspaceId: workspaceId ?? null,
+    }),
   createFile: (repoPath: string, filePath: string, workspaceId?: string | null) =>
     invoke<void>("create_file", { repoPath, filePath, workspaceId: workspaceId ?? null }),
   createDir: (repoPath: string, dirPath: string, workspaceId?: string | null) =>
@@ -652,8 +750,34 @@ export const ipc = {
     invoke<void>("apply_git_stash", { repoPath, stashIndex }),
   popGitStash: (repoPath: string, stashIndex: number) =>
     invoke<void>("pop_git_stash", { repoPath, stashIndex }),
-  readFile: (repoPath: string, filePath: string) =>
-    invoke<ReadFileResult>("read_file", { repoPath, filePath }),
+  readFile: (
+    repoPath: string,
+    filePath: string,
+    workspaceId?: string | null,
+  ) =>
+    invoke<ReadFileResult>("read_file", {
+      repoPath,
+      filePath,
+      workspaceId: workspaceId ?? null,
+    }),
+  getFileVersion: (
+    repoPath: string,
+    filePath: string,
+    workspaceId?: string | null,
+  ) => invoke<string>("get_file_version", {
+    repoPath,
+    filePath,
+    workspaceId: workspaceId ?? null,
+  }),
+  getDirectoryFingerprint: (
+    repoPath: string,
+    dirPath: string,
+    workspaceId?: string | null,
+  ) => invoke<string>("get_directory_fingerprint", {
+    repoPath,
+    dirPath,
+    workspaceId: workspaceId ?? null,
+  }),
   resolveEditorFileReference: (
     workspaceId: string,
     rawReference: string,
@@ -666,8 +790,19 @@ export const ipc = {
       preferredRepoPath: preferredRepoPath ?? null,
       currentCwd: currentCwd ?? null,
     }),
-  writeFile: (repoPath: string, filePath: string, content: string, workspaceId?: string | null) =>
-    invoke<void>("write_file", { repoPath, filePath, content, workspaceId: workspaceId ?? null }),
+  writeFile: (
+    repoPath: string,
+    filePath: string,
+    content: string,
+    workspaceId?: string | null,
+    expectedVersion?: string | null,
+  ) => invoke<WriteFileResult>("write_file", {
+    repoPath,
+    filePath,
+    content,
+    workspaceId: workspaceId ?? null,
+    expectedVersion: expectedVersion ?? null,
+  }),
   watchGitRepo: (repoPath: string) => invoke<void>("watch_git_repo", { repoPath }),
   addGitWorktree: (repoPath: string, worktreePath: string, branchName: string, baseRef?: string | null) =>
     invoke<GitWorktree>("add_git_worktree", { repoPath, worktreePath, branchName, baseRef: baseRef ?? null }),
@@ -790,8 +925,8 @@ export const ipc = {
     invoke<string | null>("get_default_autonomy_preset"),
   setDefaultAutonomyPreset: (preset: string | null) =>
     invoke<string | null>("set_default_autonomy_preset", { preset }),
-  codexUsesExternalSandbox: () =>
-    invoke<boolean>("codex_uses_external_sandbox"),
+  codexUsesExternalSandbox: (workspaceId?: string | null) =>
+    invoke<boolean>("codex_uses_external_sandbox", { workspaceId: workspaceId ?? null }),
 };
 
 export async function listenThreadEvents(
@@ -815,6 +950,27 @@ export interface ThreadUpdatedEvent {
   threadId: string;
   workspaceId: string;
   thread?: Thread | null;
+}
+
+export const SSH_REMOTE_PROJECT_SESSIONS_REFRESHED_EVENT =
+  "ssh-remote-project-sessions-refreshed";
+
+export interface SshRemoteProjectSessionsRefreshedEvent {
+  /** 收到同步通知的 SSH workspace 标识。 */
+  workspaceId: string;
+  /** 已成功从远端 CLI 同步会话的 CLI 标识。 */
+  succeededCliIds: string[];
+  /** 同步失败的远端 CLI 标识。 */
+  failedCliIds: string[];
+}
+
+export async function listenSshRemoteProjectSessionsRefreshed(
+  onEvent: (event: SshRemoteProjectSessionsRefreshedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<SshRemoteProjectSessionsRefreshedEvent>(
+    SSH_REMOTE_PROJECT_SESSIONS_REFRESHED_EVENT,
+    ({ payload }) => onEvent(payload),
+  );
 }
 
 export interface CodexRemoteThreadRemovedEvent {

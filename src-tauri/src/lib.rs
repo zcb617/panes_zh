@@ -1,3 +1,4 @@
+pub(crate) mod cli_tools;
 mod commands;
 mod computer_control_sdk;
 mod computer_control_service;
@@ -11,13 +12,19 @@ mod git;
 mod linux_appimage;
 mod linux_webkit;
 mod locale;
+pub(crate) mod message_notify_helper;
 mod models;
 mod path_utils;
 mod power;
 mod process_utils;
 mod remote;
+mod remote_project_claude_runtime_service;
+mod remote_project_codex_runtime_service;
+mod remote_project_opencode_runtime_service;
+mod remote_project_session_refresh_service;
 mod runtime_env;
 mod scheduled_tasks;
+mod ssh;
 mod state;
 mod terminal;
 mod terminal_notifications;
@@ -32,6 +39,7 @@ use std::sync::{
 use anyhow::Context;
 use rusqlite::OptionalExtension;
 
+use cli_tools::{factory::CliToolFactory, CliTool};
 use config::app_config::AppConfig;
 use db::Database;
 use engines::{CodexRuntimeEvent, EngineManager};
@@ -55,7 +63,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, RunEvent, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    Emitter, Listener, Manager, RunEvent, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use terminal::TerminalManager;
@@ -77,7 +85,19 @@ pub fn run() {
     env_logger::init();
     linux_webkit::apply_webkit_display_workarounds();
 
-    let db = Database::init().expect("failed to initialize database");
+    let db = match Database::init() {
+        Ok(db) => db,
+        Err(error) => {
+            if let Some(version_error) = error.downcast_ref::<db::UnsupportedDatabaseVersion>() {
+                show_database_version_error(
+                    version_error.current_version,
+                    version_error.supported_version,
+                );
+                return;
+            }
+            panic!("failed to initialize database: {error:#}");
+        }
+    };
     match db::threads::reconcile_runtime_state(&db) {
         Ok(report) => {
             if report.messages_marked_interrupted > 0 || report.thread_status_updates > 0 {
@@ -134,6 +154,7 @@ pub fn run() {
         scheduled_tasks: Arc::new(ScheduledTaskManager::new()),
         computer_control_service,
         remote_access: Arc::new(RemoteTunnelManager::default()),
+        ssh_monitor: Arc::new(ssh::monitor::SshConnectionMonitor::default()),
     };
 
     let app = tauri::Builder::default()
@@ -225,7 +246,42 @@ pub fn run() {
                     .configure(remote_handle, remote_state, remote_config)
                     .await;
             });
-            app.on_menu_event(move |_app, event| {
+            let ssh_monitor = state.ssh_monitor.clone();
+            let ssh_db = state.db.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = ssh_monitor.reconcile(ssh_db).await {
+                log::warn!("failed to start SSH connection monitors: {error}");
+            }
+        });
+        let ssh_startup_handle = handle.clone();
+        let ssh_startup_db = state.db.clone();
+        handle.once("ssh-remote-project-session-sync-ready", move |_| {
+            let app_handle = ssh_startup_handle.clone();
+            let db = ssh_startup_db.clone();
+            tauri::async_runtime::spawn(async move {
+                match ssh::cli_tunnel_registry::init_all_ssh_remote_server(db.clone().into()).await {
+                    Ok(initialization) => {
+                        for result in initialization {
+                            if let Some(error) = result.error {
+                                log::warn!(
+                                    "SSH remote server Map recovery completed with errors: connection_id={} error={error}",
+                                    result.connection_id,
+                                );
+                            }
+                        }
+                        remote_project_session_refresh_service::refresh_all_ssh_remote_project_sessions(
+                            &app_handle,
+                            db.into(),
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        log::warn!("failed to initialize SSH remote server tunnel Map: {error:#}");
+                    }
+                }
+            });
+        });
+        app.on_menu_event(move |_app, event| {
                 let id = event.id().as_ref();
                 match id {
                     "toggle-sidebar" | "toggle-git-panel" | "toggle-focus-mode"
@@ -262,6 +318,16 @@ pub fn run() {
             commands::remote::regenerate_remote_access_identity,
             commands::remote::refresh_remote_pairing_token,
             commands::remote::revoke_remote_device,
+            commands::ssh_connections::list_ssh_connections,
+            commands::ssh_connections::list_deleted_ssh_connections,
+            commands::ssh_connections::scan_ssh_config_hosts,
+            commands::ssh_connections::import_ssh_config_hosts,
+            commands::ssh_connections::create_manual_ssh_connection,
+            commands::ssh_connections::update_ssh_connection,
+            commands::ssh_connections::test_ssh_connection,
+            commands::ssh_connections::set_ssh_connection_enabled,
+            commands::ssh_connections::delete_ssh_connection,
+            commands::ssh_connections::restore_ssh_connection,
             commands::browser::browser_show,
             commands::browser::browser_set_bounds,
             commands::browser::browser_hide,
@@ -295,6 +361,10 @@ pub fn run() {
             commands::workspace::open_workspace,
             commands::workspace::list_workspaces,
             commands::workspace::list_archived_workspaces,
+            commands::workspace::get_ssh_connection_home,
+            commands::workspace::list_ssh_directories,
+            commands::workspace::resolve_ssh_directory,
+            commands::workspace::create_ssh_workspace,
             commands::workspace::get_repos,
             commands::workspace::set_repo_trust_level,
             commands::workspace::set_repo_git_active,
@@ -367,6 +437,8 @@ pub fn run() {
             commands::update::install_downloaded_update,
             commands::files::list_dir,
             commands::files::read_file,
+            commands::files::get_file_version,
+            commands::files::get_directory_fingerprint,
             commands::files::resolve_editor_file_reference,
             commands::files::write_file,
             commands::files::create_file,
@@ -382,16 +454,20 @@ pub fn run() {
             commands::files::get_default_file_open_target,
             commands::files::set_default_file_open_target,
             commands::git::watch_git_repo,
+            commands::engines::get_execution_target,
             commands::engines::list_engines,
+            commands::engines::get_engine_info,
             commands::engines::get_chat_provider_usage,
             commands::engines::codex_uses_external_sandbox,
             commands::engines::engine_health,
             commands::engines::prewarm_engine,
             commands::engines::list_codex_skills,
             commands::engines::list_codex_apps,
+            commands::engines::list_codex_plugins,
             commands::engines::get_opencode_runtime_catalog,
             commands::engines::run_engine_check,
             commands::extensions::get_extension_catalog,
+            commands::extensions::get_cli_extensions,
             commands::extensions::schedule_extension_catalog_workspace_refresh,
             commands::extensions::request_extension_catalog_refresh,
             commands::extensions::get_extension_details,
@@ -406,6 +482,7 @@ pub fn run() {
             commands::threads::rename_thread,
             commands::threads::confirm_workspace_thread,
             commands::threads::set_thread_reasoning_effort,
+            commands::threads::set_ssh_remote_thread_selected_model,
             commands::threads::set_thread_execution_policy,
             commands::threads::set_thread_codex_config,
             commands::threads::set_thread_opencode_config,
@@ -454,6 +531,7 @@ pub fn run() {
                 .state::<Arc<computer_control_sdk::CuaDriverSdk>>()
                 .inner()
                 .clone();
+            let ssh_monitor = app_handle.state::<AppState>().ssh_monitor.clone();
             tauri::async_runtime::block_on(async move {
                 if let Err(error) = keep_awake.shutdown().await {
                     log::warn!("failed to release keep awake on shutdown: {error}");
@@ -464,10 +542,27 @@ pub fn run() {
                     log::warn!("failed to shut down CUA SDK runtime: {error}");
                 }
                 remote_access.shutdown().await;
+                ssh_monitor.shutdown().await;
+                ssh::cli_tunnel_registry::shutdown().await;
             });
         }
         _ => {}
     });
+}
+
+fn show_database_version_error(current_version: u64, supported_version: u64) {
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .build(tauri::generate_context!())
+        .expect("failed to build database version error dialog");
+    app.dialog()
+        .message(format!(
+            "数据库版本不符。\n\n当前数据库版本：{current_version}\n当前程序支持的数据库版本：{supported_version}"
+        ))
+        .title("Panes")
+        .kind(MessageDialogKind::Error)
+        .buttons(MessageDialogButtons::Ok)
+        .blocking_show();
 }
 
 fn create_main_window(app: &tauri::AppHandle) -> anyhow::Result<WebviewWindow> {
@@ -619,7 +714,11 @@ struct CodexRemoteThreadRemovedEvent {
 }
 
 async fn run_codex_runtime_bridge(app: tauri::AppHandle, state: AppState) {
-    let mut rx = state.engines.subscribe_codex_runtime_events();
+    let codex = CliToolFactory::new(state.clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let cli: &dyn CliTool = codex.as_ref();
+    let mut rx = cli.subscribe_codex_runtime_events();
     loop {
         match rx.recv().await {
             Ok(event) => handle_codex_runtime_event(&app, &state, event).await,

@@ -57,7 +57,27 @@ static LAST_OPENCODE_MESSAGE_SORT_VALUE: AtomicU64 = AtomicU64::new(0);
 pub struct OpenCodeEngine {
     state: Arc<Mutex<OpenCodeState>>,
     http: reqwest::Client,
-    computer_control_service: Arc<Mutex<Option<Arc<ComputerControlService>>>>,
+    computer_control_service: Arc<std::sync::Mutex<Option<Arc<ComputerControlService>>>>,
+    target: OpenCodeTransportTarget,
+}
+
+#[derive(Clone)]
+enum OpenCodeTransportTarget {
+    Local,
+    Remote(Arc<RemoteOpenCodeEndpoint>),
+}
+
+struct RemoteOpenCodeEndpoint {
+    base_url: String,
+    password: String,
+    event_bus: broadcast::Sender<Arc<OpenCodeBusEvent>>,
+    pump_cancel: CancellationToken,
+}
+
+impl Drop for RemoteOpenCodeEndpoint {
+    fn drop(&mut self) {
+        self.pump_cancel.cancel();
+    }
 }
 
 #[derive(Default)]
@@ -82,17 +102,22 @@ struct OpenCodeServer {
     cwd: String,
     base_url: String,
     password: String,
-    child: Mutex<Child>,
+    child: Mutex<Option<Child>>,
     event_bus: broadcast::Sender<Arc<OpenCodeBusEvent>>,
-    pump_cancel: CancellationToken,
-    callback_cancel: CancellationToken,
-    run_dir: PathBuf,
+    pump_cancel: Option<CancellationToken>,
+    callback_cancel: Option<CancellationToken>,
+    run_dir: Option<PathBuf>,
+    include_directory_header: bool,
 }
 
 impl Drop for OpenCodeServer {
     fn drop(&mut self) {
-        self.pump_cancel.cancel();
-        self.callback_cancel.cancel();
+        if let Some(pump_cancel) = self.pump_cancel.as_ref() {
+            pump_cancel.cancel();
+        }
+        if let Some(callback_cancel) = self.callback_cancel.as_ref() {
+            callback_cancel.cancel();
+        }
     }
 }
 
@@ -602,7 +627,8 @@ impl Default for OpenCodeEngine {
         Self {
             state: Arc::new(Mutex::new(OpenCodeState::default())),
             http: reqwest::Client::new(),
-            computer_control_service: Arc::new(Mutex::new(None)),
+            computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            target: OpenCodeTransportTarget::Local,
         }
     }
 }
@@ -629,7 +655,10 @@ impl Engine for OpenCodeEngine {
     }
 
     async fn is_available(&self) -> bool {
-        resolve_opencode_executable().is_some()
+        match &self.target {
+            OpenCodeTransportTarget::Local => resolve_opencode_executable().is_some(),
+            OpenCodeTransportTarget::Remote(_) => true,
+        }
     }
 
     async fn start_thread(
@@ -645,7 +674,7 @@ impl Engine for OpenCodeEngine {
         let _ = parsed_model;
         let permission_mode = permission_mode_from_policy(sandbox.approval_policy.as_ref());
         let reasoning_effort = self
-            .resolve_session_reasoning_effort(model, sandbox.reasoning_effort.as_deref())
+            .resolve_session_reasoning_effort(&cwd, model, sandbox.reasoning_effort.as_deref())
             .await;
         let agent = normalize_opencode_agent(sandbox.opencode_agent.as_deref());
 
@@ -664,6 +693,11 @@ impl Engine for OpenCodeEngine {
                 }
 
                 if existing.cwd == cwd {
+                    if self.is_remote_target() {
+                        anyhow::bail!(
+                            "SSH 远端 OpenCode 会话权限模式与当前设置不一致；不会创建替代会话"
+                        );
+                    }
                     state.sessions.remove(existing_id);
                     drop(state);
                     let engine_thread_id = self
@@ -682,16 +716,36 @@ impl Engine for OpenCodeEngine {
                     );
                     return Ok(EngineThread { engine_thread_id });
                 }
+
+                if self.is_remote_target() {
+                    anyhow::bail!(
+                        "SSH 远端 OpenCode 会话目录不匹配；不会在其他目录或本机创建替代会话"
+                    );
+                }
             }
         }
 
         let server = self.ensure_server(&cwd).await?;
         let engine_thread_id = match resume_engine_thread_id {
             Some(existing_id) => match self.get_session(server.as_ref(), existing_id).await {
-                Ok(session) if session_permission_matches(&session, permission_mode) => {
+                Ok(session)
+                    if session.directory == cwd
+                        && (session_permission_matches(&session, permission_mode)
+                            || (self.is_remote_target()
+                                && session.permission.is_none()
+                                && permission_mode == OpenCodePermissionMode::Ask)) =>
+                {
                     existing_id.to_string()
                 }
-                Ok(_) => {
+                Ok(session) => {
+                    if self.is_remote_target() {
+                        anyhow::bail!(
+                            "SSH 远端 OpenCode 会话恢复失败：session={} expected_directory={} actual_directory={}；不会创建替代会话",
+                            existing_id,
+                            cwd,
+                            session.directory
+                        );
+                    }
                     log::warn!(
                         "opencode session {existing_id} permission rules differ from requested mode; creating a new session"
                     );
@@ -699,6 +753,11 @@ impl Engine for OpenCodeEngine {
                         .await?
                 }
                 Err(error) => {
+                    if self.is_remote_target() {
+                        return Err(error).context(
+                            "SSH 远端 OpenCode 会话恢复失败；不会在远端或本机创建替代会话",
+                        );
+                    }
                     log::warn!(
                         "opencode session resume failed for {existing_id}, creating a new session: {error}"
                     );
@@ -1000,8 +1059,37 @@ impl Engine for OpenCodeEngine {
 
 impl OpenCodeEngine {
     pub fn set_computer_control_service(&self, service: Arc<ComputerControlService>) {
-        let mut current = self.computer_control_service.blocking_lock();
-        *current = Some(service);
+        if let Ok(mut current) = self.computer_control_service.lock() {
+            *current = Some(service);
+        }
+    }
+
+    pub fn new_remote_http(base_url: String, password: String) -> Self {
+        let (event_bus, _) =
+            broadcast::channel::<Arc<OpenCodeBusEvent>>(OPENCODE_EVENT_BUFFER_CAPACITY);
+        let pump_cancel = CancellationToken::new();
+        tokio::spawn(run_event_pump(
+            base_url.clone(),
+            password.clone(),
+            reqwest::Client::new(),
+            event_bus.clone(),
+            pump_cancel.clone(),
+        ));
+        Self {
+            state: Arc::new(Mutex::new(OpenCodeState::default())),
+            http: reqwest::Client::new(),
+            computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            target: OpenCodeTransportTarget::Remote(Arc::new(RemoteOpenCodeEndpoint {
+                base_url,
+                password,
+                event_bus,
+                pump_cancel,
+            })),
+        }
+    }
+
+    fn is_remote_target(&self) -> bool {
+        matches!(&self.target, OpenCodeTransportTarget::Remote(_))
     }
 
     async fn ensure_server(&self, cwd: &str) -> Result<Arc<OpenCodeServer>> {
@@ -1009,8 +1097,27 @@ impl OpenCodeEngine {
             return Ok(server);
         }
 
-        let service = self.computer_control_service.lock().await.clone();
-        let created = Arc::new(start_server(cwd, service).await?);
+        let created = Arc::new(match &self.target {
+            OpenCodeTransportTarget::Local => {
+                let service = self
+                    .computer_control_service
+                    .lock()
+                    .ok()
+                    .and_then(|service| service.clone());
+                start_server(cwd, service).await?
+            }
+            OpenCodeTransportTarget::Remote(endpoint) => OpenCodeServer {
+                cwd: cwd.to_string(),
+                base_url: endpoint.base_url.clone(),
+                password: endpoint.password.clone(),
+                child: Mutex::new(None),
+                event_bus: endpoint.event_bus.clone(),
+                pump_cancel: None,
+                callback_cancel: None,
+                run_dir: None,
+                include_directory_header: true,
+            },
+        });
         let existing = {
             let mut state = self.state.lock().await;
             if let Some(server) = state.servers.get(cwd).cloned() {
@@ -1084,10 +1191,30 @@ impl OpenCodeEngine {
     }
 
     pub async fn prewarm(&self) -> Result<()> {
-        let executable =
-            resolve_opencode_executable().context("`opencode` executable not found")?;
-        let _ = run_opencode_command(&executable, &["--version"]).await?;
-        Ok(())
+        match &self.target {
+            OpenCodeTransportTarget::Local => {
+                let executable =
+                    resolve_opencode_executable().context("`opencode` executable not found")?;
+                let _ = run_opencode_command(&executable, &["--version"]).await?;
+                Ok(())
+            }
+            OpenCodeTransportTarget::Remote(endpoint) => {
+                let response = self
+                    .http
+                    .get(format!(
+                        "{}/global/health",
+                        endpoint.base_url.trim_end_matches('/')
+                    ))
+                    .headers(auth_headers(&endpoint.password))
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<OpenCodeHealthResponse>()
+                    .await?;
+                anyhow::ensure!(response.healthy, "SSH 远端 OpenCode 服务健康检查失败");
+                Ok(())
+            }
+        }
     }
 
     pub async fn health_report(&self) -> OpenCodeHealthReport {
@@ -1127,6 +1254,13 @@ impl OpenCodeEngine {
     }
 
     pub async fn list_models_runtime(&self) -> Vec<ModelInfo> {
+        if self.is_remote_target() {
+            return self.runtime_model_fallback().await;
+        }
+        self.list_models_runtime_for_cwd("").await
+    }
+
+    pub async fn list_models_runtime_for_cwd(&self, cwd: &str) -> Vec<ModelInfo> {
         {
             let state = self.state.lock().await;
             if let Some(cache) = state.runtime_model_cache.clone() {
@@ -1134,19 +1268,42 @@ impl OpenCodeEngine {
             }
         }
 
-        let models = match self.load_models_from_verbose_command().await {
-            Ok(models) if !models.is_empty() => models,
-            Ok(_) => match self.load_models_from_command().await {
+        let models = if self.is_remote_target() {
+            match self.ensure_server(cwd).await {
+                Ok(server) => {
+                    let result = self
+                        .load_models_from_provider_endpoint(server.as_ref())
+                        .await;
+                    self.stop_server_if_unused(cwd).await;
+                    match result {
+                        Ok(models) if !models.is_empty() => models,
+                        Ok(_) => Vec::new(),
+                        Err(error) => {
+                            log::warn!("failed to load SSH remote OpenCode models: {error:#}");
+                            Vec::new()
+                        }
+                    }
+                }
+                Err(error) => {
+                    log::warn!("failed to connect SSH remote OpenCode for models: {error:#}");
+                    Vec::new()
+                }
+            }
+        } else {
+            match self.load_models_from_verbose_command().await {
                 Ok(models) if !models.is_empty() => models,
-                Ok(_) | Err(_) => self.models(),
-            },
-            Err(error) => {
-                log::warn!(
-                    "failed to load verbose opencode models; falling back to basic list: {error}"
-                );
-                match self.load_models_from_command().await {
+                Ok(_) => match self.load_models_from_command().await {
                     Ok(models) if !models.is_empty() => models,
                     Ok(_) | Err(_) => self.models(),
+                },
+                Err(error) => {
+                    log::warn!(
+                        "failed to load verbose opencode models; falling back to basic list: {error}"
+                    );
+                    match self.load_models_from_command().await {
+                        Ok(models) if !models.is_empty() => models,
+                        Ok(_) | Err(_) => self.models(),
+                    }
                 }
             }
         };
@@ -1288,6 +1445,23 @@ impl OpenCodeEngine {
         result
     }
 
+    pub async fn abort_session(&self, cwd: &str, session_id: &str) -> Result<()> {
+        let server = self.ensure_server(cwd).await?;
+        let result = self
+            .request(
+                server.as_ref(),
+                reqwest::Method::POST,
+                &format!("/session/{session_id}/abort"),
+            )
+            .send()
+            .await?
+            .error_for_status()
+            .context("failed to abort OpenCode session")
+            .map(|_| ());
+        self.stop_server_if_unused(cwd).await;
+        result
+    }
+
     pub async fn set_session_archived(
         &self,
         cwd: &str,
@@ -1326,10 +1500,11 @@ impl OpenCodeEngine {
 
     async fn resolve_session_reasoning_effort(
         &self,
+        cwd: &str,
         model_id: &str,
         requested_effort: Option<&str>,
     ) -> Option<String> {
-        let models = self.list_models_runtime().await;
+        let models = self.list_models_runtime_for_cwd(cwd).await;
         let model = models.iter().find(|model| model.id == model_id)?;
         resolve_model_reasoning_effort(model, requested_effort)
     }
@@ -1534,9 +1709,15 @@ impl OpenCodeEngine {
         path: &str,
     ) -> reqwest::RequestBuilder {
         let url = format!("{}{}", server.base_url.trim_end_matches('/'), path);
-        self.http
+        let request = self
+            .http
             .request(method, url)
-            .headers(auth_headers(&server.password))
+            .headers(auth_headers(&server.password));
+        if server.include_directory_header {
+            request.header("X-OpenCode-Directory", &server.cwd)
+        } else {
+            request
+        }
     }
 
     async fn handle_event(
@@ -2055,16 +2236,27 @@ impl OpenCodeEngine {
 
 impl OpenCodeServer {
     async fn stop(&self) {
+        if let Some(pump_cancel) = self.pump_cancel.as_ref() {
+            pump_cancel.cancel();
+        }
+        if let Some(callback_cancel) = self.callback_cancel.as_ref() {
+            callback_cancel.cancel();
+        }
         let mut child = self.child.lock().await;
-        if let Err(error) = child.kill().await {
+        let Some(mut process) = child.take() else {
+            return;
+        };
+        if let Err(error) = process.kill().await {
             log::debug!("failed to stop OpenCode server process: {error}");
         }
-        if let Err(error) = std::fs::remove_dir_all(&self.run_dir) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                log::debug!(
-                    "failed to remove OpenCode computer-control runtime directory {}: {error}",
-                    self.run_dir.display()
-                );
+        if let Some(run_dir) = self.run_dir.as_ref() {
+            if let Err(error) = std::fs::remove_dir_all(run_dir) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    log::debug!(
+                        "failed to remove OpenCode computer-control runtime directory {}: {error}",
+                        run_dir.display()
+                    );
+                }
             }
         }
     }
@@ -2780,11 +2972,12 @@ async fn start_server(
         cwd: cwd.to_string(),
         base_url,
         password,
-        child: Mutex::new(child),
+        child: Mutex::new(Some(child)),
         event_bus: event_bus.clone(),
-        pump_cancel: pump_cancel.clone(),
-        callback_cancel: callback_cancel.clone(),
-        run_dir,
+        pump_cancel: Some(pump_cancel.clone()),
+        callback_cancel: Some(callback_cancel.clone()),
+        run_dir: Some(run_dir),
+        include_directory_header: false,
     };
 
     wait_for_server_health(&server).await?;
@@ -3353,6 +3546,31 @@ fn opencode_sort_prefix_for_millis(now_ms: u64, counter: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engines::TurnAttachment;
+
+    #[tokio::test]
+    async fn remote_http_target_uses_shared_endpoint_and_directory_header() {
+        let engine = OpenCodeEngine::new_remote_http(
+            "http://127.0.0.1:43101".to_string(),
+            "runtime-secret".to_string(),
+        );
+        assert!(engine.is_available().await);
+
+        let server = engine.ensure_server("/var/work/project-a").await.unwrap();
+        let request = engine
+            .request(server.as_ref(), reqwest::Method::GET, "/provider")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get("X-OpenCode-Directory")
+                .and_then(|value| value.to_str().ok()),
+            Some("/var/work/project-a")
+        );
+        assert!(request.headers().contains_key(AUTHORIZATION));
+    }
 
     #[test]
     fn parse_model_slug_splits_on_first_slash() {
@@ -3453,6 +3671,38 @@ opencode/gpt-5-nano
         assert_eq!(body.get("variant"), Some(&json!("max")));
         assert_eq!(body["model"]["providerID"], json!("opencode"));
         assert_eq!(body["model"]["modelID"], json!("big-pickle"));
+    }
+
+    #[test]
+    fn remote_attachment_prompt_uses_the_uploaded_remote_file_url() {
+        let body = build_prompt_body(
+            "opencode/big-pickle",
+            None,
+            None,
+            TurnInput {
+                message: "读取附件".to_string(),
+                attachments: vec![TurnAttachment {
+                    file_name: "说明.txt".to_string(),
+                    file_path: "/home/tester/.cache/panes/attachments/workspace/thread/file.txt"
+                        .to_string(),
+                    size_bytes: 12,
+                    mime_type: Some("text/plain".to_string()),
+                    browser_annotation: None,
+                    is_remote: true,
+                    remote_text_content: Some("附件正文".to_string()),
+                }],
+                plan_mode: false,
+                input_items: Vec::new(),
+            },
+        )
+        .expect("prompt body")
+        .body;
+
+        assert_eq!(
+            body["parts"][1]["url"],
+            json!("file:///home/tester/.cache/panes/attachments/workspace/thread/file.txt")
+        );
+        assert_eq!(body["parts"][1]["filename"], json!("说明.txt"));
     }
 
     #[test]

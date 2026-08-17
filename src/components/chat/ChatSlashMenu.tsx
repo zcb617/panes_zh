@@ -1,17 +1,8 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { LucideIcon } from "lucide-react";
+import type { CliSlashCommand } from "../../cli-tools/contracts/slash-command";
 
-export interface SlashCommand {
-  id: string;
-  name: string;
-  description: string;
-  icon: LucideIcon;
-  group?: string;
-  searchTerms?: string[];
-  codexOnly?: boolean;
-  disabled?: boolean;
-}
+export type SlashCommand = CliSlashCommand;
 
 interface ChatSlashMenuProps {
   visible: boolean;
@@ -126,9 +117,7 @@ export function ChatSlashMenu({
                 </span>
                 <span className="slash-menu-item-desc">{cmd.description}</span>
               </span>
-              {cmd.codexOnly && (
-                <span className="slash-menu-item-badge">Codex</span>
-              )}
+              {/* CLI 适配器已经在构建菜单时隔离项目，不再以徽章混排其他 CLI 命令。 */}
             </button>
           </Fragment>
         );

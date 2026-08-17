@@ -247,7 +247,7 @@ struct SidecarUsageLimits {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SidecarModelInfo {
+pub(crate) struct SidecarModelInfo {
     value: String,
     display_name: String,
     description: String,
@@ -1490,7 +1490,7 @@ fn legacy_claude_models() -> Vec<ModelInfo> {
     ]
 }
 
-fn with_legacy_claude_models(mut models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+pub(crate) fn with_legacy_claude_models(mut models: Vec<ModelInfo>) -> Vec<ModelInfo> {
     for legacy_model in legacy_claude_models() {
         if !models.iter().any(|model| model.id == legacy_model.id) {
             models.push(legacy_model);
@@ -1618,7 +1618,7 @@ fn map_claude_model(model: SidecarModelInfo) -> Option<ModelInfo> {
     })
 }
 
-fn map_claude_models(models: Vec<SidecarModelInfo>) -> Vec<ModelInfo> {
+pub(crate) fn map_claude_models(models: Vec<SidecarModelInfo>) -> Vec<ModelInfo> {
     let default_resolved_model = models
         .iter()
         .find(|model| model.value.trim() == "default")

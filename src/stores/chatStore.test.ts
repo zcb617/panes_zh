@@ -94,6 +94,8 @@ describe("chatStore send", () => {
       olderLoadBlockedUntil: 0,
       status: "idle",
       streaming: false,
+      preparingEngineId: null,
+      preparingAttachments: false,
       usageLimits: null,
       usageLimitsLoading: false,
       error: undefined,
@@ -113,6 +115,7 @@ describe("chatStore send", () => {
 
     const state = useChatStore.getState();
     expect(state.streaming).toBe(true);
+    expect(state.preparingEngineId).toBe("codex");
     expect(state.messages).toHaveLength(2);
     expect(state.messages[0]).toMatchObject({
       role: "user",
@@ -128,6 +131,23 @@ describe("chatStore send", () => {
 
     pendingRequest.resolve("assistant-message-id");
     await expect(sendPromise).resolves.toBe(true);
+    expect(useChatStore.getState().preparingEngineId).toBeNull();
+  });
+
+  it("shows remote attachment preparation until the send request is accepted", async () => {
+    const pendingRequest = deferred<string>();
+    mockIpc.sendMessage.mockReturnValueOnce(pendingRequest.promise);
+
+    const sendPromise = useChatStore.getState().send("hello", {
+      engineId: "claude",
+      modelId: "sonnet",
+      remoteAttachmentUpload: true,
+    });
+
+    expect(useChatStore.getState().preparingAttachments).toBe(true);
+    pendingRequest.resolve("assistant-message-id");
+    await expect(sendPromise).resolves.toBe(true);
+    expect(useChatStore.getState().preparingAttachments).toBe(false);
   });
 
   it("removes the optimistic turn if the turn request fails", async () => {
@@ -137,6 +157,7 @@ describe("chatStore send", () => {
 
     const state = useChatStore.getState();
     expect(state.streaming).toBe(false);
+    expect(state.preparingEngineId).toBeNull();
     expect(state.status).toBe("error");
     expect(state.messages).toEqual([]);
   });

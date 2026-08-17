@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use tauri::State;
@@ -7,36 +7,584 @@ use tokio::process::Command;
 #[cfg(not(target_os = "windows"))]
 use crate::runtime_env;
 use crate::{
+    cli_tools::{factory::CliToolFactory, CliExecutionContext, CliTool},
+    engines::{capabilities_for_engine, map_engine_capabilities},
     models::{
-        ChatProviderUsageDto, CodexAppDto, CodexSkillDto, EngineCheckResultDto, EngineHealthDto,
-        EngineInfoDto, OpenCodeRuntimeCatalogDto,
+        ChatProviderUsageDto, CodexAppDto, CodexPluginDto, CodexSkillDto, EngineCheckResultDto,
+        EngineHealthDto, EngineInfoDto, ExecutionTargetDto, OpenCodeRuntimeCatalogDto,
     },
     process_utils,
     state::AppState,
 };
 
 #[tauri::command]
-pub async fn list_engines(state: State<'_, AppState>) -> Result<Vec<EngineInfoDto>, String> {
+pub async fn get_execution_target(
+    state: State<'_, AppState>,
+    workspace_id: Option<String>,
+) -> Result<ExecutionTargetDto, String> {
+    let Some(workspace_id) = workspace_id else {
+        return Ok(ExecutionTargetDto {
+            target_key: "local".to_string(),
+            kind: "local".to_string(),
+            display_name: "本机".to_string(),
+            connection_id: None,
+            host_name: None,
+            user: None,
+            port: None,
+            project_path: None,
+            connection_status: Some("ok".to_string()),
+        });
+    };
+
+    let db = state.db.clone();
+    let lookup_workspace_id = workspace_id.clone();
+    let workspace = tokio::task::spawn_blocking(move || {
+        crate::db::workspaces::find_workspace_by_id(&db, &lookup_workspace_id)
+    })
+    .await
+    .map_err(err_to_string)?
+    .map_err(err_to_string)?
+    .ok_or_else(|| format!("workspace not found: {workspace_id}"))?;
+
+    if workspace.location_kind != "ssh" {
+        return Ok(ExecutionTargetDto {
+            target_key: "local".to_string(),
+            kind: "local".to_string(),
+            display_name: "本机".to_string(),
+            connection_id: None,
+            host_name: None,
+            user: None,
+            port: None,
+            project_path: Some(workspace.root_path),
+            connection_status: Some("ok".to_string()),
+        });
+    }
+
+    let connection_id = workspace
+        .ssh_connection_id
+        .as_deref()
+        .ok_or_else(|| "远端项目未绑定 SSH 连接".to_string())?
+        .to_string();
+    let db = state.db.clone();
+    let lookup_connection_id = connection_id.clone();
+    let connection = tokio::task::spawn_blocking(move || {
+        crate::db::ssh_connections::find(&db, &lookup_connection_id)
+    })
+    .await
+    .map_err(err_to_string)?
+    .map_err(err_to_string)?
+    .ok_or_else(|| format!("SSH connection not found: {connection_id}"))?;
+
+    Ok(ExecutionTargetDto {
+        target_key: format!("ssh:{connection_id}"),
+        kind: "ssh".to_string(),
+        display_name: connection.dto.display_name,
+        connection_id: Some(connection_id),
+        host_name: Some(connection.dto.host_name),
+        user: Some(connection.dto.user),
+        port: Some(connection.dto.port),
+        project_path: Some(workspace.root_path),
+        connection_status: Some(connection.dto.connection_status),
+    })
+}
+
+#[tauri::command]
+pub async fn list_engines(
+    state: State<'_, AppState>,
+    workspace_id: Option<String>,
+) -> Result<Vec<EngineInfoDto>, String> {
+    if let Some(workspace_id) = workspace_id {
+        let db = state.db.clone();
+        let lookup_workspace_id = workspace_id.clone();
+        let workspace = tokio::task::spawn_blocking(move || {
+            crate::db::workspaces::find_workspace_by_id(&db, &lookup_workspace_id)
+        })
+        .await
+        .map_err(err_to_string)?
+        .map_err(err_to_string)?
+        .ok_or_else(|| format!("workspace not found: {workspace_id}"))?;
+        if workspace.location_kind == "ssh" {
+            if workspace.connection_deleted == Some(true) {
+                return Err("SSH 连接已删除，请先恢复连接".to_string());
+            }
+            if workspace.connection_enabled == Some(false) {
+                return Err("SSH 连接已禁用".to_string());
+            }
+            let connection_id = workspace
+                .ssh_connection_id
+                .as_deref()
+                .ok_or_else(|| "远端项目未绑定 SSH 连接".to_string())?
+                .to_string();
+            let mut observed_tunnel_count = 0;
+            let mut stable_checks = 0;
+            for _ in 0..150 {
+                let tunnel_count = crate::ssh::cli_tunnel_registry::list_by_host(&connection_id)
+                    .await
+                    .len();
+                if tunnel_count > observed_tunnel_count {
+                    observed_tunnel_count = tunnel_count;
+                    stable_checks = 0;
+                } else if tunnel_count > 0 {
+                    stable_checks += 1;
+                    if stable_checks >= 5 {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            let tunnels = crate::ssh::cli_tunnel_registry::list_by_host(&connection_id).await;
+            if tunnels.is_empty() {
+                return Err(
+                    "SSH 远端机器没有可用的 Codex、OpenCode 或 Claude 对话运行时".to_string(),
+                );
+            }
+
+            let mut engines = Vec::new();
+            for (cli_id, engine_name) in [
+                ("codex", "Codex"),
+                ("opencode", "OpenCode"),
+                ("claude", "Claude"),
+            ] {
+                if !tunnels.contains_key(cli_id) {
+                    continue;
+                }
+                let discovered = match cli_id {
+                    "codex" => {
+                        let codex = CliToolFactory::new(state.inner().clone())
+                            .create("codex")
+                            .expect("Codex CLI factory mapping must exist");
+                        let context = CliExecutionContext::from_workspace(&workspace)
+                            .map_err(err_to_string)?;
+                        let cli: &dyn CliTool = codex.as_ref();
+                        cli.get_engine_info(&context).await
+                    }
+                    "opencode" => {
+                        let opencode = CliToolFactory::new(state.inner().clone())
+                            .create("opencode")
+                            .expect("OpenCode CLI factory mapping must exist");
+                        let context = CliExecutionContext::from_workspace(&workspace)
+                            .map_err(err_to_string)?;
+                        let cli: &dyn CliTool = opencode.as_ref();
+                        cli.get_engine_info(&context).await
+                    }
+                    "claude" => {
+                        let claude = CliToolFactory::new(state.inner().clone())
+                            .create("claude")
+                            .expect("Claude CLI factory mapping must exist");
+                        let context = CliExecutionContext::from_workspace(&workspace)
+                            .map_err(err_to_string)?;
+                        let cli: &dyn CliTool = claude.as_ref();
+                        cli.get_engine_info(&context).await
+                    }
+                    _ => unreachable!(),
+                };
+                match discovered {
+                    Ok(engine) => engines.push(engine),
+                    Err(error) => {
+                        log::warn!(
+                            "读取 SSH 远端引擎目录失败，保留其他引擎: connection_id={} cli_id={} error={error:#}",
+                            connection_id,
+                            cli_id,
+                        );
+                        engines.push(EngineInfoDto {
+                            id: cli_id.to_string(),
+                            name: engine_name.to_string(),
+                            models: Vec::new(),
+                            capabilities: map_engine_capabilities(capabilities_for_engine(cli_id)),
+                        });
+                    }
+                }
+            }
+            return Ok(engines);
+        }
+    }
     state.engines.list_engines().await.map_err(err_to_string)
+}
+
+#[tauri::command]
+pub async fn get_engine_info(
+    state: State<'_, AppState>,
+    engine_id: String,
+    workspace_id: Option<String>,
+) -> Result<EngineInfoDto, String> {
+    if engine_id == "opencode" {
+        let opencode = CliToolFactory::new(state.inner().clone())
+            .create("opencode")
+            .expect("OpenCode CLI factory mapping must exist");
+        let context = opencode
+            .execution_context(workspace_id.as_deref())
+            .await
+            .map_err(err_to_string)?;
+        let cli: &dyn CliTool = opencode.as_ref();
+        return cli.get_engine_info(&context).await.map_err(err_to_string);
+    }
+    if engine_id == "claude" {
+        let claude = CliToolFactory::new(state.inner().clone())
+            .create("claude")
+            .expect("Claude CLI factory mapping must exist");
+        let context = claude
+            .execution_context(workspace_id.as_deref())
+            .await
+            .map_err(err_to_string)?;
+        let cli: &dyn CliTool = claude.as_ref();
+        return cli.get_engine_info(&context).await.map_err(err_to_string);
+    }
+    if let Some(workspace_id) = workspace_id {
+        let db = state.db.clone();
+        let lookup_workspace_id = workspace_id.clone();
+        let workspace = tokio::task::spawn_blocking(move || {
+            crate::db::workspaces::find_workspace_by_id(&db, &lookup_workspace_id)
+        })
+        .await
+        .map_err(err_to_string)?
+        .map_err(err_to_string)?
+        .ok_or_else(|| format!("workspace not found: {workspace_id}"))?;
+        if workspace.location_kind == "ssh" {
+            return match engine_id.as_str() {
+                "codex" => {
+                    let codex = CliToolFactory::new(state.inner().clone())
+                        .create("codex")
+                        .expect("Codex CLI factory mapping must exist");
+                    let context =
+                        CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                    let cli: &dyn CliTool = codex.as_ref();
+                    cli.get_engine_info(&context).await
+                }
+                "opencode" => unreachable!("OpenCode engine info already uses OpenCodeCli"),
+                "claude" => {
+                    let claude = CliToolFactory::new(state.inner().clone())
+                        .create("claude")
+                        .expect("Claude CLI factory mapping must exist");
+                    let context =
+                        CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                    let cli: &dyn CliTool = claude.as_ref();
+                    cli.get_engine_info(&context).await
+                }
+                _ => Err(anyhow::anyhow!(
+                    "SSH 远端项目当前阶段尚未接入 {} 正式对话",
+                    engine_id
+                )),
+            }
+            .map_err(err_to_string);
+        }
+    }
+
+    state
+        .engines
+        .list_engines()
+        .await
+        .map_err(err_to_string)?
+        .into_iter()
+        .find(|engine| engine.id == engine_id)
+        .ok_or_else(|| format!("engine not found: {engine_id}"))
 }
 
 #[tauri::command]
 pub async fn get_chat_provider_usage(
     state: State<'_, AppState>,
+    workspace_id: Option<String>,
+    engine_id: Option<String>,
 ) -> Result<Vec<ChatProviderUsageDto>, String> {
-    Ok(state.engines.chat_provider_usage().await)
+    if let Some(workspace_id) = workspace_id {
+        let db = state.db.clone();
+        let lookup_workspace_id = workspace_id.clone();
+        let workspace = tokio::task::spawn_blocking(move || {
+            crate::db::workspaces::find_workspace_by_id(&db, &lookup_workspace_id)
+        })
+        .await
+        .map_err(err_to_string)?
+        .map_err(err_to_string)?
+        .ok_or_else(|| format!("workspace not found: {workspace_id}"))?;
+        if workspace.location_kind == "ssh" {
+            let requested_engine = engine_id.as_deref();
+            let mut usage = Vec::new();
+            if requested_engine.is_none() || requested_engine == Some("codex") {
+                let codex = CliToolFactory::new(state.inner().clone())
+                    .create("codex")
+                    .expect("Codex CLI factory mapping must exist");
+                let context =
+                    CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                let cli: &dyn CliTool = codex.as_ref();
+                if let Some(codex_usage) = cli
+                    .get_chat_provider_usage(&context)
+                    .await
+                    .map_err(err_to_string)?
+                {
+                    usage.push(codex_usage);
+                }
+            }
+            if requested_engine.is_none() || requested_engine == Some("claude") {
+                let claude = CliToolFactory::new(state.inner().clone())
+                    .create("claude")
+                    .expect("Claude CLI factory mapping must exist");
+                let context =
+                    CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                let cli: &dyn CliTool = claude.as_ref();
+                if let Some(claude_usage) = cli
+                    .get_chat_provider_usage(&context)
+                    .await
+                    .map_err(err_to_string)?
+                {
+                    usage.push(claude_usage);
+                }
+            }
+            if requested_engine == Some("opencode") {
+                let opencode = CliToolFactory::new(state.inner().clone())
+                    .create("opencode")
+                    .expect("OpenCode CLI factory mapping must exist");
+                let context =
+                    CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                let cli: &dyn CliTool = opencode.as_ref();
+                if let Some(opencode_usage) = cli
+                    .get_chat_provider_usage(&context)
+                    .await
+                    .map_err(err_to_string)?
+                {
+                    usage.push(opencode_usage);
+                } else {
+                    usage.push(ChatProviderUsageDto {
+                        engine_id: "opencode".to_string(),
+                        name: "OpenCode".to_string(),
+                        available: false,
+                        windows: Vec::new(),
+                    });
+                }
+            }
+            return Ok(usage);
+        }
+    }
+
+    let requested_engine = engine_id.as_deref();
+    let mut usage = Vec::new();
+    if requested_engine.is_none() || requested_engine == Some("codex") {
+        let codex = CliToolFactory::new(state.inner().clone())
+            .create("codex")
+            .expect("Codex CLI factory mapping must exist");
+        let context = codex.execution_context(None).await.map_err(err_to_string)?;
+        let cli: &dyn CliTool = codex.as_ref();
+        if let Some(codex_usage) = cli
+            .get_chat_provider_usage(&context)
+            .await
+            .map_err(err_to_string)?
+        {
+            usage.push(codex_usage);
+        }
+    }
+    if requested_engine.is_none() || requested_engine == Some("claude") {
+        let claude = CliToolFactory::new(state.inner().clone())
+            .create("claude")
+            .expect("Claude CLI factory mapping must exist");
+        let context = claude
+            .execution_context(None)
+            .await
+            .map_err(err_to_string)?;
+        let cli: &dyn CliTool = claude.as_ref();
+        if let Some(claude_usage) = cli
+            .get_chat_provider_usage(&context)
+            .await
+            .map_err(err_to_string)?
+        {
+            usage.push(claude_usage);
+        }
+    }
+    if requested_engine == Some("opencode") {
+        let opencode = CliToolFactory::new(state.inner().clone())
+            .create("opencode")
+            .expect("OpenCode CLI factory mapping must exist");
+        let context = opencode
+            .execution_context(None)
+            .await
+            .map_err(err_to_string)?;
+        let cli: &dyn CliTool = opencode.as_ref();
+        if let Some(opencode_usage) = cli
+            .get_chat_provider_usage(&context)
+            .await
+            .map_err(err_to_string)?
+        {
+            usage.push(opencode_usage);
+        } else {
+            usage.push(ChatProviderUsageDto {
+                engine_id: "opencode".to_string(),
+                name: "OpenCode".to_string(),
+                available: false,
+                windows: Vec::new(),
+            });
+        }
+    }
+    Ok(usage)
 }
 
 #[tauri::command]
-pub async fn codex_uses_external_sandbox(state: State<'_, AppState>) -> Result<bool, String> {
-    Ok(state.engines.codex_uses_external_sandbox().await)
+pub async fn codex_uses_external_sandbox(
+    state: State<'_, AppState>,
+    workspace_id: Option<String>,
+) -> Result<bool, String> {
+    let codex = CliToolFactory::new(state.inner().clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let context = codex
+        .execution_context(workspace_id.as_deref())
+        .await
+        .map_err(err_to_string)?;
+    let cli: &dyn CliTool = codex.as_ref();
+    cli.uses_external_sandbox(&context)
+        .await
+        .map_err(err_to_string)
 }
 
 #[tauri::command]
 pub async fn engine_health(
     state: State<'_, AppState>,
     engine_id: String,
+    workspace_id: Option<String>,
 ) -> Result<EngineHealthDto, String> {
+    if engine_id == "opencode" {
+        let opencode = CliToolFactory::new(state.inner().clone())
+            .create("opencode")
+            .expect("OpenCode CLI factory mapping must exist");
+        let context = opencode
+            .execution_context(workspace_id.as_deref())
+            .await
+            .map_err(err_to_string)?;
+        let cli: &dyn CliTool = opencode.as_ref();
+        return cli.engine_health(&context).await.map_err(err_to_string);
+    }
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        let db = state.db.clone();
+        let lookup_workspace_id = workspace_id.to_string();
+        let workspace = tokio::task::spawn_blocking(move || {
+            crate::db::workspaces::find_workspace_by_id(&db, &lookup_workspace_id)
+        })
+        .await
+        .map_err(err_to_string)?
+        .map_err(err_to_string)?
+        .ok_or_else(|| format!("workspace not found: {workspace_id}"))?;
+        if workspace.location_kind == "ssh" {
+            if engine_id == "codex" {
+                let codex = CliToolFactory::new(state.inner().clone())
+                    .create("codex")
+                    .expect("Codex CLI factory mapping must exist");
+                let context =
+                    CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                let cli: &dyn CliTool = codex.as_ref();
+                return cli.engine_health(&context).await.map_err(err_to_string);
+            }
+            if engine_id == "claude" {
+                let claude = CliToolFactory::new(state.inner().clone())
+                    .create("claude")
+                    .expect("Claude CLI factory mapping must exist");
+                let context =
+                    CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                let cli: &dyn CliTool = claude.as_ref();
+                return cli.engine_health(&context).await.map_err(err_to_string);
+            }
+            let connection_name = workspace
+                .connection_display_name
+                .clone()
+                .unwrap_or_else(|| "未命名 SSH 连接".to_string());
+            let connection_id = workspace
+                .ssh_connection_id
+                .as_deref()
+                .ok_or_else(|| "远端项目未绑定 SSH 连接".to_string())?
+                .to_string();
+            let db = state.db.clone();
+            let lookup_connection_id = connection_id.clone();
+            let connection = tokio::task::spawn_blocking(move || {
+                crate::db::ssh_connections::find(&db, &lookup_connection_id)
+            })
+            .await
+            .map_err(err_to_string)?
+            .map_err(err_to_string)?
+            .ok_or_else(|| format!("SSH connection not found: {connection_id}"))?;
+            let engine_name = match engine_id.as_str() {
+                "codex" => "Codex",
+                "opencode" => "OpenCode",
+                "claude" => "Claude",
+                _ => {
+                    return Err(format!("SSH 远端项目当前阶段尚未接入 {engine_id} 正式对话"));
+                }
+            };
+            let mut protocol_diagnostics = None;
+            let result = match engine_id.as_str() {
+                "codex" => {
+                    let service_use =
+                        crate::remote_project_codex_runtime_service::acquire_temporary(&workspace)
+                            .await;
+                    match service_use {
+                        Ok(service_use) => {
+                            let result = service_use.engine().list_models_runtime().await;
+                            protocol_diagnostics =
+                                service_use.engine().protocol_diagnostics_snapshot().await;
+                            service_use.release().await;
+                            if result.is_empty() {
+                                Err(anyhow::anyhow!("远端 Codex 模型目录为空"))
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                "opencode" => unreachable!("OpenCode health already uses OpenCodeCli"),
+                "claude" => unreachable!("Claude health already uses ClaudeCodeCli"),
+                _ => unreachable!(),
+            };
+            let version = if result.is_ok() {
+                let version_command = crate::ssh::runtime::wrap_remote_login_shell_command(
+                    match engine_id.as_str() {
+                        "codex" => "codex --version",
+                        "opencode" => "opencode --version",
+                        "claude" => "claude --version",
+                        _ => unreachable!(),
+                    },
+                );
+                crate::ssh::gateway::run_command(&connection, &version_command)
+                    .await
+                    .ok()
+                    .and_then(|output| String::from_utf8(output.into()).ok())
+                    .map(|output| output.trim().to_string())
+                    .filter(|output| !output.is_empty())
+            } else {
+                None
+            };
+            return Ok(EngineHealthDto {
+                id: engine_id.clone(),
+                available: result.is_ok(),
+                version,
+                details: Some(match result {
+                    Ok(()) => format!("SSH 远端 {engine_name}：{connection_name}"),
+                    Err(error) => format!("SSH 远端 {engine_name} 不可用：{error:#}"),
+                }),
+                warnings: Vec::new(),
+                checks: Vec::new(),
+                fixes: Vec::new(),
+                protocol_diagnostics,
+            });
+        }
+    }
+    if engine_id == "codex" {
+        let codex = CliToolFactory::new(state.inner().clone())
+            .create("codex")
+            .expect("Codex CLI factory mapping must exist");
+        let context = codex
+            .execution_context(workspace_id.as_deref())
+            .await
+            .map_err(err_to_string)?;
+        let cli: &dyn CliTool = codex.as_ref();
+        return cli.engine_health(&context).await.map_err(err_to_string);
+    }
+    if engine_id == "claude" {
+        let claude = CliToolFactory::new(state.inner().clone())
+            .create("claude")
+            .expect("Claude CLI factory mapping must exist");
+        let context = claude
+            .execution_context(workspace_id.as_deref())
+            .await
+            .map_err(err_to_string)?;
+        let cli: &dyn CliTool = claude.as_ref();
+        return cli.engine_health(&context).await.map_err(err_to_string);
+    }
     state
         .engines
         .health(&engine_id)
@@ -45,7 +593,68 @@ pub async fn engine_health(
 }
 
 #[tauri::command]
-pub async fn prewarm_engine(state: State<'_, AppState>, engine_id: String) -> Result<(), String> {
+pub async fn prewarm_engine(
+    state: State<'_, AppState>,
+    engine_id: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
+    if engine_id == "opencode" {
+        let opencode = CliToolFactory::new(state.inner().clone())
+            .create("opencode")
+            .expect("OpenCode CLI factory mapping must exist");
+        let context = opencode
+            .execution_context(workspace_id.as_deref())
+            .await
+            .map_err(err_to_string)?;
+        let cli: &dyn CliTool = opencode.as_ref();
+        return cli.prewarm_engine(&context).await.map_err(err_to_string);
+    }
+    if engine_id == "codex" {
+        let codex = CliToolFactory::new(state.inner().clone())
+            .create("codex")
+            .expect("Codex CLI factory mapping must exist");
+        let context = codex
+            .execution_context(workspace_id.as_deref())
+            .await
+            .map_err(err_to_string)?;
+        let cli: &dyn CliTool = codex.as_ref();
+        return cli.prewarm_engine(&context).await.map_err(err_to_string);
+    }
+    if engine_id == "claude" {
+        let claude = CliToolFactory::new(state.inner().clone())
+            .create("claude")
+            .expect("Claude CLI factory mapping must exist");
+        let context = claude
+            .execution_context(workspace_id.as_deref())
+            .await
+            .map_err(err_to_string)?;
+        let cli: &dyn CliTool = claude.as_ref();
+        return cli.prewarm_engine(&context).await.map_err(err_to_string);
+    }
+    if let Some(workspace_id) = workspace_id {
+        let db = state.db.clone();
+        let lookup_workspace_id = workspace_id.clone();
+        let workspace = tokio::task::spawn_blocking(move || {
+            crate::db::workspaces::find_workspace_by_id(&db, &lookup_workspace_id)
+        })
+        .await
+        .map_err(err_to_string)?
+        .map_err(err_to_string)?
+        .ok_or_else(|| format!("workspace not found: {workspace_id}"))?;
+        if workspace.location_kind == "ssh" {
+            return match engine_id.as_str() {
+                "codex" => {
+                    crate::remote_project_codex_runtime_service::engine_info(&workspace, None)
+                        .await
+                        .map(|_| ())
+                        .map_err(err_to_string)
+                }
+                "opencode" => unreachable!("OpenCode prewarm already uses OpenCodeCli"),
+                "claude" => unreachable!("Claude prewarm already uses ClaudeCodeCli"),
+                _ => Err(format!("SSH 远端项目当前阶段尚未接入 {engine_id} 正式对话")),
+            };
+        }
+    }
     state
         .engines
         .prewarm(&engine_id)
@@ -57,7 +666,42 @@ pub async fn prewarm_engine(state: State<'_, AppState>, engine_id: String) -> Re
 pub async fn list_codex_skills(
     state: State<'_, AppState>,
     cwd: String,
+    workspace_id: Option<String>,
 ) -> Result<Vec<CodexSkillDto>, String> {
+    let codex = CliToolFactory::new(state.inner().clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let context = codex
+        .execution_context(workspace_id.as_deref())
+        .await
+        .map_err(err_to_string)?;
+    let cli: &dyn CliTool = codex.as_ref();
+    return cli
+        .list_codex_skills(&context, cwd.trim())
+        .await
+        .map_err(err_to_string);
+
+    #[allow(unreachable_code)]
+    if let Some(workspace_id) = workspace_id {
+        let db = state.db.clone();
+        let lookup_workspace_id = workspace_id.clone();
+        let workspace = tokio::task::spawn_blocking(move || {
+            crate::db::workspaces::find_workspace_by_id(&db, &lookup_workspace_id)
+        })
+        .await
+        .map_err(err_to_string)?
+        .map_err(err_to_string)?
+        .ok_or_else(|| format!("workspace not found: {workspace_id}"))?;
+        if workspace.location_kind == "ssh" {
+            let service_use =
+                crate::remote_project_codex_runtime_service::acquire_temporary(&workspace)
+                    .await
+                    .map_err(err_to_string)?;
+            let result = service_use.engine().list_skills(&workspace.root_path).await;
+            service_use.release().await;
+            return result.map_err(err_to_string);
+        }
+    }
     state
         .engines
         .list_codex_skills(cwd.trim())
@@ -66,22 +710,124 @@ pub async fn list_codex_skills(
 }
 
 #[tauri::command]
-pub async fn list_codex_apps(state: State<'_, AppState>) -> Result<Vec<CodexAppDto>, String> {
+pub async fn list_codex_apps(
+    state: State<'_, AppState>,
+    workspace_id: Option<String>,
+) -> Result<Vec<CodexAppDto>, String> {
+    let codex = CliToolFactory::new(state.inner().clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let context = codex
+        .execution_context(workspace_id.as_deref())
+        .await
+        .map_err(err_to_string)?;
+    let cli: &dyn CliTool = codex.as_ref();
+    return cli.list_codex_apps(&context).await.map_err(err_to_string);
+
+    #[allow(unreachable_code)]
+    if let Some(workspace_id) = workspace_id {
+        let db = state.db.clone();
+        let lookup_workspace_id = workspace_id.clone();
+        let workspace = tokio::task::spawn_blocking(move || {
+            crate::db::workspaces::find_workspace_by_id(&db, &lookup_workspace_id)
+        })
+        .await
+        .map_err(err_to_string)?
+        .map_err(err_to_string)?
+        .ok_or_else(|| format!("workspace not found: {workspace_id}"))?;
+        if workspace.location_kind == "ssh" {
+            let service_use =
+                crate::remote_project_codex_runtime_service::acquire_temporary(&workspace)
+                    .await
+                    .map_err(err_to_string)?;
+            let result = service_use.engine().list_apps().await;
+            service_use.release().await;
+            return result.map_err(err_to_string);
+        }
+    }
     state.engines.list_codex_apps().await.map_err(err_to_string)
+}
+
+#[tauri::command]
+pub async fn list_codex_plugins(
+    state: State<'_, AppState>,
+    cwd: String,
+    workspace_id: Option<String>,
+) -> Result<Vec<CodexPluginDto>, String> {
+    let cwd = cwd.trim();
+    if cwd.is_empty() {
+        return Err("cwd is required".to_string());
+    }
+    let codex = CliToolFactory::new(state.inner().clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let context = codex
+        .execution_context(workspace_id.as_deref())
+        .await
+        .map_err(err_to_string)?;
+    let cli: &dyn CliTool = codex.as_ref();
+    return cli
+        .list_codex_plugins(&context, cwd)
+        .await
+        .map_err(err_to_string);
+
+    #[allow(unreachable_code)]
+    let cwd = cwd.trim();
+    if cwd.is_empty() {
+        return Err("cwd is required".to_string());
+    }
+    if let Some(workspace_id) = workspace_id {
+        let db = state.db.clone();
+        let lookup_workspace_id = workspace_id.clone();
+        let workspace = tokio::task::spawn_blocking(move || {
+            crate::db::workspaces::find_workspace_by_id(&db, &lookup_workspace_id)
+        })
+        .await
+        .map_err(err_to_string)?
+        .map_err(err_to_string)?
+        .ok_or_else(|| format!("workspace not found: {workspace_id}"))?;
+        if workspace.location_kind == "ssh" {
+            let service_use =
+                crate::remote_project_codex_runtime_service::acquire_temporary(&workspace)
+                    .await
+                    .map_err(err_to_string)?;
+            // SSH 项目必须使用数据库中的远端项目根目录，不能把前端仓库路径传给远端 CLI。
+            let result = service_use
+                .engine()
+                .list_plugins(&workspace.root_path)
+                .await;
+            service_use.release().await;
+            return result.map_err(err_to_string);
+        }
+    }
+    state
+        .engines
+        .list_codex_plugins(cwd)
+        .await
+        .map_err(err_to_string)
 }
 
 #[tauri::command]
 pub async fn get_opencode_runtime_catalog(
     state: State<'_, AppState>,
     cwd: String,
+    workspace_id: Option<String>,
 ) -> Result<OpenCodeRuntimeCatalogDto, String> {
     let cwd = cwd.trim();
     if cwd.is_empty() {
         return Err("cwd is required".to_string());
     }
-    state
-        .engines
-        .opencode_runtime_catalog(cwd)
+    let opencode = CliToolFactory::new(state.inner().clone())
+        .create("opencode")
+        .expect("OpenCode CLI factory mapping must exist");
+    let context = if let Some(workspace_id) = workspace_id.as_deref() {
+        opencode.execution_context(Some(workspace_id)).await
+    } else {
+        opencode.execution_context_for_cwd(Some(cwd)).await
+    }
+    .map_err(err_to_string)?;
+    let cli: &dyn CliTool = opencode.as_ref();
+    cli.get_opencode_runtime_catalog(&context, cwd)
         .await
         .map_err(err_to_string)
 }

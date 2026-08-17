@@ -20,6 +20,12 @@ interface WorkspaceState {
   loadWorkspaces: () => Promise<void>;
   refreshArchivedWorkspaces: () => Promise<void>;
   openWorkspace: (path: string, scanDepth?: number) => Promise<Workspace | null>;
+  createSshWorkspace: (
+    connectionId: string,
+    name: string,
+    rootPath: string,
+    scanDepth?: number,
+  ) => Promise<Workspace | null>;
   removeWorkspace: (workspaceId: string) => Promise<void>;
   restoreWorkspace: (workspaceId: string) => Promise<void>;
   loadRepos: (workspaceId: string) => Promise<void>;
@@ -154,9 +160,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const activeWorkspaceId = resolveStartupWorkspaceId(workspaces, savedId);
       set({ workspaces, activeWorkspaceId, loading: false });
       if (activeWorkspaceId) {
-        scheduleActiveWorkspaceExtensionRefresh(activeWorkspaceId);
-        await useTerminalStore.getState().prepareWorkspaceActivation(activeWorkspaceId);
-        useGitStore.getState().loadDraftsForWorkspace(activeWorkspaceId);
+        const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
+        if (activeWorkspace?.locationKind !== "ssh") {
+          scheduleActiveWorkspaceExtensionRefresh(activeWorkspaceId);
+          await useTerminalStore.getState().prepareWorkspaceActivation(activeWorkspaceId);
+          useGitStore.getState().loadDraftsForWorkspace(activeWorkspaceId);
+        }
         await get().loadRepos(activeWorkspaceId);
       }
       await get().refreshArchivedWorkspaces();
@@ -193,6 +202,29 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       return null;
     }
   },
+  createSshWorkspace: async (connectionId, name, rootPath, scanDepth) => {
+    set({ loading: true, error: undefined });
+    try {
+      const workspace = await ipc.createSshWorkspace(connectionId, name, rootPath, scanDepth);
+      localStorage.setItem(LAST_WORKSPACE_KEY, workspace.id);
+      set((state) => ({
+        workspaces: [workspace, ...state.workspaces.filter((item) => item.id !== workspace.id)],
+        archivedWorkspaces: state.archivedWorkspaces.filter((item) => item.id !== workspace.id),
+        activeWorkspaceId: workspace.id,
+        repos: [],
+        activeRepoId: null,
+        reposLoading: false,
+        loading: false,
+      }));
+      await useTerminalStore.getState().prepareWorkspaceActivation(workspace.id);
+      useGitStore.getState().loadDraftsForWorkspace(workspace.id);
+      await get().loadRepos(workspace.id);
+      return workspace;
+    } catch (error) {
+      set({ loading: false, error: String(error) });
+      return null;
+    }
+  },
   removeWorkspace: async (workspaceId) => {
     set({ loading: true, error: undefined });
     try {
@@ -218,7 +250,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }));
 
       if (nextActive) {
-        if (wasActiveWorkspace) {
+        const nextWorkspace = remaining.find((workspace) => workspace.id === nextActive);
+      if (wasActiveWorkspace && nextWorkspace) {
           await useTerminalStore.getState().prepareWorkspaceActivation(nextActive);
         }
         await get().loadRepos(nextActive);
@@ -250,7 +283,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       });
 
       if (!get().activeWorkspaceId || get().activeWorkspaceId === restored.id) {
-        await useTerminalStore.getState().prepareWorkspaceActivation(restored.id);
+ await useTerminalStore.getState().prepareWorkspaceActivation(restored.id);
         await get().loadRepos(restored.id);
       }
     } catch (error) {
@@ -259,6 +292,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
   loadRepos: async (workspaceId) => {
     const requestSeq = ++reposLoadSeq;
+    const workspace = get().workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) {
+      if (get().activeWorkspaceId !== workspaceId) return;
+      set({ repos: [], activeRepoId: null, reposLoading: false });
+      return;
+    }
     set({ reposLoading: true });
     try {
       const repos = await ipc.getRepos(workspaceId);
@@ -300,10 +339,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
     localStorage.setItem(LAST_WORKSPACE_KEY, workspaceId);
     set({ activeWorkspaceId: workspaceId, activeRepoId: null, repos: [], error: undefined });
-    scheduleActiveWorkspaceExtensionRefresh(workspaceId);
-    await useTerminalStore.getState().prepareWorkspaceActivation(workspaceId);
+    const workspace = get().workspaces.find((item) => item.id === workspaceId);
+    if (workspace) {
+      scheduleActiveWorkspaceExtensionRefresh(workspaceId);
+      await useTerminalStore.getState().prepareWorkspaceActivation(workspaceId);
+    }
     await get().loadRepos(workspaceId);
-    useGitStore.getState().loadDraftsForWorkspace(workspaceId);
+    if (workspace) {
+      useGitStore.getState().loadDraftsForWorkspace(workspaceId);
+    }
   },
   setActiveRepo: (repoId, options) => {
     set({ activeRepoId: repoId });
@@ -389,6 +433,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   rescanWorkspace: async (workspaceId, scanDepth) => {
     const workspace = get().workspaces.find((w) => w.id === workspaceId);
     if (!workspace) return null;
+    if (workspace.locationKind === "ssh") {
+      await get().loadRepos(workspaceId);
+      return workspace;
+    }
 
     try {
       const updatedWorkspace = await ipc.openWorkspace(

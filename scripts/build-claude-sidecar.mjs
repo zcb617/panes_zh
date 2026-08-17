@@ -1,4 +1,5 @@
-import { cp, mkdir, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile, spawn } from "node:child_process";
@@ -22,6 +23,16 @@ const outFile = path.join(
   "claude-agent-sdk-server.mjs",
 );
 const outDir = path.dirname(outFile);
+const remoteSessionEntryPoint = path.join(
+  repoRoot,
+  "src-tauri",
+  "sidecar",
+  "claude-remote-session-server.mjs",
+);
+const remoteSessionOutFile = path.join(
+  outDir,
+  "claude-remote-session-server.mjs",
+);
 const sdkDistNodeModulesDir = path.join(outDir, "node_modules");
 const sdkDistPackageDir = path.join(
   sdkDistNodeModulesDir,
@@ -29,6 +40,14 @@ const sdkDistPackageDir = path.join(
   "claude-agent-sdk",
 );
 const linuxSdkArchiveFile = path.join(outDir, "claude-sdk-node_modules.tar.gz");
+const remoteLinuxRuntimeArchiveFile = path.join(
+  outDir,
+  "claude-remote-runtime-linux-x64.tar.gz",
+);
+const remoteRuntimeVersionFile = path.join(
+  outDir,
+  "claude-remote-runtime-version.txt",
+);
 const execFileAsync = promisify(execFile);
 
 function run(command, args, options = {}) {
@@ -73,6 +92,50 @@ async function removeGeneratedSidecarPath(targetPath, options) {
   await rm(targetPath, options);
 }
 
+async function stageRemoteLinuxRuntime(sdkPackageDir) {
+  const stagingDir = path.join(outDir, ".claude-remote-linux-x64");
+  const stagingNodeModulesDir = path.join(stagingDir, "node_modules");
+  const stagingSdkPackageDir = path.join(
+    stagingNodeModulesDir,
+    "@anthropic-ai",
+    "claude-agent-sdk",
+  );
+  const versionHash = createHash("sha256");
+  for (const source of [entryPoint, remoteSessionEntryPoint, path.join(repoRoot, "pnpm-lock.yaml")]) {
+    versionHash.update(await readFile(source));
+  }
+  const contentVersion = versionHash.digest("hex").slice(0, 16);
+
+  await removeGeneratedSidecarPath(stagingDir, { recursive: true, force: true });
+  await removeGeneratedSidecarPath(remoteLinuxRuntimeArchiveFile, { force: true });
+  await mkdir(stagingDir, { recursive: true });
+  await cp(entryPoint, path.join(stagingDir, "claude-agent-sdk-server.mjs"), { force: true });
+  await cp(remoteSessionEntryPoint, path.join(stagingDir, "claude-remote-session-server.mjs"), {
+    force: true,
+  });
+  await cp(sdkPackageDir, stagingNodeModulesDir, {
+    recursive: true,
+    dereference: true,
+    force: true,
+  });
+  await stageClaudeSdkPlatformAssets({
+    sdkDistNodeModulesDir: stagingNodeModulesDir,
+    sdkDistPackageDir: stagingSdkPackageDir,
+    targetPlatform: "linux",
+    targetArch: "x64",
+    targetLibc: "glibc",
+  });
+  await writeFile(path.join(stagingDir, "claude-remote-runtime-version.txt"), `${contentVersion}\n`);
+  await run(
+    "tar",
+    ["-czf", path.relative(stagingDir, remoteLinuxRuntimeArchiveFile), "."],
+    { cwd: stagingDir },
+  );
+  await writeFile(remoteRuntimeVersionFile, `${contentVersion}\n`);
+  await removeGeneratedSidecarPath(stagingDir, { recursive: true, force: true });
+  console.log(`Built Claude SSH remote Linux runtime ${contentVersion}.`);
+}
+
 async function archiveLinuxSdkNodeModules() {
   const targetPlatform = process.env.PANES_CLAUDE_SDK_PLATFORM ?? process.platform;
   if (targetPlatform !== "linux") {
@@ -102,6 +165,9 @@ await mkdir(outDir, { recursive: true });
 await cp(entryPoint, outFile, {
   force: true,
 });
+await cp(remoteSessionEntryPoint, remoteSessionOutFile, {
+  force: true,
+});
 
 await cp(sdkPackageDir, sdkDistNodeModulesDir, {
   recursive: true,
@@ -116,6 +182,7 @@ await stageClaudeSdkPlatformAssets({
   targetArch: process.env.PANES_CLAUDE_SDK_ARCH ?? process.arch,
   targetLibc: process.env.PANES_CLAUDE_SDK_LIBC ?? "glibc",
 });
+await stageRemoteLinuxRuntime(sdkPackageDir);
 await archiveLinuxSdkNodeModules();
 
 const output = await readFile(outFile, "utf8");

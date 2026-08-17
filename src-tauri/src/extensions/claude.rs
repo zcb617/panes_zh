@@ -148,7 +148,10 @@ pub async fn perform_action(
     })
 }
 
-fn parse_plugins(value: &Value, categories: &HashMap<String, String>) -> Vec<ExtensionItemDto> {
+pub(crate) fn parse_plugins(
+    value: &Value,
+    categories: &HashMap<String, String>,
+) -> Vec<ExtensionItemDto> {
     let mut items = BTreeMap::<String, ExtensionItemDto>::new();
     for plugin in value
         .get("installed")
@@ -195,7 +198,8 @@ fn parse_plugins(value: &Value, categories: &HashMap<String, String>) -> Vec<Ext
             requires_new_session: true,
             read_only_reason: managed.then(|| "managed_policy".to_string()),
             warning: None,
-        };
+
+            ..Default::default()};
         items.insert(id, item);
     }
 
@@ -251,7 +255,8 @@ fn parse_plugins(value: &Value, categories: &HashMap<String, String>) -> Vec<Ext
                 requires_new_session: true,
                 read_only_reason: None,
                 warning: None,
-            },
+
+                ..Default::default()},
         );
     }
     items.into_values().collect()
@@ -325,7 +330,8 @@ fn scan_skills(
                 requires_new_session: false,
                 read_only_reason: Some("claude_skill_toggle".to_string()),
                 warning: None,
-            };
+
+                ..Default::default()};
             items.insert(id, item);
         }
     }
@@ -380,7 +386,7 @@ fn parse_skill_frontmatter(content: &str) -> (Option<String>, Option<String>) {
     (name, description)
 }
 
-fn parse_mcp_servers(output: &str) -> Vec<ExtensionItemDto> {
+pub(crate) fn parse_mcp_servers(output: &str) -> Vec<ExtensionItemDto> {
     output
         .lines()
         .filter_map(|line| {
@@ -443,7 +449,8 @@ fn parse_mcp_servers(output: &str) -> Vec<ExtensionItemDto> {
                 requires_new_session: false,
                 read_only_reason: managed_by_plugin.then(|| "plugin_managed_mcp".to_string()),
                 warning: None,
-            })
+
+                ..Default::default()})
         })
         .collect()
 }

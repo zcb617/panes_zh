@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    cli_tools::{factory::CliToolFactory, CliTool},
     commands::{
         chat::{
             cancel_turn_inner, save_pasted_image_attachment, send_message_inner,
@@ -1421,7 +1422,16 @@ impl RemoteTunnelManager {
                                             match (thread_id, preset) {
                                                 (Ok(thread_id), Ok(preset)) => {
                                                     let db = state.db.clone();
-                                                    let codex_uses_external_sandbox = state.engines.codex_uses_external_sandbox().await;
+                                                    let codex = CliToolFactory::new(state.clone())
+                                                        .create("codex")
+                                                        .expect("Codex CLI factory mapping must exist");
+                                                    let codex_uses_external_sandbox = match codex.execution_context(None).await {
+                                                        Ok(context) => {
+                                                            let cli: &dyn CliTool = codex.as_ref();
+                                                            cli.uses_external_sandbox(&context).await.unwrap_or(false)
+                                                        }
+                                                        Err(_) => false,
+                                                    };
                                                     tokio::task::spawn_blocking(move || {
                                                         let thread = crate::db::threads::get_thread(&db, &thread_id)?
                                                             .ok_or_else(|| anyhow::anyhow!("thread not found"))?;

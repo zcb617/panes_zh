@@ -156,7 +156,7 @@ interface ChatComposerState {
   attachmentsByWorkspace: Record<string, ChatAttachment[]>;
   textAnnotationsByWorkspace: Record<string, ChatTextAnnotation[]>;
   referencesByWorkspace: Record<string, ChatInputReference[]>;
-  pendingFlexibleMessagesByWorkspace: Record<string, PendingFlexibleMessage[]>;
+  pendingFlexibleMessagesBySession: Record<string, PendingFlexibleMessage[]>;
   pendingMessageSendModeByWorkspace: Record<string, MessageSendMode>;
   sendShortcut: ChatInputSendShortcut;
   chatInputMode: ChatInputMode;
@@ -183,11 +183,11 @@ interface ChatComposerState {
   ) => void;
   clearWorkspaceReferences: (workspaceId: string) => void;
   addPendingFlexibleMessage: (
-    workspaceId: string,
+    sessionKey: string,
     message: PendingFlexibleMessage,
   ) => void;
-  removePendingFlexibleMessage: (workspaceId: string, messageId: string) => void;
-  clearPendingFlexibleMessages: (workspaceId: string) => void;
+  removePendingFlexibleMessage: (sessionKey: string, messageId: string) => void;
+  clearPendingFlexibleMessages: (sessionKey: string) => void;
   setPendingMessageSendMode: (workspaceId: string, messageSendMode: MessageSendMode) => void;
   clearPendingMessageSendMode: (workspaceId: string) => void;
   setSendShortcut: (sendShortcut: ChatInputSendShortcut) => void;
@@ -203,7 +203,7 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
   attachmentsByWorkspace: {},
   textAnnotationsByWorkspace: {},
   referencesByWorkspace: {},
-  pendingFlexibleMessagesByWorkspace: {},
+  pendingFlexibleMessagesBySession: {},
   pendingMessageSendModeByWorkspace: {},
   sendShortcut: readChatInputSendShortcut(),
   chatInputMode: readChatInputMode(),
@@ -296,19 +296,19 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
       const { [workspaceId]: _removed, ...rest } = state.referencesByWorkspace;
       return { referencesByWorkspace: rest };
     }),
-  addPendingFlexibleMessage: (workspaceId, message) =>
+  addPendingFlexibleMessage: (sessionKey, message) =>
     set((state) => ({
-      pendingFlexibleMessagesByWorkspace: {
-        ...state.pendingFlexibleMessagesByWorkspace,
-        [workspaceId]: [
-          ...(state.pendingFlexibleMessagesByWorkspace[workspaceId] ?? []),
+      pendingFlexibleMessagesBySession: {
+        ...state.pendingFlexibleMessagesBySession,
+        [sessionKey]: [
+          ...(state.pendingFlexibleMessagesBySession[sessionKey] ?? []),
           message,
         ],
       },
     })),
-  removePendingFlexibleMessage: (workspaceId, messageId) =>
+  removePendingFlexibleMessage: (sessionKey, messageId) =>
     set((state) => {
-      const messages = state.pendingFlexibleMessagesByWorkspace[workspaceId];
+      const messages = state.pendingFlexibleMessagesBySession[sessionKey];
       if (!messages) {
         return state;
       }
@@ -318,21 +318,21 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
         return state;
       }
       if (remainingMessages.length === 0) {
-        const { [workspaceId]: _removed, ...rest } = state.pendingFlexibleMessagesByWorkspace;
-        return { pendingFlexibleMessagesByWorkspace: rest };
+        const { [sessionKey]: _removed, ...rest } = state.pendingFlexibleMessagesBySession;
+        return { pendingFlexibleMessagesBySession: rest };
       }
 
       return {
-        pendingFlexibleMessagesByWorkspace: {
-          ...state.pendingFlexibleMessagesByWorkspace,
-          [workspaceId]: remainingMessages,
+        pendingFlexibleMessagesBySession: {
+          ...state.pendingFlexibleMessagesBySession,
+          [sessionKey]: remainingMessages,
         },
       };
     }),
-  clearPendingFlexibleMessages: (workspaceId) =>
+  clearPendingFlexibleMessages: (sessionKey) =>
     set((state) => {
-      const { [workspaceId]: _removed, ...rest } = state.pendingFlexibleMessagesByWorkspace;
-      return { pendingFlexibleMessagesByWorkspace: rest };
+      const { [sessionKey]: _removed, ...rest } = state.pendingFlexibleMessagesBySession;
+      return { pendingFlexibleMessagesBySession: rest };
     }),
   setPendingMessageSendMode: (workspaceId, messageSendMode) =>
     set((state) => ({

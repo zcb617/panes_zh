@@ -1,20 +1,21 @@
-mod claude;
+pub(crate) mod claude;
 mod cli;
-mod codex;
-mod opencode;
+pub(crate) mod codex;
+pub(crate) mod opencode;
 pub mod refresh;
 
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::{
-    engines::EngineManager,
+    cli_tools::{factory::CliToolFactory, CliExecutionContext, CliTool},
     models::{
         ExtensionActionResultDto, ExtensionCatalogKindRefreshDto, ExtensionItemDto,
         ExtensionProviderCapabilitiesDto, ExtensionSourceDto,
     },
+    state::AppState,
 };
 
 const PROVIDERS: &[&str] = &["codex", "claude", "opencode"];
@@ -83,6 +84,26 @@ pub(crate) fn sources_from_items(items: &[ExtensionItemDto]) -> Vec<ExtensionSou
         .collect()
 }
 
+/// 根据当前项目解析当前 CLI 的扩展目录入口。调用方不能只按 provider 或 cwd 读取
+/// 缓存，否则两个远端项目使用相同路径时会混用另一台机器的数据。
+pub async fn resolve_extension_cli(
+    state: &AppState,
+    provider_id: &str,
+    workspace_id: Option<&str>,
+    cwd: Option<&str>,
+) -> Result<(Arc<dyn CliTool>, CliExecutionContext)> {
+    ensure_member("provider", provider_id, PROVIDERS)?;
+    let cli = CliToolFactory::new(state.clone()).create(provider_id)?;
+    let context = match workspace_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(workspace_id) => cli.execution_context(Some(workspace_id)).await?,
+        None => cli.execution_context_for_cwd(cwd).await?,
+    };
+    Ok((cli, context))
+}
+
 fn read_catalog_manifest(path: &Path) -> Result<Value> {
     let metadata = fs::metadata(path)
         .with_context(|| format!("failed to inspect catalog manifest {}", path.display()))?;
@@ -96,7 +117,7 @@ fn read_catalog_manifest(path: &Path) -> Result<Value> {
 }
 
 pub async fn refresh_catalog_kinds(
-    manager: &EngineManager,
+    state: &AppState,
     provider_id: &str,
     cwd: Option<&str>,
     requested_kinds: &[String],
@@ -117,9 +138,42 @@ pub async fn refresh_catalog_kinds(
             continue;
         }
         let result = match provider_id {
-            "codex" => codex::refresh_kind(manager, cwd, kind).await,
-            "claude" => claude::refresh_kind(manager, cwd, kind).await,
-            "opencode" => opencode::refresh_kind(manager, cwd, kind).await,
+            "codex" => {
+                let codex = CliToolFactory::new(state.clone())
+                    .create("codex")
+                    .expect("Codex CLI factory mapping must exist");
+                let context = codex.execution_context_for_cwd(cwd).await?;
+                let cli: &dyn CliTool = codex.as_ref();
+                cli.refresh_extension_catalog(&context, cwd, &[kind.to_string()])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| ExtensionCatalogKindRefreshDto::failure(kind))
+            }
+            "claude" => {
+                let claude = CliToolFactory::new(state.clone())
+                    .create("claude")
+                    .expect("Claude CLI factory mapping must exist");
+                let context = claude.execution_context_for_cwd(cwd).await?;
+                let cli: &dyn CliTool = claude.as_ref();
+                cli.refresh_extension_catalog(&context, cwd, &[kind.to_string()])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| ExtensionCatalogKindRefreshDto::failure(kind))
+            }
+            "opencode" => {
+                let opencode = CliToolFactory::new(state.clone())
+                    .create("opencode")
+                    .expect("OpenCode CLI factory mapping must exist");
+                let context = opencode.execution_context_for_cwd(cwd).await?;
+                let cli: &dyn CliTool = opencode.as_ref();
+                cli.refresh_extension_catalog(&context, cwd, &[kind.to_string()])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| ExtensionCatalogKindRefreshDto::failure(kind))
+            }
             _ => unreachable!(),
         };
         results.push(result);
@@ -128,6 +182,7 @@ pub async fn refresh_catalog_kinds(
 }
 
 pub async fn perform_action_for_item(
+    state: &AppState,
     provider_id: &str,
     item: ExtensionItemDto,
     action: &str,
@@ -153,9 +208,33 @@ pub async fn perform_action_for_item(
     }
 
     match provider_id {
-        "codex" => codex::perform_action(&item, action, cwd).await,
-        "claude" => claude::perform_action(&item, action, scope, cwd).await,
-        "opencode" => opencode::perform_action(&item, action, cwd).await,
+        "codex" => {
+            let codex = CliToolFactory::new(state.clone())
+                .create("codex")
+                .expect("Codex CLI factory mapping must exist");
+            let context = codex.execution_context_for_cwd(cwd).await?;
+            let cli: &dyn CliTool = codex.as_ref();
+            cli.perform_extension_action(&context, item, action, scope)
+                .await
+        }
+        "claude" => {
+            let claude = CliToolFactory::new(state.clone())
+                .create("claude")
+                .expect("Claude CLI factory mapping must exist");
+            let context = claude.execution_context_for_cwd(cwd).await?;
+            let cli: &dyn CliTool = claude.as_ref();
+            cli.perform_extension_action(&context, item, action, scope)
+                .await
+        }
+        "opencode" => {
+            let opencode = CliToolFactory::new(state.clone())
+                .create("opencode")
+                .expect("OpenCode CLI factory mapping must exist");
+            let context = opencode.execution_context_for_cwd(cwd).await?;
+            let cli: &dyn CliTool = opencode.as_ref();
+            cli.perform_extension_action(&context, item, action, scope)
+                .await
+        }
         _ => unreachable!(),
     }
 }

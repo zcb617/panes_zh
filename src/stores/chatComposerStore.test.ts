@@ -15,7 +15,7 @@ describe("chatComposerStore", () => {
       attachmentsByWorkspace: {},
       textAnnotationsByWorkspace: {},
       referencesByWorkspace: {},
-      pendingFlexibleMessagesByWorkspace: {},
+      pendingFlexibleMessagesBySession: {},
       pendingMessageSendModeByWorkspace: {},
       sendShortcut: DEFAULT_CHAT_INPUT_SEND_SHORTCUT,
       chatInputMode: DEFAULT_CHAT_INPUT_MODE,
@@ -122,25 +122,39 @@ describe("chatComposerStore", () => {
     expect(useChatComposerStore.getState().pendingMessageSendModeByWorkspace).toEqual({});
   });
 
-  it("keeps pending flexible messages while the chat panel is unmounted", () => {
-    const message = {
-      id: "pending-message",
+  it("isolates pending flexible messages between threads in the same workspace", () => {
+    const firstMessage = {
+      id: "pending-message-a",
       text: "Wait until I finish the details.",
+      attachments: [],
+      references: [],
+    };
+    const secondMessage = {
+      id: "pending-message-b",
+      text: "This belongs to another thread.",
       attachments: [],
       references: [],
     };
 
     useChatComposerStore
       .getState()
-      .addPendingFlexibleMessage("workspace-a", message);
+      .addPendingFlexibleMessage("thread:thread-a", firstMessage);
+    useChatComposerStore
+      .getState()
+      .addPendingFlexibleMessage("thread:thread-b", secondMessage);
 
-    expect(useChatComposerStore.getState().pendingFlexibleMessagesByWorkspace).toEqual({
-      "workspace-a": [message],
+    expect(useChatComposerStore.getState().pendingFlexibleMessagesBySession).toEqual({
+      "thread:thread-a": [firstMessage],
+      "thread:thread-b": [secondMessage],
     });
 
-    useChatComposerStore.getState().clearPendingFlexibleMessages("workspace-a");
+    useChatComposerStore
+      .getState()
+      .clearPendingFlexibleMessages("thread:thread-a");
 
-    expect(useChatComposerStore.getState().pendingFlexibleMessagesByWorkspace).toEqual({});
+    expect(useChatComposerStore.getState().pendingFlexibleMessagesBySession).toEqual({
+      "thread:thread-b": [secondMessage],
+    });
   });
 
   it("removes only the selected pending flexible message", () => {
@@ -157,14 +171,18 @@ describe("chatComposerStore", () => {
       references: [],
     };
 
-    useChatComposerStore.getState().addPendingFlexibleMessage("workspace-a", firstMessage);
-    useChatComposerStore.getState().addPendingFlexibleMessage("workspace-a", secondMessage);
     useChatComposerStore
       .getState()
-      .removePendingFlexibleMessage("workspace-a", firstMessage.id);
+      .addPendingFlexibleMessage("thread:thread-a", firstMessage);
+    useChatComposerStore
+      .getState()
+      .addPendingFlexibleMessage("thread:thread-a", secondMessage);
+    useChatComposerStore
+      .getState()
+      .removePendingFlexibleMessage("thread:thread-a", firstMessage.id);
 
-    expect(useChatComposerStore.getState().pendingFlexibleMessagesByWorkspace).toEqual({
-      "workspace-a": [secondMessage],
+    expect(useChatComposerStore.getState().pendingFlexibleMessagesBySession).toEqual({
+      "thread:thread-a": [secondMessage],
     });
   });
 

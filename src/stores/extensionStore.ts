@@ -185,7 +185,11 @@ export const useExtensionStore = create<ExtensionStoreState>((set, get) => ({
     }));
 
     try {
-      const catalog = await ipc.getExtensionCatalog(context.providerId, context.cwd);
+      const catalog = await ipc.getExtensionCatalog(
+        context.providerId,
+        context.workspaceId,
+        context.cwd,
+      );
       if (get().entries[key]?.requestSequence !== sequence) return catalog;
       set((state) => ({
         entries: {
@@ -242,7 +246,11 @@ export const useExtensionStore = create<ExtensionStoreState>((set, get) => ({
       },
     }));
     try {
-      const catalog = await ipc.requestExtensionCatalogRefresh(context.providerId, context.cwd);
+      const catalog = await ipc.requestExtensionCatalogRefresh(
+        context.providerId,
+        context.workspaceId,
+        context.cwd,
+      );
       if (get().entries[key]?.requestSequence !== sequence) return catalog;
       set((state) => ({
         entries: {
@@ -299,6 +307,7 @@ export const useExtensionStore = create<ExtensionStoreState>((set, get) => ({
     try {
       const result = await ipc.performExtensionAction(
         context.providerId,
+        context.workspaceId,
         item.kind,
         item.id,
         action,

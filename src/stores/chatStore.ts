@@ -32,6 +32,8 @@ interface ChatState {
   olderLoadBlockedUntil: number;
   status: ThreadStatus;
   streaming: boolean;
+  preparingEngineId: string | null;
+  preparingAttachments: boolean;
   turnStartedAt: number | null;
   usageLimits: ContextUsage | null;
   usageLimitsLoading: boolean;
@@ -49,6 +51,7 @@ interface ChatState {
       attachments?: ChatAttachment[];
       inputItems?: ChatInputItem[];
       planMode?: boolean;
+      remoteAttachmentUpload?: boolean;
     },
   ) => Promise<boolean>;
   steer: (
@@ -1867,6 +1870,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   olderLoadBlockedUntil: 0,
   status: "idle",
   streaming: false,
+  preparingEngineId: null,
+  preparingAttachments: false,
   turnStartedAt: null,
   usageLimits: null,
   usageLimitsLoading: false,
@@ -1918,6 +1923,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         loadingOlderMessages: false,
         olderLoadBlockedUntil: 0,
         streaming: false,
+        preparingEngineId: null,
+        preparingAttachments: false,
         turnStartedAt: null,
         status: "idle",
         usageLimits: null,
@@ -2174,6 +2181,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         unlisten,
         error: undefined,
         streaming: isThreadStatusStreaming(threadStatus),
+        preparingEngineId: null,
+        preparingAttachments: false,
         turnStartedAt: isThreadStatusStreaming(threadStatus)
           ? resolveRestoredTurnStartedAt(messages)
           : null,
@@ -2185,7 +2194,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (shouldRefreshUsageLimits) {
         const refreshRestoredUsageLimits = async () => {
           try {
-            const providers = await ipc.getChatProviderUsage();
+            const providers = await ipc.getChatProviderUsage(
+              activeThread?.workspaceId ?? null,
+              restoredEngineId,
+            );
             const providerUsage = mapProviderUsage(
               providers.find((provider) => provider.engineId === restoredEngineId),
             );
@@ -2341,6 +2353,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ]),
       status: "streaming",
       streaming: true,
+      preparingEngineId: options?.engineId ?? null,
+      preparingAttachments: Boolean(options?.remoteAttachmentUpload),
       turnStartedAt: Date.now(),
       error: undefined
     }));
@@ -2357,6 +2371,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         planMode,
         clientTurnId,
       );
+      set({ preparingEngineId: null, preparingAttachments: false });
       return true;
     } catch (error) {
       pendingTurnMetaByThread.delete(threadId);
@@ -2366,6 +2381,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ),
         status: "error",
         streaming: false,
+        preparingEngineId: null,
+        preparingAttachments: false,
         turnStartedAt: null,
         error: String(error),
       }));

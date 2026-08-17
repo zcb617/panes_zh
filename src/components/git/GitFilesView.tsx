@@ -101,7 +101,7 @@ export function GitFilesView({ rootPath }: Props) {
       else setLoadingDirs((prev) => new Set(prev).add(dirPath));
 
       try {
-        const entries = await ipc.listDir(rootPath, dirPath);
+      const entries = await ipc.listDir(rootPath, dirPath, activeWorkspaceId);
         setDirContents((prev) => {
           const next = new Map(prev);
           next.set(dirPath, entries);

@@ -15,7 +15,7 @@ use crate::{
         AgentNotificationSettingsStatusDto,
     },
 };
-use tauri::{State, WebviewWindow};
+use tauri::{State, Webview};
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
@@ -183,7 +183,7 @@ pub async fn set_app_theme(state: State<'_, AppState>, theme: String) -> Result<
 }
 
 #[tauri::command]
-pub async fn get_display_scale(webview_window: WebviewWindow) -> Result<u32, String> {
+pub async fn get_display_scale(webview: Webview) -> Result<u32, String> {
     let display_scale = tokio::task::spawn_blocking(move || {
         let config = AppConfig::load_or_create().map_err(err_to_string)?;
         Ok::<u32, String>(config.display_scale())
@@ -191,7 +191,7 @@ pub async fn get_display_scale(webview_window: WebviewWindow) -> Result<u32, Str
     .await
     .map_err(err_to_string)??;
 
-    webview_window
+    webview
         .set_zoom(display_scale as f64 / 100.0)
         .map_err(err_to_string)?;
 
@@ -201,7 +201,7 @@ pub async fn get_display_scale(webview_window: WebviewWindow) -> Result<u32, Str
 #[tauri::command]
 pub async fn set_display_scale(
     state: State<'_, AppState>,
-    webview_window: WebviewWindow,
+    webview: Webview,
     display_scale: u32,
 ) -> Result<u32, String> {
     let config_write_lock = state.config_write_lock.clone();
@@ -220,7 +220,7 @@ pub async fn set_display_scale(
     .await
     .map_err(err_to_string)??;
 
-    webview_window
+    webview
         .set_zoom(display_scale as f64 / 100.0)
         .map_err(err_to_string)?;
 

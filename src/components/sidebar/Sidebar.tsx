@@ -23,6 +23,7 @@ import {
   Gauge,
   Boxes,
   CalendarClock,
+  Globe2,
 } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import { useThreadStore } from "../../stores/threadStore";
@@ -37,6 +38,7 @@ import { createAndActivateWorkspaceThread } from "../../lib/newThreadActions";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { PanesMark } from "../shared/PanesBrand";
 import { WorkspaceMoreMenu } from "../workspace/WorkspaceMoreMenu";
+import { CreateWorkspaceModal } from "../workspace/CreateWorkspaceModal";
 import { normalizeSidebarCollapsedState } from "./sidebarCollapseState";
 import type { Thread, Workspace } from "../../types";
 
@@ -168,6 +170,7 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
     thread: Thread;
   } | null>(null);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  const [createWorkspaceModalOpen, setCreateWorkspaceModalOpen] = useState(false);
   const [settingsMenuPos, setSettingsMenuPos] = useState({ top: 0, left: 0 });
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const settingsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -374,6 +377,12 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
               color: isActiveProject ? "var(--accent)" : "var(--text-3)",
             }}
           />
+          {project.workspace.locationKind === "ssh" && (
+            <Globe2
+              size={12}
+              style={{ flexShrink: 0, color: isActiveProject ? "var(--accent)" : "var(--text-3)" }}
+            />
+          )}
           <span className="sb-project-name">{projectName}</span>
 
           <span className="sb-project-trailing">
@@ -608,7 +617,7 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
             title={t("app:sidebar.openWorkspace")}
             onClick={() => {
               if (activeView !== "chat") setActiveView("chat");
-              void onOpenFolder();
+              setCreateWorkspaceModalOpen(true);
             }}
           >
             <Plus size={12} strokeWidth={2.2} />
@@ -873,6 +882,18 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
           {error}
         </div>
       )}
+      <CreateWorkspaceModal
+        open={createWorkspaceModalOpen}
+        onClose={() => setCreateWorkspaceModalOpen(false)}
+        onSelectLocal={() => void onOpenFolder()}
+        onCreateRemote={(connectionId, name, rootPath) =>
+          useWorkspaceStore.getState().createSshWorkspace(connectionId, name, rootPath)}
+        onCreated={() => setCreateWorkspaceModalOpen(false)}
+        onOpenConnections={() => {
+          setCreateWorkspaceModalOpen(false);
+          openSettings(activeWorkspaceId, "connections");
+        }}
+      />
     </div>
   );
 }

@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use crate::{
+    cli_tools::{factory::CliToolFactory, CliExecutionContext, CliSessionSnapshot, CliTool},
     config::app_config::AppConfig,
     db,
     engines::validate_engine_sandbox_mode,
@@ -29,6 +30,20 @@ where
     tokio::task::spawn_blocking(move || operation(&db))
         .await
         .map_err(|error| error.to_string())?
+        .map_err(err_to_string)
+}
+
+async fn codex_external_sandbox_for_workspace(
+    state: &AppState,
+    workspace: &crate::models::WorkspaceDto,
+) -> Result<bool, String> {
+    let context = CliExecutionContext::from_workspace(workspace).map_err(err_to_string)?;
+    let codex = CliToolFactory::new(state.clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let cli: &dyn CliTool = codex.as_ref();
+    cli.uses_external_sandbox(&context)
+        .await
         .map_err(err_to_string)
 }
 
@@ -76,12 +91,23 @@ pub async fn list_codex_remote_threads(
     .await?;
 
     let normalized_search_term = normalize_remote_thread_search_term(search_term);
-    let remote_threads = state
-        .engines
-        .list_codex_remote_threads(normalized_search_term.as_deref(), archived)
+    let workspace = run_db(db.clone(), {
+        let workspace_id = workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
+    let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+    let codex = CliToolFactory::new(state.inner().clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let cli: &dyn CliTool = codex.as_ref();
+    let matching_threads = cli
+        .list_sessions(&context, normalized_search_term.as_deref(), archived)
         .await
-        .map_err(err_to_string)?;
-    let matching_threads = remote_threads
+        .map_err(err_to_string)?
         .into_iter()
         .filter(|thread| {
             codex_remote_thread_belongs_to_workspace(&workspace_root, &repos, &thread.cwd)
@@ -146,15 +172,63 @@ pub async fn attach_codex_remote_thread(
     })
     .await?;
 
-    let mut remote_thread = state
-        .engines
-        .read_codex_remote_thread(&engine_thread_id)
+    let workspace = run_db(db.clone(), {
+        let workspace_id = workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
+    let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+    let codex = CliToolFactory::new(state.inner().clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let cli: &dyn CliTool = codex.as_ref();
+    let session = cli
+        .read_session(&context, &engine_thread_id)
         .await
         .map_err(err_to_string)?;
+    let parse_timestamp = |value: Option<String>| {
+        value
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.timestamp_millis())
+            .unwrap_or_default()
+    };
+    let mut remote_thread = CodexRemoteThreadSummary {
+        engine_thread_id: session.engine_thread_id.clone(),
+        title: Some(session.title.clone()),
+        preview: session.preview.unwrap_or_default(),
+        cwd: session.cwd,
+        created_at: parse_timestamp(session.created_at),
+        updated_at: parse_timestamp(session.updated_at),
+        model_provider: session.model_id,
+        source_kind: session.source_kind.unwrap_or_default(),
+        status_type: session.raw_status.unwrap_or_default(),
+        active_flags: session.active_flags,
+        archived: session.archived,
+    };
     if remote_thread.archived {
-        state
-            .engines
-            .unarchive_codex_remote_thread(&engine_thread_id)
+        let operation_thread = existing_local_thread.clone().unwrap_or_else(|| ThreadDto {
+            id: engine_thread_id.clone(),
+            workspace_id: workspace.id.clone(),
+            repo_id: None,
+            engine_id: "codex".to_string(),
+            model_id: normalized_model_id.clone(),
+            engine_thread_id: Some(engine_thread_id.clone()),
+            engine_metadata: None,
+            title: remote_thread
+                .title
+                .clone()
+                .unwrap_or_else(|| engine_thread_id.clone()),
+            status: ThreadStatusDto::Idle,
+            message_count: 0,
+            total_tokens: 0,
+            created_at: String::new(),
+            last_activity_at: String::new(),
+        });
+        cli.unarchive_thread(&context, &operation_thread, &engine_thread_id)
             .await
             .map_err(err_to_string)?;
         remote_thread.archived = false;
@@ -219,28 +293,46 @@ pub async fn list_opencode_remote_sessions(
     archived: Option<bool>,
 ) -> Result<OpenCodeRemoteSessionPageDto, String> {
     let db = state.db.clone();
-    let (workspace_root, repos) = run_db(db.clone(), {
+    let (workspace, repos) = run_db(db.clone(), {
         let workspace_id = workspace_id.clone();
         move |db| {
             let workspace = db::workspaces::find_workspace_by_id(db, &workspace_id)?
                 .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))?;
             let repos = db::repos::get_repos(db, &workspace_id)?;
-            Ok((workspace.root_path, repos))
+            Ok((workspace, repos))
         }
     })
     .await?;
 
-    let allowed_roots = collect_remote_thread_roots(&workspace_root, &repos);
+    let allowed_roots = collect_remote_thread_roots(&workspace.root_path, &repos);
     let normalized_search_term = normalize_remote_thread_search_term(search_term);
-    let mut remote_sessions = Vec::new();
-    for cwd in allowed_roots.iter() {
-        let sessions = state
-            .engines
-            .list_opencode_remote_sessions(cwd, normalized_search_term.as_deref(), archived)
-            .await
-            .map_err(err_to_string)?;
-        remote_sessions.extend(sessions);
-    }
+    let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+    let opencode = CliToolFactory::new(state.inner().clone())
+        .create("opencode")
+        .expect("OpenCode CLI factory mapping must exist");
+    let cli: &dyn CliTool = opencode.as_ref();
+    let parse_timestamp = |value: Option<String>| {
+        value
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.timestamp_millis())
+            .unwrap_or_default()
+    };
+    let mut remote_sessions = cli
+        .list_sessions(&context, normalized_search_term.as_deref(), archived)
+        .await
+        .map_err(err_to_string)?
+        .into_iter()
+        .filter(|session| allowed_roots.contains(session.cwd.as_str()))
+        .map(|session| OpenCodeRemoteSessionSummary {
+            engine_thread_id: session.engine_thread_id,
+            title: Some(session.title),
+            cwd: session.cwd,
+            created_at: parse_timestamp(session.created_at),
+            updated_at: parse_timestamp(session.updated_at),
+            archived: session.archived,
+        })
+        .collect::<Vec<_>>();
     remote_sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     let mut seen_session_ids = std::collections::HashSet::new();
     remote_sessions.retain(|session| seen_session_ids.insert(session.engine_thread_id.clone()));
@@ -289,7 +381,7 @@ pub async fn attach_opencode_remote_session(
     let normalized_model_id =
         validate_model_for_engine(state.inner(), "opencode", model_id.trim()).await?;
     let db = state.db.clone();
-    let (workspace_root, repos, existing_local_thread) = run_db(db.clone(), {
+    let (workspace, repos, existing_local_thread) = run_db(db.clone(), {
         let workspace_id = workspace_id.clone();
         let engine_thread_id = engine_thread_id.clone();
         move |db| {
@@ -299,33 +391,74 @@ pub async fn attach_opencode_remote_session(
             let existing =
                 db::threads::find_thread_by_engine_thread_id(db, "opencode", &engine_thread_id)?
                     .filter(|thread| thread.workspace_id == workspace_id);
-            Ok((workspace.root_path, repos, existing))
+            Ok((workspace, repos, existing))
         }
     })
     .await?;
 
-    let allowed_roots = collect_remote_thread_roots(&workspace_root, &repos);
+    let allowed_roots = collect_remote_thread_roots(&workspace.root_path, &repos);
     if !allowed_roots.contains(cwd.as_str()) {
         return Err(format!(
             "OpenCode session cwd is outside this workspace: {cwd}"
         ));
     }
 
-    let mut remote_session = state
-        .engines
-        .read_opencode_remote_session(&cwd, &engine_thread_id)
+    let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+    let opencode = CliToolFactory::new(state.inner().clone())
+        .create("opencode")
+        .expect("OpenCode CLI factory mapping must exist");
+    let cli: &dyn CliTool = opencode.as_ref();
+    let session = cli
+        .read_session(&context, &engine_thread_id)
         .await
         .map_err(err_to_string)?;
+    if !paths_equal(&session.cwd, &cwd) {
+        return Err(format!(
+            "OpenCode session cwd does not match: expected={cwd} actual={}",
+            session.cwd
+        ));
+    }
+    let parse_timestamp = |value: Option<String>| {
+        value
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.timestamp_millis())
+            .unwrap_or_default()
+    };
+    let mut remote_session = OpenCodeRemoteSessionSummary {
+        engine_thread_id: session.engine_thread_id,
+        title: Some(session.title),
+        cwd: session.cwd,
+        created_at: parse_timestamp(session.created_at),
+        updated_at: parse_timestamp(session.updated_at),
+        archived: session.archived,
+    };
     if remote_session.archived {
-        state
-            .engines
-            .unarchive_opencode_remote_session(&cwd, &engine_thread_id)
+        let operation_thread = existing_local_thread.clone().unwrap_or_else(|| ThreadDto {
+            id: engine_thread_id.clone(),
+            workspace_id: workspace.id.clone(),
+            repo_id: None,
+            engine_id: "opencode".to_string(),
+            model_id: normalized_model_id.clone(),
+            engine_thread_id: Some(engine_thread_id.clone()),
+            engine_metadata: Some(json!({ "opencodeRemoteCwd": cwd })),
+            title: remote_session
+                .title
+                .clone()
+                .unwrap_or_else(|| engine_thread_id.clone()),
+            status: ThreadStatusDto::Idle,
+            message_count: 0,
+            total_tokens: 0,
+            created_at: String::new(),
+            last_activity_at: String::new(),
+        });
+        cli.unarchive_thread(&context, &operation_thread, &engine_thread_id)
             .await
             .map_err(err_to_string)?;
         remote_session.archived = false;
     }
     let repo_id =
-        resolve_codex_remote_thread_repo_id(&workspace_root, &repos, &remote_session.cwd)?;
+        resolve_codex_remote_thread_repo_id(&workspace.root_path, &repos, &remote_session.cwd)?;
     let title = build_opencode_remote_session_title(&remote_session);
 
     if let Some(existing) = existing_local_thread {
@@ -383,11 +516,52 @@ pub(crate) async fn validate_model_for_engine(
         return Err("model id cannot be empty".to_string());
     }
 
-    let models = state
-        .engines
-        .models_for_validation(engine_id, normalized_model_id)
-        .await
-        .ok();
+    let models = if engine_id == "codex" {
+        let codex = CliToolFactory::new(state.clone())
+            .create("codex")
+            .expect("Codex CLI factory mapping must exist");
+        match codex.execution_context(None).await {
+            Ok(context) => {
+                let cli: &dyn CliTool = codex.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .ok()
+            }
+            Err(_) => None,
+        }
+    } else if engine_id == "opencode" {
+        let opencode = CliToolFactory::new(state.clone())
+            .create("opencode")
+            .expect("OpenCode CLI factory mapping must exist");
+        match opencode.execution_context(None).await {
+            Ok(context) => {
+                let cli: &dyn CliTool = opencode.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .ok()
+            }
+            Err(_) => None,
+        }
+    } else if engine_id == "claude" {
+        let claude = CliToolFactory::new(state.clone())
+            .create("claude")
+            .expect("Claude CLI factory mapping must exist");
+        match claude.execution_context(None).await {
+            Ok(context) => {
+                let cli: &dyn CliTool = claude.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .ok()
+            }
+            Err(_) => None,
+        }
+    } else {
+        state
+            .engines
+            .models_for_validation(engine_id, normalized_model_id)
+            .await
+            .ok()
+    };
 
     validate_model_for_engine_from_catalog(engine_id, normalized_model_id, models.as_deref())
 }
@@ -477,19 +651,19 @@ fn normalize_codex_remote_thread_limit(limit: Option<u32>) -> usize {
 }
 
 fn map_codex_remote_thread_dto(
-    thread: CodexRemoteThreadSummary,
+    thread: CliSessionSnapshot,
     local_thread_id: Option<String>,
 ) -> CodexRemoteThreadDto {
     CodexRemoteThreadDto {
         engine_thread_id: thread.engine_thread_id,
-        title: thread.title,
-        preview: thread.preview,
+        title: Some(thread.title),
+        preview: thread.preview.unwrap_or_default(),
         cwd: thread.cwd,
-        created_at: codex_remote_thread_timestamp_to_rfc3339(thread.created_at),
-        updated_at: codex_remote_thread_timestamp_to_rfc3339(thread.updated_at),
-        model_provider: thread.model_provider,
-        source_kind: thread.source_kind,
-        status_type: thread.status_type,
+        created_at: thread.created_at.unwrap_or_default(),
+        updated_at: thread.updated_at.unwrap_or_default(),
+        model_provider: thread.model_id,
+        source_kind: thread.source_kind.unwrap_or_default(),
+        status_type: thread.raw_status.unwrap_or_default(),
         active_flags: thread.active_flags,
         archived: thread.archived,
         local_thread_id,
@@ -831,11 +1005,73 @@ async fn create_thread_inner(
     if normalized_model_id.is_empty() {
         return Err("model id cannot be empty".to_string());
     }
-    let validation_models = state
-        .engines
-        .models_for_validation(&engine_id, normalized_model_id)
-        .await
-        .ok();
+    let target_workspace = run_db(state.db.clone(), {
+        let workspace_id = workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
+    if target_workspace.location_kind == "ssh"
+        && !matches!(engine_id.as_str(), "codex" | "opencode" | "claude")
+    {
+        return Err(format!("SSH 远端项目当前阶段尚未接入 {engine_id} 正式对话"));
+    }
+    let validation_models = if target_workspace.location_kind == "ssh" {
+        Some(match engine_id.as_str() {
+            "codex" => {
+                let context = CliExecutionContext::from_workspace(&target_workspace)
+                    .map_err(err_to_string)?;
+                let codex = CliToolFactory::new(state.clone())
+                    .create("codex")
+                    .expect("Codex CLI factory mapping must exist");
+                let cli: &dyn CliTool = codex.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .map_err(err_to_string)?
+            }
+            "opencode" => {
+                let context = CliExecutionContext::from_workspace(&target_workspace)
+                    .map_err(err_to_string)?;
+                let opencode = CliToolFactory::new(state.clone())
+                    .create("opencode")
+                    .expect("OpenCode CLI factory mapping must exist");
+                let cli: &dyn CliTool = opencode.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .map_err(err_to_string)?
+            }
+            "claude" => {
+                let context = CliExecutionContext::from_workspace(&target_workspace)
+                    .map_err(err_to_string)?;
+                let claude = CliToolFactory::new(state.clone())
+                    .create("claude")
+                    .expect("Claude CLI factory mapping must exist");
+                let cli: &dyn CliTool = claude.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .map_err(err_to_string)?
+            }
+            _ => unreachable!(),
+        })
+    } else if engine_id == "claude" {
+        let context =
+            CliExecutionContext::from_workspace(&target_workspace).map_err(err_to_string)?;
+        let claude = CliToolFactory::new(state.clone())
+            .create("claude")
+            .expect("Claude CLI factory mapping must exist");
+        let cli: &dyn CliTool = claude.as_ref();
+        cli.models_for_validation(&context, normalized_model_id)
+            .await
+            .ok()
+    } else {
+        state
+            .engines
+            .models_for_validation(&engine_id, normalized_model_id)
+            .await
+            .ok()
+    };
     let effective_model_id = validate_model_for_engine_from_catalog(
         &engine_id,
         normalized_model_id,
@@ -865,8 +1101,11 @@ async fn create_thread_inner(
     }
 
     if let Some(preset) = initial_autonomy_preset.as_deref() {
-        let codex_external_sandbox =
-            engine_id == "codex" && state.engines.codex_uses_external_sandbox().await;
+        let codex_external_sandbox = if engine_id == "codex" {
+            codex_external_sandbox_for_workspace(state, &target_workspace).await?
+        } else {
+            false
+        };
         let policy = autonomy_policy_for_preset(&engine_id, preset, codex_external_sandbox)?;
         metadata.insert(
             approval_policy_metadata_key(&engine_id).to_string(),
@@ -969,6 +1208,14 @@ pub async fn set_thread_reasoning_effort(
     })
     .await?
     .ok_or_else(|| format!("thread not found: {thread_id}"))?;
+    let workspace = run_db(db.clone(), {
+        let workspace_id = thread.workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
     let normalized_model_id = model_id
         .as_deref()
         .map(str::trim)
@@ -987,15 +1234,64 @@ pub async fn set_thread_reasoning_effort(
         .map(str::to_lowercase);
 
     let validated_effort = if let Some(value) = normalized_effort.as_deref() {
-        Some(
-            validate_reasoning_effort(
-                state.inner(),
-                &thread.engine_id,
+        if workspace.location_kind == "ssh" {
+            let models = match thread.engine_id.as_str() {
+                "codex" => {
+                    let context =
+                        CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                    let codex = CliToolFactory::new(state.inner().clone())
+                        .create("codex")
+                        .expect("Codex CLI factory mapping must exist");
+                    let cli: &dyn CliTool = codex.as_ref();
+                    cli.models_for_validation(&context, &effective_model_id)
+                        .await
+                        .map_err(err_to_string)?
+                }
+                "opencode" => {
+                    let context =
+                        CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                    let opencode = CliToolFactory::new(state.inner().clone())
+                        .create("opencode")
+                        .expect("OpenCode CLI factory mapping must exist");
+                    let cli: &dyn CliTool = opencode.as_ref();
+                    cli.models_for_validation(&context, &effective_model_id)
+                        .await
+                        .map_err(err_to_string)?
+                }
+                "claude" => {
+                    let context =
+                        CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                    let claude = CliToolFactory::new(state.inner().clone())
+                        .create("claude")
+                        .expect("Claude CLI factory mapping must exist");
+                    let cli: &dyn CliTool = claude.as_ref();
+                    cli.models_for_validation(&context, &effective_model_id)
+                        .await
+                        .map_err(err_to_string)?
+                }
+                _ => {
+                    return Err(format!(
+                        "SSH 远端项目当前阶段尚未接入 {} 思考强度",
+                        thread.engine_id
+                    ));
+                }
+            };
+            Some(validate_reasoning_effort_from_catalog(
                 effective_model_id.as_str(),
                 value,
+                Some(models.as_slice()),
+            )?)
+        } else {
+            Some(
+                validate_reasoning_effort(
+                    state.inner(),
+                    &thread.engine_id,
+                    effective_model_id.as_str(),
+                    value,
+                )
+                .await?,
             )
-            .await?,
-        )
+        }
     } else {
         None
     };
@@ -1084,16 +1380,71 @@ pub async fn delete_thread(state: State<'_, AppState>, thread_id: String) -> Res
     })
     .await?
     {
-        if let Err(error) = state.engines.interrupt(&thread).await {
-            log::warn!("failed to interrupt thread before deletion: {error}");
-        }
-        if thread.engine_id == "opencode" {
-            if let Some(engine_thread_id) = thread.engine_thread_id.as_deref() {
-                state
-                    .engines
-                    .forget_opencode_session(engine_thread_id)
-                    .await;
+        let workspace = run_db(db.clone(), {
+            let workspace_id = thread.workspace_id.clone();
+            move |db| {
+                db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                    .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
             }
+        })
+        .await?;
+        if thread.engine_id == "codex" {
+            let result = async {
+                let context =
+                    CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                let codex = CliToolFactory::new(state.inner().clone())
+                    .create("codex")
+                    .expect("Codex CLI factory mapping must exist");
+                let cli: &dyn CliTool = codex.as_ref();
+                cli.interrupt(
+                    &context,
+                    &thread,
+                    thread.engine_thread_id.as_deref().unwrap_or("default"),
+                )
+                .await
+                .map_err(err_to_string)
+            }
+            .await;
+            if let Err(error) = result {
+                log::warn!("failed to interrupt Codex thread before deletion: {error}");
+            }
+        } else if thread.engine_id == "claude" {
+            let result = async {
+                let context =
+                    CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                let claude = CliToolFactory::new(state.inner().clone())
+                    .create("claude")
+                    .expect("Claude CLI factory mapping must exist");
+                let cli: &dyn CliTool = claude.as_ref();
+                cli.interrupt(
+                    &context,
+                    &thread,
+                    thread.engine_thread_id.as_deref().unwrap_or("default"),
+                )
+                .await
+                .map_err(err_to_string)
+            }
+            .await;
+            if let Err(error) = result {
+                log::warn!("failed to interrupt Claude thread before deletion: {error}");
+            }
+        } else if thread.engine_id == "opencode" {
+            let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let opencode = CliToolFactory::new(state.inner().clone())
+                .create("opencode")
+                .expect("OpenCode CLI factory mapping must exist");
+            let cli: &dyn CliTool = opencode.as_ref();
+            let engine_thread_id = thread.engine_thread_id.as_deref().unwrap_or("default");
+            if let Err(error) = cli.interrupt(&context, &thread, engine_thread_id).await {
+                log::warn!("failed to interrupt OpenCode thread before deletion: {error:#}");
+            }
+            if let Some(engine_thread_id) = thread.engine_thread_id.as_deref() {
+                cli.forget_session(&context, &thread, engine_thread_id)
+                    .await
+                    .map_err(err_to_string)?;
+            }
+        } else if let Err(error) = state.engines.interrupt(&thread).await {
+            log::warn!("failed to interrupt thread before deletion: {error}");
         }
     } else {
         state.turns.finish(&thread_id).await;
@@ -1122,19 +1473,93 @@ pub async fn archive_thread(state: State<'_, AppState>, thread_id: String) -> Re
         .await?
         .ok_or_else(|| format!("thread not found: {thread_id}"))?;
 
+        let workspace = run_db(db.clone(), {
+            let workspace_id = thread.workspace_id.clone();
+            move |db| {
+                db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                    .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+            }
+        })
+        .await?;
+        if thread.engine_id == "codex" {
+            let context =
+                CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let codex = CliToolFactory::new(state.inner().clone()).create("codex").expect("Codex CLI factory mapping must exist");
+            let cli: &dyn CliTool = codex.as_ref();
+            let engine_thread_id = thread.engine_thread_id.as_deref().unwrap_or("default");
+            if let Err(error) = cli
+                .interrupt(&context, &thread, engine_thread_id)
+                .await
+            {
+                log::warn!("failed to interrupt Codex thread before archive: {error:#}");
+            }
+            if thread.engine_thread_id.is_some() {
+                cli.archive_thread(&context, &thread, engine_thread_id)
+                    .await
+                    .map_err(err_to_string)?;
+            }
+            run_db(db.clone(), {
+                let thread_id = thread_id.clone();
+                move |db| db::threads::archive_thread(db, &thread_id)
+            })
+            .await?;
+            return Ok(());
+        }
+        if thread.engine_id == "claude" {
+            let context =
+                CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let claude = CliToolFactory::new(state.inner().clone()).create("claude").expect("Claude CLI factory mapping must exist");
+            let cli: &dyn CliTool = claude.as_ref();
+            let engine_thread_id = thread.engine_thread_id.as_deref().unwrap_or("default");
+            if let Err(error) = cli
+                .interrupt(&context, &thread, engine_thread_id)
+                .await
+            {
+                log::warn!("failed to interrupt Claude thread before archive: {error:#}");
+            }
+            if thread.engine_thread_id.is_some() {
+                cli.archive_thread(&context, &thread, engine_thread_id)
+                    .await
+                    .map_err(err_to_string)?;
+            }
+            run_db(db.clone(), {
+                let thread_id = thread_id.clone();
+                move |db| db::threads::archive_thread(db, &thread_id)
+            })
+            .await?;
+            return Ok(());
+        }
+        if thread.engine_id == "opencode" {
+            let context =
+                CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let opencode = CliToolFactory::new(state.inner().clone()).create("opencode").expect("OpenCode CLI factory mapping must exist");
+            let cli: &dyn CliTool = opencode.as_ref();
+            let engine_thread_id = thread.engine_thread_id.as_deref().unwrap_or("default");
+            if let Err(error) = cli
+                .interrupt(&context, &thread, engine_thread_id)
+                .await
+            {
+                log::warn!("failed to interrupt OpenCode thread before archive: {error:#}");
+            }
+            if thread.engine_thread_id.is_some() {
+                cli.archive_thread(&context, &thread, engine_thread_id)
+                    .await
+                    .map_err(err_to_string)?;
+            }
+            run_db(db.clone(), {
+                let thread_id = thread_id.clone();
+                move |db| db::threads::archive_thread(db, &thread_id)
+            })
+            .await?;
+            return Ok(());
+        }
+
         if let Err(error) = state.engines.interrupt(&thread).await {
             log::warn!("failed to interrupt thread before archive: {error}");
         }
 
         if thread.engine_id == "opencode" {
-            if let Some(engine_thread_id) = thread.engine_thread_id.as_deref() {
-                let cwd = resolve_thread_cwd(state.inner(), &thread).await?;
-                state
-                    .engines
-                    .archive_opencode_remote_session(&cwd, engine_thread_id)
-                    .await
-                    .map_err(err_to_string)?;
-            }
+            unreachable!("OpenCode archive already uses OpenCodeCli");
         } else {
             match state.engines.archive_thread(&thread).await {
                 Ok(()) => {}
@@ -1212,22 +1637,58 @@ pub async fn restore_thread(
     .await?
     .ok_or_else(|| format!("thread not found: {thread_id}"))?;
 
-    if thread.engine_id == "opencode" {
+    let workspace = run_db(db.clone(), {
+        let workspace_id = thread.workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
+    if thread.engine_id == "codex" {
         if let Some(engine_thread_id) = thread.engine_thread_id.as_deref() {
-            let cwd = resolve_thread_cwd(state.inner(), &thread).await?;
-            state
-                .engines
-                .unarchive_opencode_remote_session(&cwd, engine_thread_id)
+            let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let codex = CliToolFactory::new(state.inner().clone())
+                .create("codex")
+                .expect("Codex CLI factory mapping must exist");
+            let cli: &dyn CliTool = codex.as_ref();
+            cli.unarchive_thread(&context, &thread, engine_thread_id)
                 .await
                 .map_err(err_to_string)?;
         }
-    } else {
-        state
-            .engines
-            .unarchive_thread(&thread)
-            .await
-            .map_err(err_to_string)?;
+        return run_db(db, move |db| db::threads::restore_thread(db, &thread_id)).await;
     }
+    if thread.engine_id == "claude" {
+        if let Some(engine_thread_id) = thread.engine_thread_id.as_deref() {
+            let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let claude = CliToolFactory::new(state.inner().clone())
+                .create("claude")
+                .expect("Claude CLI factory mapping must exist");
+            let cli: &dyn CliTool = claude.as_ref();
+            cli.unarchive_thread(&context, &thread, engine_thread_id)
+                .await
+                .map_err(err_to_string)?;
+        }
+        return run_db(db, move |db| db::threads::restore_thread(db, &thread_id)).await;
+    }
+    if thread.engine_id == "opencode" {
+        if let Some(engine_thread_id) = thread.engine_thread_id.as_deref() {
+            let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let opencode = CliToolFactory::new(state.inner().clone())
+                .create("opencode")
+                .expect("OpenCode CLI factory mapping must exist");
+            let cli: &dyn CliTool = opencode.as_ref();
+            cli.unarchive_thread(&context, &thread, engine_thread_id)
+                .await
+                .map_err(err_to_string)?;
+        }
+        return run_db(db, move |db| db::threads::restore_thread(db, &thread_id)).await;
+    }
+    state
+        .engines
+        .unarchive_thread(&thread)
+        .await
+        .map_err(err_to_string)?;
 
     let restored = run_db(db, move |db| db::threads::restore_thread(db, &thread_id)).await?;
 
@@ -1251,17 +1712,40 @@ pub async fn sync_thread_from_engine(
         let Some(engine_thread_id) = thread.engine_thread_id.as_deref() else {
             return Ok(thread);
         };
-        let cwd = resolve_thread_cwd(state.inner(), &thread).await?;
-        let session = match state
-            .engines
-            .read_opencode_remote_session(&cwd, engine_thread_id)
-            .await
-        {
+        let workspace = run_db(db.clone(), {
+            let workspace_id = thread.workspace_id.clone();
+            move |db| {
+                db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                    .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+            }
+        })
+        .await?;
+        let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+        let opencode = CliToolFactory::new(state.inner().clone())
+            .create("opencode")
+            .expect("OpenCode CLI factory mapping must exist");
+        let cli: &dyn CliTool = opencode.as_ref();
+        let snapshot = match cli.read_session(&context, engine_thread_id).await {
             Ok(session) => session,
             Err(error) => {
                 log::debug!("failed to sync OpenCode session {engine_thread_id}: {error}");
                 return Ok(thread);
             }
+        };
+        let parse_timestamp = |value: Option<String>| {
+            value
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.timestamp_millis())
+                .unwrap_or_default()
+        };
+        let session = OpenCodeRemoteSessionSummary {
+            engine_thread_id: snapshot.engine_thread_id,
+            title: Some(snapshot.title),
+            cwd: snapshot.cwd,
+            created_at: parse_timestamp(snapshot.created_at),
+            updated_at: parse_timestamp(snapshot.updated_at),
+            archived: snapshot.archived,
         };
         let title = build_opencode_remote_session_title(&session);
         let metadata = build_opencode_remote_session_metadata(
@@ -1285,9 +1769,24 @@ pub async fn sync_thread_from_engine(
         return Ok(thread);
     }
 
-    let Some(snapshot) = state
-        .engines
-        .read_thread_sync_snapshot(&thread)
+    let workspace = run_db(db.clone(), {
+        let workspace_id = thread.workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
+    let Some(engine_thread_id) = thread.engine_thread_id.as_deref() else {
+        return Ok(thread);
+    };
+    let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+    let codex = CliToolFactory::new(state.inner().clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let cli: &dyn CliTool = codex.as_ref();
+    let Some(snapshot) = cli
+        .read_thread_sync_snapshot(&context, &thread, engine_thread_id)
         .await
         .map_err(err_to_string)?
     else {
@@ -1376,6 +1875,25 @@ fn imported_messages_have_streaming_turn(snapshot: &ThreadSyncSnapshot) -> bool 
         .any(|message| message.status == "streaming")
 }
 
+async fn reject_ssh_remote_codex_local_only_action(
+    state: &AppState,
+    thread: &ThreadDto,
+    action: &str,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    let workspace_id = thread.workspace_id.clone();
+    let workspace = run_db(db, move |db| {
+        db::workspaces::find_workspace_by_id(db, &workspace_id)
+    })
+    .await?;
+    if workspace.is_some_and(|workspace| workspace.location_kind == "ssh") {
+        return Err(format!(
+            "SSH 远端 Codex 暂未接入{action}，当前不会调用本机 Codex 执行"
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn fork_codex_thread(
     state: State<'_, AppState>,
@@ -1396,16 +1914,23 @@ pub async fn fork_codex_thread(
     if thread.engine_id != "codex" {
         return Err("native fork is only available for Codex threads".to_string());
     }
+    reject_ssh_remote_codex_local_only_action(state.inner(), &thread, "会话分支").await?;
     migrate_legacy_codex_on_failure_thread_metadata(state.inner(), &mut thread).await;
     let engine_thread_id = thread
         .engine_thread_id
         .clone()
         .ok_or_else(|| "Codex thread has not been initialized yet".to_string())?;
     let (cwd, model_id, sandbox) = build_codex_branch_context(state.inner(), &thread).await?;
-
-    let forked = state
-        .engines
-        .fork_codex_thread(&engine_thread_id, &cwd, &model_id, sandbox)
+    let codex = CliToolFactory::new(state.inner().clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let context = codex
+        .execution_context(Some(thread.workspace_id.as_str()))
+        .await
+        .map_err(err_to_string)?;
+    let cli: &dyn CliTool = codex.as_ref();
+    let forked = cli
+        .fork_thread(&context, &engine_thread_id, &cwd, &model_id, sandbox)
         .await
         .map_err(err_to_string)?;
 
@@ -1447,28 +1972,35 @@ pub async fn rollback_codex_thread(
     if thread.engine_id != "codex" {
         return Err("native rollback is only available for Codex threads".to_string());
     }
+    reject_ssh_remote_codex_local_only_action(state.inner(), &thread, "回滚").await?;
     migrate_legacy_codex_on_failure_thread_metadata(state.inner(), &mut thread).await;
     let engine_thread_id = thread
         .engine_thread_id
         .clone()
         .ok_or_else(|| "Codex thread has not been initialized yet".to_string())?;
     let (cwd, model_id, sandbox) = build_codex_branch_context(state.inner(), &thread).await?;
-
-    let forked = state
-        .engines
-        .fork_codex_thread(&engine_thread_id, &cwd, &model_id, sandbox)
+    let codex = CliToolFactory::new(state.inner().clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let context = codex
+        .execution_context(Some(thread.workspace_id.as_str()))
         .await
         .map_err(err_to_string)?;
-    let rollback_snapshot = match state
-        .engines
-        .rollback_codex_thread(&forked.engine_thread_id, num_turns)
+    let cli: &dyn CliTool = codex.as_ref();
+    let forked = cli
+        .fork_thread(&context, &engine_thread_id, &cwd, &model_id, sandbox)
+        .await
+        .map_err(err_to_string)?;
+    let rollback_snapshot = match cli
+        .rollback_thread(&context, &forked.engine_thread_id, num_turns)
         .await
     {
         Ok(snapshot) => snapshot,
         Err(rollback_error) => {
-            if let Err(cleanup_error) = state
-                .engines
-                .archive_codex_thread(&forked.engine_thread_id)
+            let mut cleanup_thread = thread.clone();
+            cleanup_thread.engine_thread_id = Some(forked.engine_thread_id.clone());
+            if let Err(cleanup_error) = cli
+                .archive_thread(&context, &cleanup_thread, &forked.engine_thread_id)
                 .await
             {
                 log::warn!(
@@ -1523,18 +2055,76 @@ pub async fn compact_codex_thread(
     if thread.engine_id != "codex" {
         return Err("native compact is only available for Codex threads".to_string());
     }
+    reject_ssh_remote_codex_local_only_action(state.inner(), &thread, "压缩").await?;
     let engine_thread_id = thread
         .engine_thread_id
         .clone()
         .ok_or_else(|| "Codex thread has not been initialized yet".to_string())?;
 
-    state
-        .engines
-        .compact_codex_thread(&engine_thread_id)
+    let codex = CliToolFactory::new(state.inner().clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let context = codex
+        .execution_context(Some(thread.workspace_id.as_str()))
+        .await
+        .map_err(err_to_string)?;
+    let cli: &dyn CliTool = codex.as_ref();
+    cli.compact_thread(&context, &engine_thread_id)
         .await
         .map_err(err_to_string)?;
 
     Ok(thread)
+}
+
+#[tauri::command]
+pub async fn set_ssh_remote_thread_selected_model(
+    state: State<'_, AppState>,
+    thread_id: String,
+    model_id: String,
+) -> Result<ThreadDto, String> {
+    let db = state.db.clone();
+    let thread = run_db(db.clone(), {
+        let thread_id = thread_id.clone();
+        move |db| {
+            db::threads::get_thread(db, &thread_id)?
+                .ok_or_else(|| anyhow::anyhow!("thread not found: {thread_id}"))
+        }
+    })
+    .await?;
+    let workspace_id = thread.workspace_id.clone();
+    let workspace = run_db(db.clone(), move |db| {
+        db::workspaces::find_workspace_by_id(db, &workspace_id)?
+            .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+    })
+    .await?;
+    if workspace.location_kind != "ssh" {
+        return Err("only SSH remote project threads can persist this model selection".to_string());
+    }
+    if !matches!(thread.engine_id.as_str(), "codex" | "opencode" | "claude") {
+        return Err(format!(
+            "SSH 远端项目当前阶段尚未接入 {} 模型选择持久化",
+            thread.engine_id
+        ));
+    }
+
+    let selected_model_id =
+        validate_model_for_thread_engine(state.inner(), &thread, model_id.trim()).await?;
+
+    run_db(db, move |db| {
+        let latest_thread = db::threads::get_thread(db, &thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("thread not found: {thread_id}"))?;
+        let mut metadata = latest_thread.engine_metadata.unwrap_or_else(|| json!({}));
+        if !metadata.is_object() {
+            metadata = json!({});
+        }
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert("lastModelId".to_string(), json!(selected_model_id));
+        }
+        db::threads::update_engine_metadata(db, &thread_id, &metadata)?;
+        db::threads::get_thread(db, &thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("thread not found after model selection: {thread_id}"))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1619,7 +2209,15 @@ async fn set_thread_execution_policy_inner(
     } else {
         None
     };
-    let external_sandbox_active = state.engines.codex_uses_external_sandbox().await;
+    let workspace = run_db(db.clone(), {
+        let workspace_id = thread.workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
+    let external_sandbox_active = codex_external_sandbox_for_workspace(state, &workspace).await?;
 
     if external_sandbox_active
         && thread.engine_id == "codex"
@@ -1966,6 +2564,66 @@ async fn validate_model_for_thread_engine(
         return Ok(thread.model_id.clone());
     }
 
+    let db = state.db.clone();
+    let workspace_id = thread.workspace_id.clone();
+    let workspace = run_db(db, move |db| {
+        db::workspaces::find_workspace_by_id(db, &workspace_id)?
+            .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+    })
+    .await?;
+    if workspace.location_kind == "ssh" {
+        if !matches!(thread.engine_id.as_str(), "codex" | "opencode" | "claude") {
+            return Err(format!(
+                "SSH 远端项目当前阶段尚未接入 {} 正式对话",
+                thread.engine_id
+            ));
+        }
+        let normalized_model_id = requested_model_id.trim();
+        if normalized_model_id.is_empty() {
+            return Err("model id cannot be empty".to_string());
+        }
+        let models = match thread.engine_id.as_str() {
+            "codex" => {
+                let context =
+                    CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                let codex = CliToolFactory::new(state.clone())
+                    .create("codex")
+                    .expect("Codex CLI factory mapping must exist");
+                let cli: &dyn CliTool = codex.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .map_err(err_to_string)?
+            }
+            "opencode" => {
+                let context =
+                    CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                let opencode = CliToolFactory::new(state.clone())
+                    .create("opencode")
+                    .expect("OpenCode CLI factory mapping must exist");
+                let cli: &dyn CliTool = opencode.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .map_err(err_to_string)?
+            }
+            "claude" => {
+                let context =
+                    CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+                let claude = CliToolFactory::new(state.clone())
+                    .create("claude")
+                    .expect("Claude CLI factory mapping must exist");
+                let cli: &dyn CliTool = claude.as_ref();
+                cli.models_for_validation(&context, normalized_model_id)
+                    .await
+                    .map_err(err_to_string)?
+            }
+            _ => unreachable!(),
+        };
+        return validate_model_for_engine_from_catalog(
+            &thread.engine_id,
+            normalized_model_id,
+            Some(models.as_slice()),
+        );
+    }
     validate_model_for_engine(state, &thread.engine_id, requested_model_id).await
 }
 
@@ -2071,7 +2729,8 @@ async fn build_codex_branch_context(
         .as_ref()
         .map(|repo| repo.trust_level.clone())
         .unwrap_or_else(|| aggregate_workspace_trust_level(&repos));
-    let codex_external_sandbox_active = state.engines.codex_uses_external_sandbox().await;
+    let codex_external_sandbox_active =
+        codex_external_sandbox_for_workspace(state, &workspace).await?;
     let permission_profile = thread_permission_profile(thread.engine_metadata.as_ref());
 
     if permission_profile.is_none() {
@@ -2321,12 +2980,42 @@ pub(crate) async fn migrate_legacy_codex_on_failure_thread_metadata(
     thread: &mut ThreadDto,
 ) {
     if thread.engine_id != "codex"
+        || thread
+            .engine_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("sshRemote"))
+            .and_then(Value::as_bool)
+            == Some(true)
         || !is_legacy_codex_on_failure_metadata(thread.engine_metadata.as_ref())
     {
         return;
     }
 
-    let codex_external_sandbox_active = state.engines.codex_uses_external_sandbox().await;
+    let db = state.db.clone();
+    let workspace_id = thread.workspace_id.clone();
+    let is_ssh_workspace = run_db(db.clone(), move |db| {
+        Ok(db::workspaces::find_workspace_by_id(db, &workspace_id)?
+            .is_some_and(|workspace| workspace.location_kind == "ssh"))
+    })
+    .await
+    .unwrap_or(false);
+    if is_ssh_workspace {
+        return;
+    }
+
+    let codex = CliToolFactory::new(state.clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let Ok(context) = codex
+        .execution_context(Some(thread.workspace_id.as_str()))
+        .await
+    else {
+        return;
+    };
+    let cli: &dyn CliTool = codex.as_ref();
+    let Ok(codex_external_sandbox_active) = cli.uses_external_sandbox(&context).await else {
+        return;
+    };
     let Some(metadata) = migrate_legacy_codex_on_failure_metadata(
         thread.engine_metadata.as_ref(),
         codex_external_sandbox_active,
@@ -2334,7 +3023,6 @@ pub(crate) async fn migrate_legacy_codex_on_failure_thread_metadata(
         return;
     };
 
-    let db = state.db.clone();
     let thread_id = thread.id.clone();
     let metadata_for_db = metadata.clone();
     if let Err(error) = run_db(db, move |db| {
@@ -3118,6 +3806,7 @@ mod tests {
                 crate::computer_control_service::ComputerControlService::default(),
             ),
             remote_access: Arc::new(crate::remote::RemoteTunnelManager::default()),
+            ssh_monitor: Arc::new(crate::ssh::monitor::SshConnectionMonitor::default()),
         }
     }
 

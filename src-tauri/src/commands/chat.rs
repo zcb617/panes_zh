@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -15,13 +18,27 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
+    cli_tools::{factory::CliToolFactory, CliExecutionContext, CliTool},
     commands::threads::migrate_legacy_codex_on_failure_thread_metadata,
     db,
     engines::{
-        approval_response_route_for_engine, normalize_approval_response_for_engine,
-        trim_action_output_delta_content, validate_engine_sandbox_mode, ActionResult,
-        ApprovalRequestRoute, BrowserAnnotationMetadata, EngineEvent, OutputStream, SandboxPolicy,
-        ThreadScope, TurnAttachment, TurnCompletionStatus, TurnInput, TurnInputItem,
+        approval_response_route_for_engine,
+        normalize_approval_response_for_engine,
+        trim_action_output_delta_content,
+        validate_engine_sandbox_mode,
+        ActionResult,
+        ApprovalRequestRoute,
+        BrowserAnnotationMetadata,
+        // Engine 直连入口已停用；三种 CLI 统一通过 CliTool 发送消息。
+        // Engine,
+        EngineEvent,
+        OutputStream,
+        SandboxPolicy,
+        ThreadScope,
+        TurnAttachment,
+        TurnCompletionStatus,
+        TurnInput,
+        TurnInputItem,
         STREAMED_DIFF_MAX_CHARS,
     },
     models::{
@@ -30,6 +47,7 @@ use crate::{
         ThreadDto, ThreadStatusDto, TrustLevelDto,
     },
     runtime_env,
+    ssh::remote_attachments::{self, RemoteAttachmentBatch},
     state::AppState,
 };
 
@@ -202,6 +220,8 @@ enum ContentBlock {
         mime_type: Option<String>,
         #[serde(rename = "browserAnnotation", skip_serializing_if = "Option::is_none")]
         browser_annotation: Option<BrowserAnnotationMetadata>,
+        #[serde(rename = "isRemote", default)]
+        is_remote: bool,
     },
 
     #[serde(rename = "skill")]
@@ -573,6 +593,22 @@ pub(crate) async fn send_message_inner(
     .await?
     .ok_or_else(|| format!("thread not found: {thread_id}"))?;
     migrate_legacy_codex_on_failure_thread_metadata(state, &mut thread).await;
+    let execution_workspace = run_db(db.clone(), {
+        let workspace_id = thread.workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
+    if execution_workspace.location_kind == "ssh"
+        && !matches!(thread.engine_id.as_str(), "codex" | "opencode" | "claude")
+    {
+        return Err(format!(
+            "SSH 远端项目当前阶段尚未接入 {} 正式对话",
+            thread.engine_id
+        ));
+    }
     let requested_model_id = model_id
         .as_deref()
         .map(str::trim)
@@ -584,28 +620,174 @@ pub(crate) async fn send_message_inner(
     let engine_message = format_engine_message(&message, &browser_annotation_context);
     let engine_input_items =
         append_browser_annotation_context(&input_items, &browser_annotation_context);
-    let turn_input = TurnInput {
-        message: engine_message,
-        attachments: attachments.clone(),
-        plan_mode,
-        input_items: engine_input_items,
-    };
+    // SSH 附件必须在模型校验和远端线程准备完成后上传，再使用远端路径构造 TurnInput。
+    // let turn_input = TurnInput {
+    //     message: engine_message,
+    //     attachments: attachments.clone(),
+    //     plan_mode,
+    //     input_items: engine_input_items,
+    // };
     let current_turn_model_id = thread_last_model_id(thread.engine_metadata.as_ref())
         .unwrap_or_else(|| thread.model_id.clone());
     let model_switch_requested = requested_model_id
         .map(|value| value != current_turn_model_id.as_str())
         .unwrap_or(false);
-    let validation_catalog = if model_switch_requested {
-        state.engines.list_engines().await.ok()
+    let codex_context = if thread.engine_id == "codex" {
+        Some(CliExecutionContext::from_workspace(&execution_workspace).map_err(err_to_string)?)
+    } else {
+        None
+    };
+    let codex_cli = if let Some(context) = codex_context.as_ref() {
+        let codex = CliToolFactory::new(state.clone())
+            .create("codex")
+            .expect("Codex CLI factory mapping must exist");
+        let cli: &dyn CliTool = codex.as_ref();
+        cli.acquire_turn(context, &thread)
+            .await
+            .map_err(err_to_string)?;
+        Some(codex)
+    } else {
+        None
+    };
+    let opencode_context = if thread.engine_id == "opencode" {
+        Some(CliExecutionContext::from_workspace(&execution_workspace).map_err(err_to_string)?)
+    } else {
+        None
+    };
+    let opencode_cli = if let Some(context) = opencode_context.as_ref() {
+        let opencode = CliToolFactory::new(state.clone())
+            .create("opencode")
+            .expect("OpenCode CLI factory mapping must exist");
+        let cli: &dyn CliTool = opencode.as_ref();
+        cli.acquire_turn(context, &thread)
+            .await
+            .map_err(err_to_string)?;
+        Some(opencode)
+    } else {
+        None
+    };
+    // OpenCode 的本机与 SSH 整轮占用现在统一由 OpenCodeCli::acquire_turn 处理。
+    // let remote_opencode_use = if execution_workspace.location_kind == "ssh"
+    //     && thread.engine_id == "opencode"
+    // {
+    //     Some(
+    //         remote_project_opencode_runtime_service::acquire_turn(
+    //             &execution_workspace,
+    //             &thread.id,
+    //         )
+    //         .await
+    //         .map_err(err_to_string)?,
+    //     )
+    // } else {
+    //     None
+    // };
+    let claude_context = if thread.engine_id == "claude" {
+        Some(CliExecutionContext::from_workspace(&execution_workspace).map_err(err_to_string)?)
+    } else {
+        None
+    };
+    let claude_cli = if let Some(context) = claude_context.as_ref() {
+        let claude = CliToolFactory::new(state.clone())
+            .create("claude")
+            .expect("Claude CLI factory mapping must exist");
+        let cli: &dyn CliTool = claude.as_ref();
+        cli.acquire_turn(context, &thread)
+            .await
+            .map_err(err_to_string)?;
+        Some(claude)
+    } else {
+        None
+    };
+    let remote_engine_catalog = if execution_workspace.location_kind == "ssh" {
+        // 阶段计划 3 在这里拒绝所有本机附件；阶段计划 4 改为模型校验后统一上传。
+        // if !attachments.is_empty() {
+        //     return Err(format!(
+        //         "SSH 远端项目附件将在第4阶段剩余工作阶段计划4中接入；当前不能把本机附件路径发送给远端 {}",
+        //         match thread.engine_id.as_str() {
+        //             "opencode" => "OpenCode",
+        //             "claude" => "Claude",
+        //             _ => "Codex",
+        //         }
+        //     ));
+        // }
+        let engine = if let (Some(codex), Some(context)) =
+            (codex_cli.as_ref(), codex_context.as_ref())
+        {
+            let cli: &dyn CliTool = codex.as_ref();
+            cli.get_engine_info(context).await.map_err(err_to_string)?
+        } else if let (Some(opencode), Some(context)) =
+            (opencode_cli.as_ref(), opencode_context.as_ref())
+        {
+            let cli: &dyn CliTool = opencode.as_ref();
+            cli.get_engine_info(context).await.map_err(err_to_string)?
+        } else if let (Some(claude), Some(context)) = (claude_cli.as_ref(), claude_context.as_ref())
+        {
+            let cli: &dyn CliTool = claude.as_ref();
+            cli.get_engine_info(context).await.map_err(err_to_string)?
+        } else {
+            return Err(format!("SSH 远端 {} 运行时未建立", thread.engine_id));
+        };
+        Some(vec![engine])
+    } else {
+        None
+    };
+    let validation_catalog = if let Some(catalog) = remote_engine_catalog.as_ref() {
+        Some(catalog.clone())
+    } else if model_switch_requested {
+        if let (Some(opencode), Some(context)) = (opencode_cli.as_ref(), opencode_context.as_ref())
+        {
+            let cli: &dyn CliTool = opencode.as_ref();
+            cli.get_engine_info(context)
+                .await
+                .ok()
+                .map(|engine| vec![engine])
+        } else if let (Some(claude), Some(context)) = (claude_cli.as_ref(), claude_context.as_ref())
+        {
+            let cli: &dyn CliTool = claude.as_ref();
+            cli.get_engine_info(context)
+                .await
+                .ok()
+                .map(|engine| vec![engine])
+        } else {
+            state.engines.list_engines().await.ok()
+        }
     } else {
         None
     };
     let effective_model_id =
         resolve_turn_model_id(&thread, requested_model_id, validation_catalog.as_deref())?;
+    if execution_workspace.location_kind == "ssh"
+        && !validation_catalog
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|engine| engine.id == thread.engine_id)
+            .is_some_and(|engine| {
+                engine
+                    .models
+                    .iter()
+                    .any(|model| model.id == effective_model_id)
+            })
+    {
+        return Err(format!(
+            "模型 `{effective_model_id}` 在当前 SSH 远端 {} 上不可用，请重新选择模型",
+            match thread.engine_id.as_str() {
+                "opencode" => "OpenCode",
+                "claude" => "Claude",
+                _ => "Codex",
+            }
+        ));
+    }
     let attachment_catalog = if attachments.is_empty() {
         None
     } else if let Some(catalog) = validation_catalog.as_ref() {
         Some(catalog.clone())
+    } else if let (Some(claude), Some(context)) = (claude_cli.as_ref(), claude_context.as_ref()) {
+        let cli: &dyn CliTool = claude.as_ref();
+        Some(vec![cli
+            .get_engine_info(context)
+            .await
+            .map_err(err_to_string)?])
     } else {
         Some(state.engines.list_engines().await.map_err(err_to_string)?)
     };
@@ -687,7 +869,12 @@ pub(crate) async fn send_message_inner(
             thread.engine_metadata.as_ref(),
         )?)
     };
-    let scope = if let Some(repo) = selected_repo.as_ref() {
+    let scope = if execution_workspace.location_kind == "ssh" {
+        ThreadScope::Workspace {
+            root_path: execution_workspace.root_path.clone(),
+            writable_roots: vec![execution_workspace.root_path.clone()],
+        }
+    } else if let Some(repo) = selected_repo.as_ref() {
         ThreadScope::Repo {
             repo_path: repo.path.clone(),
         }
@@ -705,11 +892,15 @@ pub(crate) async fn send_message_inner(
         .as_ref()
         .map(|repo| repo.trust_level.clone())
         .unwrap_or_else(|| aggregate_workspace_trust_level(&repos));
-    let codex_external_sandbox_active = if thread.engine_id == "codex" {
-        state.engines.codex_uses_external_sandbox().await
-    } else {
-        false
-    };
+    let codex_external_sandbox_active =
+        if let (Some(codex), Some(context)) = (codex_cli.as_ref(), codex_context.as_ref()) {
+            let cli: &dyn CliTool = codex.as_ref();
+            cli.uses_external_sandbox(context)
+                .await
+                .map_err(err_to_string)?
+        } else {
+            false
+        };
     let permission_profile = if thread.engine_id == "codex" {
         thread_permission_profile(thread.engine_metadata.as_ref())
     } else {
@@ -795,9 +986,23 @@ pub(crate) async fn send_message_inner(
             thread_allow_network_override(thread.engine_metadata.as_ref())
                 .unwrap_or_else(|| allow_network_for_trust_level(&trust_level))
         };
-    let personality = if thread.engine_id == "codex"
-        && model_supports_personality(state, &thread.engine_id, &effective_model_id).await
-    {
+    let model_supports_selected_personality = if execution_workspace.location_kind == "ssh" {
+        validation_catalog
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|engine| engine.id == thread.engine_id)
+            .and_then(|engine| {
+                engine
+                    .models
+                    .iter()
+                    .find(|model| model.id == effective_model_id)
+            })
+            .is_some_and(|model| model.supports_personality)
+    } else {
+        model_supports_personality(state, &thread.engine_id, &effective_model_id).await
+    };
+    let personality = if thread.engine_id == "codex" && model_supports_selected_personality {
         thread_personality(thread.engine_metadata.as_ref())
     } else {
         None
@@ -831,11 +1036,57 @@ pub(crate) async fn send_message_inner(
         opencode_agent: thread_opencode_agent(thread.engine_metadata.as_ref()),
     };
 
-    let engine_thread_id = state
-        .engines
-        .ensure_engine_thread(&thread, Some(effective_model_id.as_str()), scope, sandbox)
+    // SSH 远端 CLI 的持续占用已在模型读取前取得，避免模型查询结束时关闭服务。
+    let engine_thread_id = if let (Some(codex), Some(context)) =
+        (codex_cli.as_ref(), codex_context.as_ref())
+    {
+        let cli: &dyn CliTool = codex.as_ref();
+        cli.start_thread(
+            context,
+            &thread,
+            scope,
+            thread.engine_thread_id.as_deref(),
+            effective_model_id.as_str(),
+            sandbox,
+        )
         .await
-        .map_err(err_to_string)?;
+        .map(|engine_thread| engine_thread.engine_thread_id)
+        .map_err(err_to_string)?
+    } else if let (Some(opencode), Some(context)) =
+        (opencode_cli.as_ref(), opencode_context.as_ref())
+    {
+        let cli: &dyn CliTool = opencode.as_ref();
+        cli.start_thread(
+            context,
+            &thread,
+            scope,
+            thread.engine_thread_id.as_deref(),
+            effective_model_id.as_str(),
+            sandbox,
+        )
+        .await
+        .map(|engine_thread| engine_thread.engine_thread_id)
+        .map_err(err_to_string)?
+    } else if let (Some(claude), Some(context)) = (claude_cli.as_ref(), claude_context.as_ref()) {
+        let cli: &dyn CliTool = claude.as_ref();
+        cli.start_thread(
+            context,
+            &thread,
+            scope,
+            thread.engine_thread_id.as_deref(),
+            effective_model_id.as_str(),
+            sandbox,
+        )
+        .await
+        .map(|engine_thread| engine_thread.engine_thread_id)
+        .map_err(err_to_string)?
+    } else {
+        state
+            .engines
+            .ensure_engine_thread(&thread, Some(effective_model_id.as_str()), scope, sandbox)
+            .await
+            .map_err(err_to_string)?
+    };
 
     if thread.engine_thread_id.as_deref() != Some(&engine_thread_id) {
         run_db(db.clone(), {
@@ -847,12 +1098,52 @@ pub(crate) async fn send_message_inner(
         thread.engine_thread_id = Some(engine_thread_id.clone());
     }
 
+    let remote_attachment_batch = if execution_workspace.location_kind == "ssh"
+        && !attachments.is_empty()
+    {
+        let connection_id = execution_workspace
+            .ssh_connection_id
+            .as_deref()
+            .ok_or_else(|| "SSH 远端项目未绑定连接，无法上传附件".to_string())?
+            .to_string();
+        let connection = run_db(db.clone(), move |db| {
+            db::ssh_connections::find(db, &connection_id)?
+                .ok_or_else(|| anyhow::anyhow!("SSH 连接不存在，无法上传远端附件: {connection_id}"))
+        })
+        .await?;
+        Some(
+            remote_attachments::upload_turn_attachments(
+                &connection,
+                &execution_workspace.id,
+                &thread.id,
+                &attachments,
+            )
+            .await
+            .map_err(err_to_string)?,
+        )
+    } else {
+        None
+    };
+    let attachments = remote_attachment_batch
+        .as_ref()
+        .map(|batch| batch.attachments.clone())
+        .unwrap_or(attachments);
+    let turn_input = TurnInput {
+        message: engine_message,
+        attachments: attachments.clone(),
+        plan_mode,
+        input_items: engine_input_items,
+    };
+
     let cancellation = CancellationToken::new();
     if !state
         .turns
         .try_register(&thread.id, cancellation.clone())
         .await
     {
+        if let Some(batch) = remote_attachment_batch.as_ref() {
+            batch.cleanup().await;
+        }
         return Err(
             "A turn is already running for this thread. Cancel it before sending another message."
                 .to_string(),
@@ -913,6 +1204,9 @@ pub(crate) async fn send_message_inner(
     {
         Ok(result) => result,
         Err(error) => {
+            if let Some(batch) = remote_attachment_batch.as_ref() {
+                batch.cleanup().await;
+            }
             state.turns.finish(&thread.id).await;
             return Err(error);
         }
@@ -944,6 +1238,10 @@ pub(crate) async fn send_message_inner(
             initial_turn_model_id,
             turn_input_for_task,
             client_turn_id,
+            codex_cli.zip(codex_context),
+            opencode_cli.zip(opencode_context),
+            claude_cli.zip(claude_context),
+            remote_attachment_batch,
             cancellation,
         )
         .await;
@@ -977,6 +1275,17 @@ pub async fn start_codex_review(
 
     if source_thread.engine_id != "codex" {
         return Err("Native review is only available for Codex threads.".to_string());
+    }
+    let source_workspace = run_db(db.clone(), {
+        let workspace_id = source_thread.workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
+    if source_workspace.location_kind == "ssh" {
+        return Err("SSH 远端 Codex 原生审查不在第4阶段剩余工作阶段计划1范围内，当前不会调用本机 Codex 执行".to_string());
     }
 
     let source_engine_thread_id = source_thread
@@ -1145,12 +1454,52 @@ pub async fn steer_message(
     if thread.engine_id != "codex" {
         return Err("Mid-turn steering is only available for Codex threads.".to_string());
     }
+    let workspace = run_db(db.clone(), {
+        let workspace_id = thread.workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
 
     let engine_thread_id = thread
         .engine_thread_id
         .clone()
         .ok_or_else(|| format!("thread `{thread_id}` has no active engine thread id"))?;
     let attachments = normalize_attachments(attachments)?;
+    // 阶段计划 3 直接拒绝 SSH steer 附件；阶段计划 4 使用同一安全上传前置流程。
+    // if workspace.location_kind == "ssh" && !attachments.is_empty() {
+    //     return Err("SSH 远端项目附件将在第4阶段剩余工作阶段计划4中接入；当前不能把本机附件路径发送给远端 Codex".to_string());
+    // }
+    let remote_attachment_batch = if workspace.location_kind == "ssh" && !attachments.is_empty() {
+        let connection_id = workspace
+            .ssh_connection_id
+            .as_deref()
+            .ok_or_else(|| "SSH 远端项目未绑定连接，无法上传附件".to_string())?
+            .to_string();
+        let connection = run_db(db.clone(), move |db| {
+            db::ssh_connections::find(db, &connection_id)?
+                .ok_or_else(|| anyhow::anyhow!("SSH 连接不存在，无法上传远端附件: {connection_id}"))
+        })
+        .await?;
+        Some(
+            remote_attachments::upload_turn_attachments(
+                &connection,
+                &workspace.id,
+                &thread.id,
+                &attachments,
+            )
+            .await
+            .map_err(err_to_string)?,
+        )
+    } else {
+        None
+    };
+    let attachments = remote_attachment_batch
+        .as_ref()
+        .map(|batch| batch.attachments.clone())
+        .unwrap_or(attachments);
     let input_items = normalize_input_items(message.as_str(), input_items)?;
     let plan_mode = plan_mode.unwrap_or(false);
     let browser_annotation_context = browser_annotation_context(&attachments);
@@ -1196,9 +1545,14 @@ pub async fn steer_message(
     })
     .await?;
 
-    let engine_receipt = match state
-        .engines
+    let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+    let codex = CliToolFactory::new(state.inner().clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let cli: &dyn CliTool = codex.as_ref();
+    let engine_receipt = match cli
         .steer_message(
+            &context,
             &thread,
             &engine_thread_id,
             client_steer_id.as_str(),
@@ -1209,6 +1563,9 @@ pub async fn steer_message(
     {
         Ok(receipt) => receipt,
         Err(error) => {
+            if let Some(batch) = remote_attachment_batch.as_ref() {
+                batch.cleanup().await;
+            }
             let rollback_result = run_db(db, {
                 let message_id = user_message.id.clone();
                 move |db| db::messages::delete_message(db, &message_id)
@@ -1300,6 +1657,7 @@ fn build_user_blocks(
             size_bytes: attachment.size_bytes,
             mime_type: attachment.mime_type.clone(),
             browser_annotation: attachment.browser_annotation.clone(),
+            is_remote: attachment.is_remote,
         });
     }
 
@@ -1425,6 +1783,8 @@ fn normalize_attachments(
             size_bytes: attachment.size_bytes,
             mime_type: attachment.mime_type,
             browser_annotation,
+            is_remote: false,
+            remote_text_content: None,
         });
     }
 
@@ -1661,11 +2021,65 @@ pub(crate) async fn cancel_turn_inner(state: &AppState, thread_id: String) -> Re
     })
     .await?
     {
-        state
-            .engines
-            .interrupt(&thread)
+        let workspace = run_db(db.clone(), {
+            let workspace_id = thread.workspace_id.clone();
+            move |db| {
+                db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                    .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+            }
+        })
+        .await?;
+        if thread.engine_id == "codex" {
+            let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let codex = CliToolFactory::new(state.clone())
+                .create("codex")
+                .expect("Codex CLI factory mapping must exist");
+            let cli: &dyn CliTool = codex.as_ref();
+            cli.interrupt(
+                &context,
+                &thread,
+                thread.engine_thread_id.as_deref().unwrap_or("default"),
+            )
             .await
             .map_err(err_to_string)?;
+        } else if thread.engine_id == "opencode" {
+            let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let opencode = CliToolFactory::new(state.clone())
+                .create("opencode")
+                .expect("OpenCode CLI factory mapping must exist");
+            let cli: &dyn CliTool = opencode.as_ref();
+            cli.interrupt(
+                &context,
+                &thread,
+                thread.engine_thread_id.as_deref().unwrap_or("default"),
+            )
+            .await
+            .map_err(err_to_string)?;
+        } else if thread.engine_id == "claude" {
+            let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let claude = CliToolFactory::new(state.clone())
+                .create("claude")
+                .expect("Claude CLI factory mapping must exist");
+            let cli: &dyn CliTool = claude.as_ref();
+            cli.interrupt(
+                &context,
+                &thread,
+                thread.engine_thread_id.as_deref().unwrap_or("default"),
+            )
+            .await
+            .map_err(err_to_string)?;
+        } else if workspace.location_kind == "ssh" {
+            return Err(format!(
+                "SSH 远端项目当前阶段尚未接入 {} 取消操作",
+                thread.engine_id
+            ));
+        } else {
+            state
+                .engines
+                .interrupt(&thread)
+                .await
+                .map_err(err_to_string)?;
+        }
     }
     Ok(())
 }
@@ -1702,9 +2116,22 @@ async fn respond_to_approval_inner(
     let approval_route =
         load_approval_response_route(db.clone(), thread.engine_id.as_str(), &approval_id).await?;
 
-    state
-        .engines
-        .respond_to_approval(
+    let workspace = run_db(db.clone(), {
+        let workspace_id = thread.workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
+    if thread.engine_id == "codex" {
+        let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+        let codex = CliToolFactory::new(state.clone())
+            .create("codex")
+            .expect("Codex CLI factory mapping must exist");
+        let cli: &dyn CliTool = codex.as_ref();
+        cli.respond_to_approval(
+            &context,
             &thread,
             &approval_id,
             normalized_response.clone(),
@@ -1712,6 +2139,53 @@ async fn respond_to_approval_inner(
         )
         .await
         .map_err(err_to_string)?;
+    } else if thread.engine_id == "opencode" {
+        let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+        let opencode = CliToolFactory::new(state.clone())
+            .create("opencode")
+            .expect("OpenCode CLI factory mapping must exist");
+        let cli: &dyn CliTool = opencode.as_ref();
+        cli.respond_to_approval(
+            &context,
+            &thread,
+            &approval_id,
+            normalized_response.clone(),
+            approval_route,
+        )
+        .await
+        .map_err(err_to_string)?;
+    } else if thread.engine_id == "claude" {
+        let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+        let claude = CliToolFactory::new(state.clone())
+            .create("claude")
+            .expect("Claude CLI factory mapping must exist");
+        let cli: &dyn CliTool = claude.as_ref();
+        cli.respond_to_approval(
+            &context,
+            &thread,
+            &approval_id,
+            normalized_response.clone(),
+            approval_route,
+        )
+        .await
+        .map_err(err_to_string)?;
+    } else if workspace.location_kind == "ssh" {
+        return Err(format!(
+            "SSH 远端项目当前阶段尚未接入 {} 审批回复",
+            thread.engine_id
+        ));
+    } else {
+        state
+            .engines
+            .respond_to_approval(
+                &thread,
+                &approval_id,
+                normalized_response.clone(),
+                approval_route,
+            )
+            .await
+            .map_err(err_to_string)?;
+    }
 
     let decision = approval_response_decision_for_persistence(&normalized_response);
     run_db(db, {
@@ -1972,6 +2446,10 @@ async fn run_turn(
     initial_turn_model_id: String,
     turn_input: TurnInput,
     client_turn_id: Option<String>,
+    codex_cli: Option<(Arc<dyn CliTool>, CliExecutionContext)>,
+    opencode_cli: Option<(Arc<dyn CliTool>, CliExecutionContext)>,
+    claude_cli: Option<(Arc<dyn CliTool>, CliExecutionContext)>,
+    remote_attachment_batch: Option<RemoteAttachmentBatch>,
     cancellation: CancellationToken,
 ) {
     let max_output_chars = state.config.debug.max_action_output_chars;
@@ -1984,8 +2462,10 @@ async fn run_turn(
     let cancellation_for_engine = cancellation.clone();
 
     let engine_task = tokio::spawn(async move {
-        engines
-            .send_message(
+        if let Some((codex, context)) = codex_cli {
+            let cli: &dyn CliTool = codex.as_ref();
+            cli.send_message(
+                &context,
                 &thread_for_engine,
                 &engine_thread_for_engine,
                 input_for_engine,
@@ -1993,6 +2473,39 @@ async fn run_turn(
                 cancellation_for_engine,
             )
             .await
+        } else if let Some((opencode, context)) = opencode_cli {
+            let cli: &dyn CliTool = opencode.as_ref();
+            cli.send_message(
+                &context,
+                &thread_for_engine,
+                &engine_thread_for_engine,
+                input_for_engine,
+                event_tx,
+                cancellation_for_engine,
+            )
+            .await
+        } else if let Some((claude, context)) = claude_cli {
+            let cli: &dyn CliTool = claude.as_ref();
+            cli.send_message(
+                &context,
+                &thread_for_engine,
+                &engine_thread_for_engine,
+                input_for_engine,
+                event_tx,
+                cancellation_for_engine,
+            )
+            .await
+        } else {
+            engines
+                .send_message(
+                    &thread_for_engine,
+                    &engine_thread_for_engine,
+                    input_for_engine,
+                    event_tx,
+                    cancellation_for_engine,
+                )
+                .await
+        }
     });
 
     let mut blocks: Vec<ContentBlock> = Vec::new();
@@ -2336,6 +2849,7 @@ async fn run_turn(
         .await;
     }
 
+    let mut engine_failed = false;
     match engine_task.await {
         Ok(Ok(())) => {
             crate::engines::codex::append_codex_transport_log(&serde_json::json!({
@@ -2348,6 +2862,7 @@ async fn run_turn(
             .await;
         }
         Ok(Err(error)) => {
+            engine_failed = true;
             crate::engines::codex::append_codex_transport_log(&serde_json::json!({
                 "at": chrono::Utc::now().to_rfc3339(),
                 "event": "engine_task_complete",
@@ -2378,6 +2893,7 @@ async fn run_turn(
             );
         }
         Err(error) => {
+            engine_failed = true;
             crate::engines::codex::append_codex_transport_log(&serde_json::json!({
                 "at": chrono::Utc::now().to_rfc3339(),
                 "event": "engine_task_complete",
@@ -2478,6 +2994,11 @@ async fn run_turn(
     )
     .await;
 
+    if engine_failed {
+        if let Some(batch) = remote_attachment_batch.as_ref() {
+            batch.cleanup().await;
+        }
+    }
     state.turns.finish(&thread.id).await;
 
     let assistant_message_persisted = match run_db(state.db.clone(), {
@@ -2563,23 +3084,41 @@ async fn run_codex_review_turn(
     let (event_tx, mut event_rx) = mpsc::channel::<EngineEvent>(ENGINE_EVENT_QUEUE_CAPACITY);
     let (started_tx, started_rx) = oneshot::channel();
 
-    let engines = state.engines.clone();
+    let codex = CliToolFactory::new(state.clone())
+        .create("codex")
+        .expect("Codex CLI factory mapping must exist");
+    let context = match codex
+        .execution_context(Some(source_thread.workspace_id.as_str()))
+        .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            let _ = event_tx
+                .send(EngineEvent::Error {
+                    message: format!("读取 Codex 项目失败：{error:#}"),
+                    recoverable: false,
+                })
+                .await;
+            return;
+        }
+    };
     let source_engine_thread_id_for_engine = source_engine_thread_id.clone();
     let target_for_engine = target.clone();
     let delivery_for_engine = delivery.clone();
     let cancellation_for_engine = cancellation.clone();
 
     let engine_task = tokio::spawn(async move {
-        engines
-            .start_codex_review(
-                &source_engine_thread_id_for_engine,
-                target_for_engine,
-                Some(delivery_for_engine.as_str()),
-                event_tx,
-                cancellation_for_engine,
-                started_tx,
-            )
-            .await
+        let cli: &dyn CliTool = codex.as_ref();
+        cli.start_review(
+            &context,
+            &source_engine_thread_id_for_engine,
+            target_for_engine,
+            Some(delivery_for_engine.as_str()),
+            event_tx,
+            cancellation_for_engine,
+            started_tx,
+        )
+        .await
     });
 
     let state_for_started = state.clone();
@@ -3750,10 +4289,75 @@ async fn maybe_update_thread_title(
         return None;
     }
 
-    let candidate = state
-        .engines
-        .read_thread_preview(thread, engine_thread_id)
+    let codex_target = if thread.engine_id == "codex" {
+        let db = state.db.clone();
+        let workspace_id = thread.workspace_id.clone();
+        let workspace = tokio::task::spawn_blocking(move || {
+            db::workspaces::find_workspace_by_id(&db, &workspace_id)
+        })
         .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
+        workspace.and_then(|workspace| {
+            CliExecutionContext::from_workspace(&workspace)
+                .ok()
+                .map(|context| {
+                    (
+                        CliToolFactory::new(state.clone())
+                            .create("codex")
+                            .expect("Codex CLI factory mapping must exist"),
+                        context,
+                    )
+                })
+        })
+    } else {
+        None
+    };
+    let claude_target = if thread.engine_id == "claude" {
+        let db = state.db.clone();
+        let workspace_id = thread.workspace_id.clone();
+        let workspace = tokio::task::spawn_blocking(move || {
+            db::workspaces::find_workspace_by_id(&db, &workspace_id)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
+        workspace.and_then(|workspace| {
+            CliExecutionContext::from_workspace(&workspace)
+                .ok()
+                .map(|context| {
+                    (
+                        CliToolFactory::new(state.clone())
+                            .create("claude")
+                            .expect("Claude CLI factory mapping must exist"),
+                        context,
+                    )
+                })
+        })
+    } else {
+        None
+    };
+    let preview = if let Some((codex, context)) = codex_target.as_ref() {
+        let cli: &dyn CliTool = codex.as_ref();
+        cli.read_thread_preview(context, thread, engine_thread_id)
+            .await
+            .ok()
+            .flatten()
+    } else if let Some((claude, context)) = claude_target.as_ref() {
+        let cli: &dyn CliTool = claude.as_ref();
+        cli.read_thread_preview(context, thread, engine_thread_id)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        state
+            .engines
+            .read_thread_preview(thread, engine_thread_id)
+            .await
+    };
+    let candidate = preview
         .as_deref()
         .and_then(normalize_thread_title)
         .or_else(|| normalize_thread_title(user_message))?;
@@ -3780,11 +4384,21 @@ async fn maybe_update_thread_title(
         }
     };
 
-    if let Err(error) = state
-        .engines
-        .set_thread_name(thread, engine_thread_id, &candidate)
-        .await
-    {
+    let set_name_result = if let Some((codex, context)) = codex_target.as_ref() {
+        let cli: &dyn CliTool = codex.as_ref();
+        cli.set_thread_name(context, thread, engine_thread_id, &candidate)
+            .await
+    } else if let Some((claude, context)) = claude_target.as_ref() {
+        let cli: &dyn CliTool = claude.as_ref();
+        cli.set_thread_name(context, thread, engine_thread_id, &candidate)
+            .await
+    } else {
+        state
+            .engines
+            .set_thread_name(thread, engine_thread_id, &candidate)
+            .await
+    };
+    if let Err(error) = set_name_result {
         log::debug!("failed to sync thread name with engine: {error}");
     }
 
@@ -4097,6 +4711,7 @@ fn apply_event_to_blocks(
                     size_bytes: attachment.size_bytes,
                     mime_type: attachment.mime_type.clone(),
                     browser_annotation: attachment.browser_annotation.clone(),
+                    is_remote: attachment.is_remote,
                 })
                 .collect();
             let mut skill_blocks = Vec::new();
@@ -5122,6 +5737,7 @@ mod tests {
                 crate::computer_control_service::ComputerControlService::default(),
             ),
             remote_access: Arc::new(crate::remote::RemoteTunnelManager::default()),
+            ssh_monitor: Arc::new(crate::ssh::monitor::SshConnectionMonitor::default()),
         }
     }
 
@@ -5184,6 +5800,8 @@ mod tests {
             size_bytes: 1,
             mime_type: mime_type.map(ToOwned::to_owned),
             browser_annotation: None,
+            is_remote: false,
+            remote_text_content: None,
         }
     }
 
@@ -5200,6 +5818,8 @@ mod tests {
                 source_url: Some("https://www.qq.com/".to_string()),
                 target_label: Some("div: 嘉兴市 雨 25℃".to_string()),
             }),
+            is_remote: false,
+            remote_text_content: None,
         };
 
         let blocks = build_user_blocks(

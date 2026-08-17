@@ -16,6 +16,12 @@ const requiredArtifacts = [
     "sidecar-dist",
     "claude-agent-sdk-server.mjs",
   ),
+  path.join(
+    repoRoot,
+    "src-tauri",
+    "sidecar-dist",
+    "claude-remote-session-server.mjs",
+  ),
 ];
 
 const isWindows = process.platform === "win32";

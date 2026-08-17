@@ -78,7 +78,8 @@ pub async fn refresh_kind(
                                     requires_new_session: false,
                                     read_only_reason: Some("codex_skill_toggle".to_string()),
                                     warning: None,
-                                },
+
+                                    ..Default::default()},
                             )
                         })
                         .collect::<BTreeMap<_, _>>();
@@ -223,7 +224,8 @@ fn parse_plugins(
             requires_new_session: true,
             read_only_reason: None,
             warning: None,
-        };
+
+            ..Default::default()};
         items.insert(id, item);
     }
 
@@ -288,7 +290,8 @@ fn parse_plugins(
                 requires_new_session: true,
                 read_only_reason: None,
                 warning: None,
-            },
+
+                ..Default::default()},
         );
     }
 
@@ -323,6 +326,7 @@ fn remote_plugin_item(plugin: &RemoteInstalledPlugin) -> ExtensionItemDto {
         requires_new_session: false,
         read_only_reason: Some("codex_remote_plugin_managed".to_string()),
         warning: None,
+        ..Default::default()
     }
 }
 
@@ -478,7 +482,8 @@ fn remote_plugin_skills(plugins: &[RemoteInstalledPlugin]) -> Vec<ExtensionItemD
                 requires_new_session: false,
                 read_only_reason: Some("codex_skill_toggle".to_string()),
                 warning: None,
-            });
+
+                ..Default::default()});
         }
     }
     items.into_values().collect()
@@ -644,7 +649,8 @@ fn parse_mcp_servers(
                 // MCP diagnostic text can include transport details. Persist only the
                 // normalized health state, never a raw configuration-derived reason.
                 warning: None,
-            })
+
+                ..Default::default()})
         })
         .collect()
 }

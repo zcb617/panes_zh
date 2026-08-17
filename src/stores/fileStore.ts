@@ -47,6 +47,23 @@ function remapAbsolutePathForRename(
 function resolveFileContext(rootPath: string, filePath: string): ResolvedFileContext {
   const absolutePath = resolveAbsoluteFilePath(rootPath, filePath);
   const workspaceState = useWorkspaceStore.getState();
+  const activeWorkspace = workspaceState.workspaces.find(
+    (workspace) => workspace.id === workspaceState.activeWorkspaceId,
+  );
+  if (activeWorkspace?.locationKind === "ssh") {
+    const remoteRepo = workspaceState.repos.find(
+      (repo) =>
+        repo.workspaceId === activeWorkspace.id &&
+        repo.isActive,
+    );
+    if (remoteRepo) {
+      return {
+        absolutePath,
+        gitRepoPath: remoteRepo.path,
+        gitFilePath: filePath,
+      };
+    }
+  }
   const ownership = resolveOwningRepoForAbsolutePath(
     absolutePath,
     workspaceState.repos,
@@ -81,6 +98,8 @@ function createPlainTab(
     isDirty: false,
     isLoading: true,
     isBinary: false,
+    version: "",
+    externalVersion: null,
     renderMode: "plain-editor",
     gitContext: null,
     pendingReveal: null,
@@ -195,7 +214,10 @@ interface FileStoreState {
     newPath: string,
   ) => void;
   saveTab: (tabId: string) => Promise<void>;
+  checkRemoteFiles: (workspaceId: string) => Promise<void>;
 }
+
+const remoteFileChecks = new Set<string>();
 
 export const useFileStore = create<FileStoreState>((set, get) => ({
   tabs: [],
@@ -243,7 +265,7 @@ export const useFileStore = create<FileStoreState>((set, get) => ({
     }));
 
     try {
-      const result = await ipc.readFile(rootPath, filePath);
+    const result = await ipc.readFile(rootPath, filePath, workspaceId);
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === id
@@ -257,6 +279,8 @@ export const useFileStore = create<FileStoreState>((set, get) => ({
                 savedContent: result.content,
                 isBinary: result.isBinary,
                 isLoading: false,
+                version: result.version,
+                externalVersion: null,
               }
             : t,
         ),
@@ -502,31 +526,25 @@ export const useFileStore = create<FileStoreState>((set, get) => ({
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab || !tab.isDirty) return;
 
-    // Check if the file was modified externally since we loaded/last-saved it
-    try {
-      const disk = await ipc.readFile(tab.rootPath, tab.filePath);
-      if (!disk.isBinary && disk.content !== tab.savedContent) {
-        toast.warning(t("app:editor.toasts.modifiedExternally", { name: tab.fileName }));
-        set((state) => ({
-          tabs: state.tabs.map((t) =>
-            t.id === tabId
-              ? { ...t, savedContent: disk.content, isDirty: true }
-              : t,
-          ),
-        }));
-        return;
-      }
-    } catch {
-      // File may have been deleted — proceed with save
-    }
-
     const contentToSave = tab.content;
     try {
-      await ipc.writeFile(tab.rootPath, tab.filePath, contentToSave, tab.workspaceId);
+      const result = await ipc.writeFile(
+        tab.rootPath,
+        tab.filePath,
+        contentToSave,
+        tab.workspaceId,
+        tab.version || null,
+      );
       set((state) => ({
         tabs: state.tabs.map((t) =>
           t.id === tabId
-            ? { ...t, savedContent: contentToSave, isDirty: t.content !== contentToSave }
+            ? {
+                ...t,
+                savedContent: contentToSave,
+                isDirty: t.content !== contentToSave,
+                version: result.version,
+                externalVersion: null,
+              }
             : t,
         ),
       }));
@@ -545,6 +563,65 @@ export const useFileStore = create<FileStoreState>((set, get) => ({
       toast.success(t("app:editor.toasts.saved", { name: tab.fileName }));
     } catch (err) {
       toast.error(t("app:editor.toasts.saveFailed", { error: String(err) }));
+    }
+  },
+
+  checkRemoteFiles: async (workspaceId) => {
+    if (remoteFileChecks.has(workspaceId)) return;
+    remoteFileChecks.add(workspaceId);
+    try {
+      const tabs = get().tabs.filter(
+        (tab) =>
+          tab.workspaceId === workspaceId &&
+          !tab.isLoading &&
+          !tab.loadError &&
+          tab.renderMode !== "git-diff-editor",
+      );
+      for (const tab of tabs) {
+        try {
+          const version = await ipc.getFileVersion(
+            tab.rootPath,
+            tab.filePath,
+            workspaceId,
+          );
+          const current = get().tabs.find((item) => item.id === tab.id);
+          if (!current || current.version === version || current.externalVersion === version) {
+            continue;
+          }
+          if (current.isDirty) {
+            toast.warning(t("app:editor.toasts.modifiedExternally", { name: current.fileName }));
+            set((state) => ({
+              tabs: state.tabs.map((item) =>
+                item.id === current.id ? { ...item, externalVersion: version } : item,
+              ),
+            }));
+            continue;
+          }
+          const result = await ipc.readFile(
+            current.rootPath,
+            current.filePath,
+            workspaceId,
+          );
+          set((state) => ({
+            tabs: state.tabs.map((item) =>
+              item.id === current.id && !item.isDirty
+                ? {
+                    ...item,
+                    content: result.content,
+                    savedContent: result.content,
+                    isBinary: result.isBinary,
+                    version: result.version,
+                    externalVersion: null,
+                  }
+                : item,
+            ),
+          }));
+        } catch {
+          // Keep the open editor usable while the connection is temporarily unavailable.
+        }
+      }
+    } finally {
+      remoteFileChecks.delete(workspaceId);
     }
   },
 }));

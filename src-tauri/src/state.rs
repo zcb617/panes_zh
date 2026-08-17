@@ -7,7 +7,8 @@ use crate::{
     computer_control_service::ComputerControlService, config::app_config::AppConfig, db::Database,
     engines::EngineManager, extensions::refresh::ExtensionCatalogRefreshManager,
     git::repo::FileTreeCache, git::watcher::GitWatcherManager, power::KeepAwakeManager,
-    remote::RemoteTunnelManager, scheduled_tasks::ScheduledTaskManager, terminal::TerminalManager,
+    remote::RemoteTunnelManager, scheduled_tasks::ScheduledTaskManager,
+    ssh::monitor::SshConnectionMonitor, terminal::TerminalManager,
     terminal_notifications::TerminalNotificationManager,
 };
 
@@ -27,6 +28,7 @@ pub struct AppState {
     pub scheduled_tasks: Arc<ScheduledTaskManager>,
     pub computer_control_service: Arc<ComputerControlService>,
     pub remote_access: Arc<RemoteTunnelManager>,
+    pub ssh_monitor: Arc<SshConnectionMonitor>,
 }
 
 #[derive(Default)]

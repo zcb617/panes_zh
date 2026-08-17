@@ -65,6 +65,138 @@ pub fn find_thread_by_engine_thread_id(
     .context("failed to query thread by engine thread id")
 }
 
+/// 按工作区、引擎和远端线程 ID 查询线程。
+///
+/// SSH 远端项目允许不同工作区（甚至不同 SSH 主机）出现相同的引擎线程 ID，
+/// 因此同步逻辑不得调用不带 workspace 条件的旧查询函数。
+pub fn find_thread_by_workspace_engine_thread_id(
+    db: &Database,
+    workspace_id: &str,
+    engine_id: &str,
+    engine_thread_id: &str,
+) -> anyhow::Result<Option<ThreadDto>> {
+    let conn = db.connect()?;
+    conn.query_row(
+        "SELECT id, workspace_id, repo_id, engine_id, model_id, engine_thread_id,
+                engine_metadata_json, COALESCE(title, ''), status, message_count,
+                total_tokens, created_at, last_activity_at
+         FROM threads
+         WHERE workspace_id = ?1 AND engine_id = ?2 AND engine_thread_id = ?3
+         LIMIT 1",
+        params![workspace_id, engine_id, engine_thread_id],
+        map_thread_row,
+    )
+    .optional()
+    .context("failed query workspace-scoped engine thread")
+}
+
+/// 在一个事务中写入 SSH 远端会话快照。
+///
+/// 远端本次未返回的本地线程不会被触碰；已归档但再次出现在远端列表中的线程
+/// 会被恢复，保证刷新后的远端会话仍可显示。
+pub fn upsert_ssh_remote_thread_snapshot(
+    db: &Database,
+    workspace_id: &str,
+    engine_id: &str,
+    engine_thread_id: &str,
+    model_id: &str,
+    title: &str,
+    status: ThreadStatusDto,
+    metadata: &serde_json::Value,
+    last_activity_at: Option<&str>,
+) -> anyhow::Result<ThreadDto> {
+    let mut conn = db.connect()?;
+    let tx = conn
+        .transaction()
+        .context("failed begin remote thread sync transaction")?;
+    let existing: Option<(String, String, Option<String>)> = tx
+        .query_row(
+            "SELECT id, model_id, engine_metadata_json
+             FROM threads
+             WHERE workspace_id = ?1 AND engine_id = ?2 AND engine_thread_id = ?3
+             LIMIT 1",
+            params![workspace_id, engine_id, engine_thread_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .context("failed query remote thread identity")?;
+
+    let normalized_model = if model_id.trim().is_empty() {
+        "unknown"
+    } else {
+        model_id.trim()
+    };
+    let last_activity = last_activity_at.unwrap_or("");
+    if let Some((thread_id, current_model, current_metadata_raw)) = existing {
+        // 只有本地模型仍是 unknown 时，才接受远端提供的具体模型，避免覆盖用户配置。
+        let next_model = if normalized_model != "unknown" && current_model == "unknown" {
+            normalized_model
+        } else {
+            current_model.as_str()
+        };
+        // 远端快照只更新自身字段；模型、思考强度等本地会话选择必须保留。
+        let next_metadata = match (
+            current_metadata_raw
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()),
+            metadata.as_object(),
+        ) {
+            (Some(serde_json::Value::Object(mut current)), Some(remote)) => {
+                current.extend(remote.clone());
+                serde_json::Value::Object(current)
+            }
+            _ => metadata.clone(),
+        };
+        tx.execute(
+            "UPDATE threads
+             SET model_id = ?1,
+                 title = ?2,
+                 status = ?3,
+                 engine_metadata_json = ?4,
+                 archived_at = NULL,
+                 last_activity_at = CASE
+                     WHEN ?5 <> '' THEN ?5
+                     ELSE datetime('now')
+                 END
+             WHERE id = ?6",
+            params![
+                next_model,
+                title,
+                status.as_str(),
+                next_metadata.to_string(),
+                last_activity,
+                thread_id,
+            ],
+        )
+        .context("failed update SSH remote thread snapshot")?;
+    } else {
+        let thread_id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO threads (
+                id, workspace_id, repo_id, engine_id, model_id, engine_thread_id,
+                engine_metadata_json, title, status, last_activity_at
+             ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8,
+                       CASE WHEN ?9 <> '' THEN ?9 ELSE datetime('now') END)",
+            params![
+                thread_id,
+                workspace_id,
+                engine_id,
+                normalized_model,
+                engine_thread_id,
+                metadata.to_string(),
+                title,
+                status.as_str(),
+                last_activity,
+            ],
+        )
+        .context("failed insert SSH remote thread snapshot")?;
+    }
+    tx.commit()
+        .context("failed commit SSH remote thread snapshot")?;
+    find_thread_by_workspace_engine_thread_id(db, workspace_id, engine_id, engine_thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("remote thread missing after sync: {engine_thread_id}"))
+}
+
 pub fn list_threads_for_workspace(
     db: &Database,
     workspace_id: &str,
@@ -509,6 +641,50 @@ mod tests {
                 .and_then(serde_json::Value::as_bool),
             Some(true)
         );
+    }
+
+    #[test]
+    fn ssh_remote_snapshot_preserves_local_runtime_selection_metadata() {
+        let db = test_db();
+        let thread = test_thread(&db, "Remote thread");
+        set_engine_thread_id(&db, &thread.id, "remote-thread-1").unwrap();
+        update_engine_metadata(
+            &db,
+            &thread.id,
+            &json!({
+                "lastModelId": "gpt-5.6-sol",
+                "reasoningEffort": "high",
+                "codexRemote": {"version": "old"},
+            }),
+        )
+        .unwrap();
+
+        let updated = upsert_ssh_remote_thread_snapshot(
+            &db,
+            &thread.workspace_id,
+            "codex",
+            "remote-thread-1",
+            "openai",
+            "Refreshed remote title",
+            ThreadStatusDto::Idle,
+            &json!({
+                "sshRemote": true,
+                "codexRemoteCwd": "/var/work/project",
+                "codexRemote": {"version": "new"},
+            }),
+            Some("2026-08-14T12:00:00Z"),
+        )
+        .unwrap();
+
+        let metadata = updated.engine_metadata.unwrap();
+        assert_eq!(updated.model_id, "gpt-5.3-codex");
+        assert_eq!(metadata.get("lastModelId"), Some(&json!("gpt-5.6-sol")));
+        assert_eq!(metadata.get("reasoningEffort"), Some(&json!("high")));
+        assert_eq!(
+            metadata.get("codexRemote"),
+            Some(&json!({"version": "new"}))
+        );
+        assert_eq!(metadata.get("sshRemote"), Some(&json!(true)));
     }
 
     #[test]

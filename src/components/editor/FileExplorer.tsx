@@ -31,6 +31,10 @@ import {
 } from "../../lib/fileRootUtils";
 import { showWorkspaceSurface } from "../../lib/workspacePaneNavigation";
 import { isMacDesktop } from "../../lib/windowActions";
+import {
+  REMOTE_DIRECTORY_POLL_INTERVAL_MS,
+  remoteDirectoryPollsInFlight,
+} from "../../lib/remoteWorkspacePolling";
 import { useFileStore } from "../../stores/fileStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useUiStore } from "../../stores/uiStore";
@@ -199,13 +203,16 @@ export function FileExplorer() {
 
   // -- Scroll / virtualization --
   const prevRootPath = useRef(rootPath);
-  const loadSignatureRef = useRef({ generation: 0, rootPath });
+  const loadSignatureRef = useRef({ generation: 0, rootPath, workspaceId: activeWorkspaceId });
+  const prevWorkspaceId = useRef(activeWorkspaceId);
   const refreshRequestIdRef = useRef(0);
   const workspaceSearchRequestIdRef = useRef(0);
   const workspaceSearchRefreshAppliedRef = useRef(0);
   const dirContentsRef = useRef(dirContents);
   const expandedDirsRef = useRef(expandedDirs);
   const refreshTimerRef = useRef<number | null>(null);
+  const remoteDirectoryFingerprintsRef = useRef<Map<string, string>>(new Map());
+  const remoteDirectoryPollInFlightRef = useRef(false);
   const treeViewportRef = useRef<HTMLDivElement>(null);
   dirContentsRef.current = dirContents;
   expandedDirsRef.current = expandedDirs;
@@ -259,12 +266,17 @@ export function FileExplorer() {
       const requestSignature = {
         generation: loadSignatureRef.current.generation,
         rootPath,
+        workspaceId: activeWorkspaceId,
       };
       if (isRoot) setRootLoading(true);
       else setLoadingDirs((prev) => new Set(prev).add(dirPath));
 
       try {
-        const entries = await ipc.listDir(requestSignature.rootPath, dirPath);
+      const entries = await ipc.listDir(
+        requestSignature.rootPath,
+        dirPath,
+        activeWorkspaceId,
+      );
         if (!isCurrentExplorerLoad(requestSignature, loadSignatureRef.current)) return;
         setDirContents((prev) => {
           const next = new Map(prev);
@@ -285,7 +297,7 @@ export function FileExplorer() {
           });
       }
     },
-    [rootPath],
+    [activeWorkspaceId, rootPath],
   );
 
   // ---------------------------------------------------------------------------
@@ -293,12 +305,13 @@ export function FileExplorer() {
   // ---------------------------------------------------------------------------
 
   useEffect(() => {
-    if (prevRootPath.current !== rootPath) {
+    if (prevRootPath.current !== rootPath || prevWorkspaceId.current !== activeWorkspaceId) {
       cancelScheduledRefresh();
-      loadSignatureRef.current = {
-        generation: loadSignatureRef.current.generation + 1,
-        rootPath,
-      };
+    loadSignatureRef.current = {
+      generation: loadSignatureRef.current.generation + 1,
+      rootPath,
+      workspaceId: activeWorkspaceId,
+    };
       setDirContents(new Map());
       setExpandedDirs(new Set());
       setLoadingDirs(new Set());
@@ -317,11 +330,13 @@ export function FileExplorer() {
       setCreating(null);
       setContextMenu(null);
       setDeletePending(null);
+      remoteDirectoryFingerprintsRef.current.clear();
       prevRootPath.current = rootPath;
+      prevWorkspaceId.current = activeWorkspaceId;
     }
     if (!rootPath) return;
     void loadDir("");
-  }, [cancelScheduledRefresh, loadDir, rootPath]);
+  }, [activeWorkspaceId, cancelScheduledRefresh, loadDir, rootPath]);
 
   const refreshVisibleDirs = useCallback(async () => {
     if (!rootPath) return;
@@ -331,10 +346,11 @@ export function FileExplorer() {
     setRefreshing(true);
     setLoadingDirs(new Set());
     setRootLoading(false);
-    loadSignatureRef.current = {
-      generation: loadSignatureRef.current.generation + 1,
-      rootPath,
-    };
+      loadSignatureRef.current = {
+        generation: loadSignatureRef.current.generation + 1,
+        rootPath,
+        workspaceId: activeWorkspaceId,
+      };
 
     const dirsToRefresh = [...new Set(["", ...expandedDirsRef.current])]
       .sort((left, right) => {
@@ -343,13 +359,19 @@ export function FileExplorer() {
       });
 
     try {
-      await Promise.all(dirsToRefresh.map((dirPath) => loadDir(dirPath)));
+      if (activeWorkspace?.locationKind === "ssh") {
+        for (const dirPath of dirsToRefresh) {
+          await loadDir(dirPath);
+        }
+      } else {
+        await Promise.all(dirsToRefresh.map((dirPath) => loadDir(dirPath)));
+      }
     } finally {
       if (refreshRequestIdRef.current === requestId) {
         setRefreshing(false);
       }
     }
-  }, [loadDir, rootPath]);
+  }, [activeWorkspace?.locationKind, activeWorkspaceId, loadDir, rootPath]);
 
   const scheduleRefreshVisibleDirs = useCallback(() => {
     if (!rootPath) return;
@@ -466,6 +488,69 @@ export function FileExplorer() {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [rootPath, scheduleRefreshVisibleDirs]);
+
+  useEffect(() => {
+    if (
+      !activeWorkspaceId ||
+      !rootPath ||
+      activeWorkspace?.locationKind !== "ssh" ||
+      activeWorkspace.connectionEnabled === false ||
+      activeWorkspace.connectionDeleted === true ||
+      activeWorkspace.connectionStatus !== "ok"
+    ) {
+      return;
+    }
+
+    const poll = async () => {
+      if (
+        remoteDirectoryPollInFlightRef.current ||
+        remoteDirectoryPollsInFlight.has(activeWorkspaceId) ||
+        document.visibilityState !== "visible" ||
+        useWorkspaceStore.getState().activeWorkspaceId !== activeWorkspaceId ||
+        !useUiStore.getState().showExplorer
+      ) {
+        return;
+      }
+      remoteDirectoryPollInFlightRef.current = true;
+      remoteDirectoryPollsInFlight.add(activeWorkspaceId);
+      try {
+        let changed = false;
+        const dirs = [...new Set(["", ...expandedDirsRef.current])];
+        for (const dirPath of dirs) {
+          const fingerprint = await ipc.getDirectoryFingerprint(
+            rootPath,
+            dirPath,
+            activeWorkspaceId,
+          );
+          const previous = remoteDirectoryFingerprintsRef.current.get(dirPath);
+          remoteDirectoryFingerprintsRef.current.set(dirPath, fingerprint);
+          if (previous !== undefined && previous !== fingerprint) {
+            changed = true;
+          }
+        }
+        if (changed) {
+          await refreshVisibleDirs();
+        }
+      } catch {
+        // Keep the current tree visible while the connection is temporarily unavailable.
+      } finally {
+        remoteDirectoryPollInFlightRef.current = false;
+        remoteDirectoryPollsInFlight.delete(activeWorkspaceId);
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => void poll(), REMOTE_DIRECTORY_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [
+    activeWorkspace?.connectionDeleted,
+    activeWorkspace?.connectionEnabled,
+    activeWorkspace?.connectionStatus,
+    activeWorkspace?.locationKind,
+    activeWorkspaceId,
+    refreshVisibleDirs,
+    rootPath,
+  ]);
 
   useEffect(() => {
     if (!activeWorkspaceId || !rootPath || !workspaceSearchActive) {

@@ -24,6 +24,10 @@ interface Props {
 }
 
 function abbreviatePath(fullPath: string, repoPath: string): string {
+  const remotePrefix = `${repoPath.replace(/\/+$/, "")}/`;
+  if (repoPath.startsWith("ssh://panes/") && fullPath.startsWith(remotePrefix)) {
+    return `./${fullPath.slice(remotePrefix.length)}`;
+  }
   if (fullPath.startsWith(repoPath)) {
     const rel = fullPath.slice(repoPath.length);
     return rel.startsWith("/") ? `.${rel}` : `./${rel}`;
@@ -147,12 +151,12 @@ export function GitWorktreesView({ repo, onError }: Props) {
     return worktrees.filter(
       (wt) =>
         (wt.branch && wt.branch.toLowerCase().includes(q)) ||
-        wt.path.toLowerCase().includes(q),
+        (wt.displayPath ?? wt.path).toLowerCase().includes(q),
     );
   }, [worktrees, filterQuery]);
 
   const autoWorktreePath = createBranch.trim()
-    ? `${repo.path}/.panes/worktrees/${createBranch.trim().replace(/[/\\]/g, "-")}/`
+    ? `${repo.path.replace(/\/+$/, "")}/.panes/worktrees/${createBranch.trim().replace(/[/\\]/g, "-")}`
     : "";
 
   function openActionMenu(worktree: GitWorktree, e: React.MouseEvent<HTMLButtonElement>) {
@@ -517,9 +521,9 @@ export function GitWorktreesView({ repo, onError }: Props) {
                   >
                     <span
                       className="git-worktree-path"
-                      title={wt.path}
+                      title={wt.displayPath ?? wt.path}
                     >
-                      {abbreviatePath(wt.path, repo.path)}
+                      {abbreviatePath(wt.displayPath ?? wt.path, repo.path)}
                     </span>
                     {wt.headSha && (
                       <span

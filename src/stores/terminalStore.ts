@@ -601,7 +601,7 @@ function slugifySegment(value: string): string {
 }
 
 function isAbsolutePath(path: string): boolean {
-  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
+  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("ssh://panes/");
 }
 
 function trimRelativePath(path: string): string {
@@ -964,7 +964,10 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     rows = DEFAULT_ROWS,
   ) => {
     const terminalPreset = preset.terminal;
-    const workspaceRoot = workspaceRootPath(workspaceId);
+    const workspaceRecord = useWorkspaceStore
+      .getState()
+      .workspaces.find((workspace) => workspace.id === workspaceId);
+    const workspaceRoot = workspaceRecord?.rootPath ?? null;
     if (!terminalPreset || terminalPreset.groups.length === 0 || !workspaceRoot) {
       set((state) => ({
         workspaces: mergeWorkspaceState(state.workspaces, workspaceId, {
@@ -1014,11 +1017,13 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
 
       if (groupWorktreeConfig) {
         if (groupWorktreeConfig.repoMode === "fixed_repo") {
-          worktreeRepoPath = groupWorktreeConfig.repoPath
-            ? (isAbsolutePath(groupWorktreeConfig.repoPath)
-                ? groupWorktreeConfig.repoPath
-                : joinPath(workspaceRoot, groupWorktreeConfig.repoPath))
-            : null;
+          worktreeRepoPath = workspaceRecord?.locationKind === "ssh"
+            ? activeRepo?.path ?? null
+            : groupWorktreeConfig.repoPath
+              ? (isAbsolutePath(groupWorktreeConfig.repoPath)
+                  ? groupWorktreeConfig.repoPath
+                  : joinPath(workspaceRoot, groupWorktreeConfig.repoPath))
+              : null;
         } else {
           worktreeRepoPath = activeRepo?.path ?? null;
         }
@@ -1048,13 +1053,17 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
           );
 
           try {
-            await ipc.addGitWorktree(
+            const createdWorktree = await ipc.addGitWorktree(
               worktreeRepoPath,
               worktreePath,
               branch,
               resolvedWorktreeConfig.baseBranch ?? null,
             );
-            const info = { repoPath: worktreeRepoPath, worktreePath, branch };
+            const info = {
+              repoPath: worktreeRepoPath,
+              worktreePath: createdWorktree?.path ?? worktreePath,
+              branch,
+            };
             createdWorktrees.push(info);
             worktreesByLogicalSessionId[session.id] = info;
           } catch (error) {
@@ -1923,13 +1932,17 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
             logicalSessionId,
             i,
           );
-          await ipc.addGitWorktree(
+          const createdWorktree = await ipc.addGitWorktree(
             worktreeRepoPath,
             worktreePath,
             branch,
             effectiveWorktreeConfig.baseBranch ?? null,
           );
-          createdWorktrees.push({ repoPath: worktreeRepoPath, worktreePath, branch });
+          createdWorktrees.push({
+            repoPath: worktreeRepoPath,
+            worktreePath: createdWorktree?.path ?? worktreePath,
+            branch,
+          });
         }
       }
 

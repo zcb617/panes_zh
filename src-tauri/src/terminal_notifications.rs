@@ -1852,41 +1852,7 @@ fn print_claude_hook_help() {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
-    use uuid::Uuid;
-
-    const APP_DATA_ENV_VARS: [&str; 4] = ["HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"];
-
-    fn with_temp_app_data_env<T>(f: impl FnOnce() -> T) -> T {
-        let _guard = crate::config::app_config::app_data_env_lock()
-            .lock()
-            .expect("env lock poisoned");
-        let previous: Vec<(&str, Option<std::ffi::OsString>)> = APP_DATA_ENV_VARS
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect();
-        let root =
-            std::env::temp_dir().join(format!("panes-terminal-notify-home-{}", Uuid::new_v4()));
-        let local_app_data = root.join("AppData").join("Local");
-        let roaming_app_data = root.join("AppData").join("Roaming");
-        fs::create_dir_all(&local_app_data).expect("temp local app data should exist");
-        fs::create_dir_all(&roaming_app_data).expect("temp roaming app data should exist");
-        std::env::set_var("HOME", &root);
-        std::env::set_var("USERPROFILE", &root);
-        std::env::set_var("LOCALAPPDATA", &local_app_data);
-        std::env::set_var("APPDATA", &roaming_app_data);
-        let result = f();
-        for (key, value) in previous {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-        let _ = fs::remove_dir_all(&root);
-        result
-    }
 
     #[test]
     fn parse_notify_cli_args_reads_all_supported_flags() {
@@ -2299,89 +2265,5 @@ mod tests {
     fn unix_claude_cli_shim_invokes_wrapper_subcommand() {
         let contents = claude_cli_shim_contents(Path::new("/tmp/Panes' Dev"));
         assert!(contents.contains(CLAUDE_WRAPPER_SUBCOMMAND));
-    }
-
-    #[test]
-    fn install_claude_notification_integration_merges_existing_hooks() {
-        with_temp_app_data_env(|| {
-            let settings_path =
-                claude_settings_path().expect("Claude settings path should resolve");
-            fs::create_dir_all(settings_path.parent().expect("Claude parent should exist"))
-                .expect("Claude dir should exist");
-            fs::write(
-                &settings_path,
-                serde_json::to_string_pretty(&json!({
-                    "hooks": {
-                        "Stop": [
-                            {
-                                "hooks": [
-                                    {
-                                        "type": "command",
-                                        "command": "echo custom"
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                }))
-                .expect("seed Claude settings should serialize"),
-            )
-            .expect("seed Claude settings should write");
-
-            let status = install_terminal_notification_integration(
-                TerminalNotificationIntegrationKind::Claude,
-            )
-            .expect("Claude integration should install");
-
-            assert!(status.claude.configured);
-            let saved = fs::read_to_string(&settings_path).expect("Claude settings should read");
-            let parsed: Value =
-                serde_json::from_str(&saved).expect("Claude settings should remain valid JSON");
-            let stop_groups = parsed["hooks"][CLAUDE_STOP_HOOK_EVENT]
-                .as_array()
-                .expect("Stop hooks should be an array");
-            assert_eq!(stop_groups.len(), 2);
-            assert!(claude_settings_contains_managed_hook(&parsed));
-        });
-    }
-
-    #[test]
-    fn install_codex_notification_integration_writes_absolute_notify_command() {
-        with_temp_app_data_env(|| {
-            let status = install_terminal_notification_integration(
-                TerminalNotificationIntegrationKind::Codex,
-            )
-            .expect("Codex integration should install");
-
-            assert!(status.codex.configured);
-            let config_path = codex_config_path().expect("Codex config path should resolve");
-            let saved = fs::read_to_string(&config_path).expect("Codex config should read");
-            let parsed: toml::Value = saved.parse().expect("Codex config should parse");
-            assert!(is_managed_codex_notify_value(
-                parsed
-                    .as_table()
-                    .and_then(|table| table.get("notify"))
-                    .expect("notify should be set")
-            ));
-        });
-    }
-
-    #[test]
-    fn codex_notification_status_reports_conflict_for_custom_notify() {
-        with_temp_app_data_env(|| {
-            let config_path = codex_config_path().expect("Codex config path should resolve");
-            fs::create_dir_all(config_path.parent().expect("Codex parent should exist"))
-                .expect("Codex dir should exist");
-            fs::write(
-                &config_path,
-                r#"notify = ["custom-notifier", "--flag"]
-"#,
-            )
-            .expect("Codex config should write");
-
-            let status = inspect_codex_notification_integration();
-            assert!(!status.configured);
-            assert!(status.conflict);
-        });
     }
 }

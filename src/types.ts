@@ -22,9 +22,91 @@ export interface Workspace {
   id: string;
   name: string;
   rootPath: string;
+  locationKind?: "local" | "ssh" | string;
+  sshConnectionId?: string | null;
+  connectionDisplayName?: string | null;
+  connectionEnabled?: boolean | null;
+  connectionDeleted?: boolean | null;
+  connectionStatus?: string | null;
   scanDepth: number;
   createdAt: string;
   lastOpenedAt: string;
+}
+
+export interface ExecutionTarget {
+  targetKey: string;
+  kind: "local" | "ssh";
+  displayName: string;
+  connectionId?: string | null;
+  hostName?: string | null;
+  user?: string | null;
+  port?: number | null;
+  projectPath?: string | null;
+  connectionStatus?: string | null;
+}
+
+export interface SshConnection {
+  id: string;
+  displayName: string;
+  sourceKind: "ssh_config" | "manual" | string;
+  configAlias: string | null;
+  hostName: string;
+  user: string;
+  port: number;
+  identityFile: string | null;
+  hostKeyType: string;
+  enabled: boolean;
+  connectionStatus: "unknown" | "connecting" | "ok" | "failed" | "disabled" | "deleted" | string;
+  lastConnectedAt: string | null;
+  lastError: string | null;
+  deletedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SshConfigHost {
+  alias: string;
+  hostName: string;
+  user: string;
+  port: number;
+  identityFile: string | null;
+  imported: boolean;
+  deleted: boolean;
+}
+
+export interface SshConnectionInput {
+  displayName: string;
+  hostName: string;
+  user: string;
+  port: number;
+  identityFile: string | null;
+  hostKey: string;
+  configAlias: string | null;
+}
+
+export interface SshConnectionImportResult {
+  alias: string;
+  connection: SshConnection | null;
+  error: string | null;
+  restored: boolean;
+}
+
+export interface SshConnectionTest {
+  connectionId: string;
+  ok: boolean;
+  os: string | null;
+  home: string | null;
+  shell: string | null;
+  gitVersion: string | null;
+  cliVersions: Record<string, string>;
+  error: string | null;
+}
+
+export interface SshRemoteDirectory {
+  path: string;
+  name: string;
+  readable: boolean;
+  enterable: boolean;
 }
 
 export interface KeepAwakeState {
@@ -575,6 +657,7 @@ export interface AttachmentBlock {
   sizeBytes: number;
   mimeType?: string;
   browserAnnotation?: BrowserAnnotationMetadata;
+  isRemote?: boolean;
 }
 
 export interface SkillBlock {
@@ -792,7 +875,7 @@ export interface CodexMcpServer {
 }
 
 export type ExtensionProviderId = "codex" | "claude" | "opencode";
-export type ExtensionKind = "skill" | "plugin" | "mcp";
+export type ExtensionKind = "skill" | "plugin" | "mcp" | "agent" | "command";
 export type ExtensionScope = "builtin" | "user" | "project" | "plugin" | "managed" | "local";
 export type ExtensionAction =
   | "install"
@@ -854,6 +937,11 @@ export interface ExtensionItem {
   requiresNewSession: boolean;
   readOnlyReason?: string | null;
   warning?: string | null;
+  insertText?: string | null;
+  panel?: string | null;
+  group?: string | null;
+  disabled?: boolean;
+  searchTerms?: string[];
 }
 
 export interface ExtensionCatalog {
@@ -1097,6 +1185,7 @@ export interface GitStash {
 
 export interface GitWorktree {
   path: string;
+  displayPath?: string | null;
   headSha: string | null;
   branch: string | null;
   isMain: boolean;
@@ -1138,6 +1227,11 @@ export interface ReadFileResult {
   content: string;
   sizeBytes: number;
   isBinary: boolean;
+  version: string;
+}
+
+export interface WriteFileResult {
+  version: string;
 }
 
 export interface ResolvedEditorFileReference {
@@ -1174,6 +1268,8 @@ export interface EditorTab {
   isDirty: boolean;
   isLoading: boolean;
   isBinary: boolean;
+  version: string;
+  externalVersion: string | null;
   renderMode: EditorRenderMode;
   gitContext: GitEditorContext | null;
   pendingReveal: EditorRevealRequest | null;

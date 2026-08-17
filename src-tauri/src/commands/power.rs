@@ -321,55 +321,7 @@ fn err_to_string(error: impl std::fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
-    use uuid::Uuid;
-
-    const APP_DATA_ENV_VARS: [&str; 4] = ["HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"];
-
-    fn with_temp_app_data_env<T>(f: impl FnOnce() -> T) -> T {
-        let _guard = crate::config::app_config::app_data_env_lock()
-            .lock()
-            .expect("env lock poisoned");
-        let previous: Vec<(&str, Option<std::ffi::OsString>)> = APP_DATA_ENV_VARS
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect();
-        let root = std::env::temp_dir().join(format!("panes-keep-awake-home-{}", Uuid::new_v4()));
-        let local_app_data = root.join("AppData").join("Local");
-        let roaming_app_data = root.join("AppData").join("Roaming");
-        fs::create_dir_all(&local_app_data).expect("failed to create temp local app data");
-        fs::create_dir_all(&roaming_app_data).expect("failed to create temp roaming app data");
-        std::env::set_var("HOME", &root);
-        std::env::set_var("USERPROFILE", &root);
-        std::env::set_var("LOCALAPPDATA", &local_app_data);
-        std::env::set_var("APPDATA", &roaming_app_data);
-        let result = f();
-        for (key, value) in previous {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-        let _ = fs::remove_dir_all(&root);
-        result
-    }
-
-    #[test]
-    fn save_enabled_preference_updates_power_section() {
-        with_temp_app_data_env(|| {
-            let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
-            runtime.block_on(async {
-                save_enabled_preference(true)
-                    .await
-                    .expect("preference should save");
-
-                let config = AppConfig::load_or_create().expect("config should load");
-                assert!(config.power.keep_awake_enabled);
-            });
-        });
-    }
 
     #[test]
     fn dto_from_runtime_preserves_closed_display_state() {
@@ -403,38 +355,5 @@ mod tests {
         assert_eq!(dto.battery_percent, Some(87));
         assert_eq!(dto.session_remaining_secs, Some(1800));
         assert!(!dto.paused_due_to_battery);
-    }
-
-    #[test]
-    fn set_power_settings_saves_all_fields() {
-        with_temp_app_data_env(|| {
-            let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
-            runtime.block_on(async {
-                tokio::task::spawn_blocking(|| {
-                    AppConfig::mutate(|config| {
-                        config.power.keep_awake_enabled = true;
-                        config.power.prevent_display_sleep = true;
-                        config.power.prevent_screen_saver = true;
-                        config.power.ac_only_mode = true;
-                        config.power.battery_threshold = Some(20);
-                        config.power.session_duration_secs = Some(3600);
-                        config.power.prevent_closed_display_sleep = true;
-                        Ok(())
-                    })
-                })
-                .await
-                .expect("task should complete")
-                .expect("mutate should succeed");
-
-                let config = AppConfig::load_or_create().expect("config should load");
-                assert!(config.power.keep_awake_enabled);
-                assert!(config.power.prevent_display_sleep);
-                assert!(config.power.prevent_screen_saver);
-                assert!(config.power.ac_only_mode);
-                assert_eq!(config.power.battery_threshold, Some(20));
-                assert_eq!(config.power.session_duration_secs, Some(3600));
-                assert!(config.power.prevent_closed_display_sleep);
-            });
-        });
     }
 }

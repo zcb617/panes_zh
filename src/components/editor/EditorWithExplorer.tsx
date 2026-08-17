@@ -1,5 +1,8 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { useUiStore } from "../../stores/uiStore";
+import { useFileStore } from "../../stores/fileStore";
+import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { REMOTE_FILE_POLL_INTERVAL_MS } from "../../lib/remoteWorkspacePolling";
 
 const LazyFileExplorer = lazy(() =>
   import("./FileExplorer").then((module) => ({
@@ -36,6 +39,11 @@ interface EditorWithExplorerProps {
 export function EditorWithExplorer({ embedded = false }: EditorWithExplorerProps = {}) {
   const showExplorerSetting = useUiStore((s) => s.showExplorer);
   const setExplorerOpen = useUiStore((s) => s.setExplorerOpen);
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const activeWorkspace = useWorkspaceStore((s) =>
+    s.workspaces.find((workspace) => workspace.id === activeWorkspaceId),
+  );
+  const checkRemoteFiles = useFileStore((s) => s.checkRemoteFiles);
   const explorerVisible = showExplorerSetting;
   const [explorerWidth, setExplorerWidth] = useState(loadExplorerWidth);
   const handleRef = useRef<HTMLDivElement>(null);
@@ -46,6 +54,34 @@ export function EditorWithExplorer({ embedded = false }: EditorWithExplorerProps
       localStorage.setItem(EXPLORER_WIDTH_KEY, String(explorerWidth));
     } catch { /* ignore */ }
   }, [explorerWidth]);
+
+  useEffect(() => {
+    if (
+      !activeWorkspaceId ||
+      activeWorkspace?.locationKind !== "ssh" ||
+      activeWorkspace.connectionEnabled === false ||
+      activeWorkspace.connectionDeleted === true ||
+      activeWorkspace.connectionStatus !== "ok"
+    ) {
+      return;
+    }
+
+    const poll = () => {
+      if (document.visibilityState !== "visible") return;
+      if (useWorkspaceStore.getState().activeWorkspaceId !== activeWorkspaceId) return;
+      void checkRemoteFiles(activeWorkspaceId);
+    };
+    poll();
+    const timer = window.setInterval(poll, REMOTE_FILE_POLL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [
+    activeWorkspace?.connectionDeleted,
+    activeWorkspace?.connectionEnabled,
+    activeWorkspace?.connectionStatus,
+    activeWorkspace?.locationKind,
+    activeWorkspaceId,
+    checkRemoteFiles,
+  ]);
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();

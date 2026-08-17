@@ -48,12 +48,43 @@ async function runHooks(options, hookName, input) {
   }
 }
 
-export function query({ options }) {
+export function query({ prompt, options }) {
   const scenario = parseScenario();
   let closed = false;
 
   const iterator = (async function* () {
     const observations = [];
+
+    if (scenario.persistentInput === true && typeof prompt !== "string") {
+      let initialized = false;
+      for await (const userMessage of prompt) {
+        if (closed) {
+          break;
+        }
+        if (!initialized) {
+          initialized = true;
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: scenario.sessionId ?? "mock-session",
+          };
+        }
+        const content = userMessage?.message?.content;
+        const text = typeof content === "string"
+          ? content
+          : Array.isArray(content)
+            ? content
+                .filter((block) => block?.type === "text" && typeof block.text === "string")
+                .map((block) => block.text)
+                .join("")
+            : "";
+        yield defaultResult({
+          result: text,
+          session_id: scenario.sessionId ?? "mock-session",
+        });
+      }
+      return;
+    }
 
     if (scenario.emitQueryOptions) {
       observations.push({
@@ -141,6 +172,12 @@ export function query({ options }) {
 
   iterator.close = () => {
     closed = true;
+  };
+  iterator.interrupt = async () => undefined;
+  iterator.streamInput = async (stream) => {
+    for await (const _message of stream) {
+      if (closed) break;
+    }
   };
   iterator.supportedModels = async () => clone(
     scenario.models ?? [

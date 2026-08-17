@@ -3,6 +3,7 @@ import type { GitFileCompare, ReadFileResult } from "../types";
 
 const mockIpc = vi.hoisted(() => ({
   readFile: vi.fn(),
+  getFileVersion: vi.fn(),
   writeFile: vi.fn(),
   getGitFileCompare: vi.fn(),
 }));
@@ -17,6 +18,12 @@ const mockDestroyCachedEditor = vi.hoisted(() => vi.fn());
 const mockWorkspaceState = vi.hoisted(() => ({
   activeWorkspaceId: "ws-1",
   activeRepoId: "repo-1",
+  workspaces: [
+    {
+      id: "ws-1",
+      locationKind: "local" as const,
+    },
+  ],
   repos: [
     {
       id: "repo-1",
@@ -84,6 +91,7 @@ function makeReadFileResult(content: string): ReadFileResult {
     content,
     sizeBytes: content.length,
     isBinary: false,
+    version: `version:${content}`,
   };
 }
 
@@ -123,7 +131,8 @@ describe("fileStore", () => {
       },
     ];
     mockIpc.readFile.mockResolvedValue(makeReadFileResult("plain\n"));
-    mockIpc.writeFile.mockResolvedValue(undefined);
+    mockIpc.writeFile.mockResolvedValue({ version: "version:saved" });
+    mockIpc.getFileVersion.mockResolvedValue("version:plain\n");
     mockIpc.getGitFileCompare.mockResolvedValue(makeCompare());
     mockGitStore.refresh.mockResolvedValue(undefined);
 
@@ -293,7 +302,6 @@ describe("fileStore", () => {
 
     const tabId = useFileStore.getState().tabs[0]!.id;
     useFileStore.getState().setTabContent(tabId, "updated\n");
-    mockIpc.readFile.mockResolvedValueOnce(makeReadFileResult("plain\n"));
 
     useFileStore
       .getState()
@@ -315,6 +323,7 @@ describe("fileStore", () => {
       "apps/app/source/page.tsx",
       "updated\n",
       "ws-1",
+      "version:plain\n",
     );
   });
 
@@ -363,12 +372,17 @@ describe("fileStore", () => {
 
     const tabId = useFileStore.getState().tabs[0]!.id;
     useFileStore.getState().setTabContent(tabId, "saved\n");
-    mockIpc.readFile.mockResolvedValueOnce(makeReadFileResult("after\n"));
 
     await useFileStore.getState().saveTab(tabId);
 
     const tab = useFileStore.getState().tabs[0]!;
-    expect(mockIpc.writeFile).toHaveBeenCalledWith("/repo", "src/app.ts", "saved\n", "ws-1");
+    expect(mockIpc.writeFile).toHaveBeenCalledWith(
+      "/repo",
+      "src/app.ts",
+      "saved\n",
+      "ws-1",
+      null,
+    );
     expect(mockGitStore.invalidateRepoCache).toHaveBeenCalledWith("/repo");
     expect(mockGitStore.refresh).toHaveBeenCalledWith("/repo", { force: true });
     expect(mockIpc.getGitFileCompare).toHaveBeenLastCalledWith(
@@ -378,6 +392,42 @@ describe("fileStore", () => {
     );
     expect(tab.savedContent).toBe("saved\n");
     expect(tab.isDirty).toBe(false);
+  });
+
+  it("reloads an externally changed remote file when the editor is clean", async () => {
+    await useFileStore.getState().openFile("/repo", "src/app.ts");
+    mockIpc.getFileVersion.mockResolvedValueOnce("version:changed");
+    mockIpc.readFile.mockResolvedValueOnce({
+      ...makeReadFileResult("changed\n"),
+      version: "version:changed",
+    });
+
+    await useFileStore.getState().checkRemoteFiles("ws-1");
+
+    expect(useFileStore.getState().tabs[0]).toMatchObject({
+      content: "changed\n",
+      savedContent: "changed\n",
+      version: "version:changed",
+      isDirty: false,
+    });
+  });
+
+  it("keeps unsaved content and marks an externally changed remote file", async () => {
+    await useFileStore.getState().openFile("/repo", "src/app.ts");
+    const tabId = useFileStore.getState().tabs[0]!.id;
+    useFileStore.getState().setTabContent(tabId, "local edit\n");
+    mockIpc.getFileVersion.mockResolvedValueOnce("version:changed");
+
+    await useFileStore.getState().checkRemoteFiles("ws-1");
+
+    expect(useFileStore.getState().tabs[0]).toMatchObject({
+      content: "local edit\n",
+      savedContent: "plain\n",
+      externalVersion: "version:changed",
+      isDirty: true,
+    });
+    expect(mockIpc.readFile).toHaveBeenCalledTimes(1);
+    expect(mockToast.warning).toHaveBeenCalled();
   });
 
   it("clears a pending reveal only when the nonce matches", async () => {

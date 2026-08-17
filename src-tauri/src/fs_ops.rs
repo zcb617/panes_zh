@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::Context;
 
-use crate::models::{FileTreeEntryDto, ReadFileResultDto};
+use crate::models::{FileTreeEntryDto, ReadFileResultDto, WriteFileResultDto};
 
 const READ_FILE_MAX_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 const BINARY_DETECT_SCAN_SIZE: usize = 8192;
@@ -114,6 +114,7 @@ pub fn read_file(repo_path: &str, file_path: &str) -> anyhow::Result<ReadFileRes
         content,
         size_bytes,
         is_binary,
+        version: content_version(&raw),
     })
 }
 
@@ -266,7 +267,12 @@ pub fn delete_path(repo_path: &str, file_path: &str) -> anyhow::Result<()> {
     delete_existing_entry(&target)
 }
 
-pub fn write_file(repo_path: &str, file_path: &str, content: &str) -> anyhow::Result<()> {
+pub fn write_file(
+    repo_path: &str,
+    file_path: &str,
+    content: &str,
+    expected_version: Option<&str>,
+) -> anyhow::Result<WriteFileResultDto> {
     let repo_root = PathBuf::from(repo_path)
         .canonicalize()
         .context("failed to canonicalize repo path")?;
@@ -281,7 +287,18 @@ pub fn write_file(repo_path: &str, file_path: &str, content: &str) -> anyhow::Re
             canonical.starts_with(&repo_root),
             "path traversal not allowed"
         );
+        if let Some(expected_version) = expected_version {
+            let current = fs::read(&canonical).context("failed to verify file before saving")?;
+            anyhow::ensure!(
+                content_version(&current) == expected_version,
+                "文件已被外部修改，请重新加载后再保存"
+            );
+        }
     } else {
+        anyhow::ensure!(
+            expected_version.is_none(),
+            "文件已被外部删除，请重新加载后再保存"
+        );
         // New file — verify the parent directory is inside the repo
         let parent = target.parent().context("invalid file path")?;
         let parent_canonical = parent
@@ -294,14 +311,25 @@ pub fn write_file(repo_path: &str, file_path: &str, content: &str) -> anyhow::Re
     }
 
     fs::write(&target, content).context("failed to write file")?;
-    Ok(())
+    Ok(WriteFileResultDto {
+        version: content_version(content.as_bytes()),
+    })
+}
+
+fn content_version(content: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in content {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}:{}", content.len())
 }
 
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use super::{create_dir, create_file, delete_path, rename_path};
+    use super::{create_dir, create_file, delete_path, read_file, rename_path, write_file};
     use uuid::Uuid;
 
     #[cfg(unix)]
@@ -313,6 +341,29 @@ mod tests {
         let result = f(root.clone());
         let _ = fs::remove_dir_all(&root);
         result
+    }
+
+    #[test]
+    fn write_file_rejects_stale_file_version() {
+        with_temp_repo(|repo| {
+            fs::write(repo.join("example.txt"), "before").expect("failed to create test file");
+            let opened = read_file(repo.to_string_lossy().as_ref(), "example.txt")
+                .expect("failed to read test file");
+            fs::write(repo.join("example.txt"), "external").expect("failed to change test file");
+
+            let result = write_file(
+                repo.to_string_lossy().as_ref(),
+                "example.txt",
+                "editor",
+                Some(&opened.version),
+            );
+
+            assert!(result.is_err());
+            assert_eq!(
+                fs::read_to_string(repo.join("example.txt")).unwrap(),
+                "external"
+            );
+        });
     }
 
     #[test]

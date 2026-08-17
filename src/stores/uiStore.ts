@@ -37,6 +37,7 @@ export type SettingsSection =
   | "usage"
   | "computer-control"
   | "remote-access"
+  | "connections"
   | "power"
   | "about"
   | "workspace-general"

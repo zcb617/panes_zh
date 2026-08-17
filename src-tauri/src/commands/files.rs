@@ -17,16 +17,38 @@ use tauri::State;
 use crate::{
     config::app_config::AppConfig,
     db, fs_ops,
-    models::{FileTreeEntryDto, ReadFileResultDto, ResolvedEditorFileReferenceDto, TrustLevelDto},
+    models::{
+        FileTreeEntryDto, ReadFileResultDto, ResolvedEditorFileReferenceDto, TrustLevelDto,
+        WriteFileResultDto,
+    },
     path_utils,
+    ssh::{
+        remote_fs, remote_git,
+        runtime::{
+            remote_repo_marker, resolve_workspace_target, workspace_id_from_repo_marker,
+            worktree_path_from_repo_marker, WorkspaceTarget,
+        },
+    },
     state::AppState,
 };
 
 #[tauri::command]
 pub async fn list_dir(
+    state: State<'_, AppState>,
     repo_path: String,
     dir_path: String,
+    workspace_id: Option<String>,
 ) -> Result<Vec<FileTreeEntryDto>, String> {
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        let target = load_workspace_target(&state.db, workspace_id).await?;
+        if target.is_remote() {
+            let connection = target.remote_connection().map_err(err_to_string)?;
+            let root = remote_access_root(&target, &repo_path).await?;
+            return remote_fs::list_dir(connection, &root, &dir_path)
+                .await
+                .map_err(err_to_string);
+        }
+    }
     tokio::task::spawn_blocking(move || {
         fs_ops::list_dir(&repo_path, &dir_path).map_err(err_to_string)
     })
@@ -35,12 +57,73 @@ pub async fn list_dir(
 }
 
 #[tauri::command]
-pub async fn read_file(repo_path: String, file_path: String) -> Result<ReadFileResultDto, String> {
+pub async fn read_file(
+    state: State<'_, AppState>,
+    repo_path: String,
+    file_path: String,
+    workspace_id: Option<String>,
+) -> Result<ReadFileResultDto, String> {
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        let target = load_workspace_target(&state.db, workspace_id).await?;
+        if target.is_remote() {
+            let connection = target.remote_connection().map_err(err_to_string)?;
+            let root = remote_access_root(&target, &repo_path).await?;
+            return remote_fs::read_file(connection, &root, &file_path)
+                .await
+                .map_err(err_to_string);
+        }
+    }
     tokio::task::spawn_blocking(move || {
         fs_ops::read_file(&repo_path, &file_path).map_err(err_to_string)
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn get_file_version(
+    state: State<'_, AppState>,
+    repo_path: String,
+    file_path: String,
+    workspace_id: Option<String>,
+) -> Result<String, String> {
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        let target = load_workspace_target(&state.db, workspace_id).await?;
+        if target.is_remote() {
+            let connection = target.remote_connection().map_err(err_to_string)?;
+            let root = remote_access_root(&target, &repo_path).await?;
+            return remote_fs::file_version(connection, &root, &file_path)
+                .await
+                .map_err(err_to_string);
+        }
+    }
+    tokio::task::spawn_blocking(move || {
+        fs_ops::read_file(&repo_path, &file_path)
+            .map(|result| result.version)
+            .map_err(err_to_string)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn get_directory_fingerprint(
+    state: State<'_, AppState>,
+    repo_path: String,
+    dir_path: String,
+    workspace_id: Option<String>,
+) -> Result<String, String> {
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        let target = load_workspace_target(&state.db, workspace_id).await?;
+        if target.is_remote() {
+            let connection = target.remote_connection().map_err(err_to_string)?;
+            let root = remote_access_root(&target, &repo_path).await?;
+            return remote_fs::directory_fingerprint(connection, &root, &dir_path)
+                .await
+                .map_err(err_to_string);
+        }
+    }
+    Err(format!("本地目录使用文件监听，不需要目录指纹：{repo_path}"))
 }
 
 #[tauri::command]
@@ -51,6 +134,25 @@ pub async fn resolve_editor_file_reference(
     preferred_repo_path: Option<String>,
     current_cwd: Option<String>,
 ) -> Result<Option<ResolvedEditorFileReferenceDto>, String> {
+    let target = load_workspace_target(&state.db, &workspace_id).await?;
+    if target.is_remote() {
+        let Some(parsed) = parse_editor_file_reference(&raw_reference) else {
+            return Ok(None);
+        };
+        let file_path = parsed.path.to_string_lossy().replace('\\', "/");
+        crate::ssh::runtime::validate_remote_relative_path(&file_path, false)
+            .map_err(err_to_string)?;
+        let connection = target.remote_connection().map_err(err_to_string)?;
+        remote_fs::read_file(connection, &target.workspace.root_path, &file_path)
+            .await
+            .map_err(err_to_string)?;
+        return Ok(Some(ResolvedEditorFileReferenceDto {
+            repo_path: crate::ssh::runtime::remote_repo_marker(&target.workspace.id),
+            file_path,
+            line: parsed.line,
+            column: parsed.column,
+        }));
+    }
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let workspace = db::workspaces::find_workspace_by_id(&db, &workspace_id)
@@ -77,7 +179,24 @@ pub async fn write_file(
     file_path: String,
     content: String,
     workspace_id: Option<String>,
-) -> Result<(), String> {
+    expected_version: Option<String>,
+) -> Result<WriteFileResultDto, String> {
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        let target = load_workspace_target(&state.db, workspace_id).await?;
+        if target.is_remote() {
+            let connection = target.remote_connection().map_err(err_to_string)?;
+            let root = remote_access_root(&target, &repo_path).await?;
+            return remote_fs::write_file(
+                connection,
+                &root,
+                &file_path,
+                &content,
+                expected_version.as_deref(),
+            )
+            .await
+            .map_err(err_to_string);
+        }
+    }
     let db = state.db.clone();
     let cache = state.file_tree_cache.clone();
     tokio::task::spawn_blocking(move || {
@@ -105,9 +224,15 @@ pub async fn write_file(
                 );
             }
         }
-        fs_ops::write_file(&repo_path, &file_path, &content).map_err(err_to_string)?;
+        let result = fs_ops::write_file(
+            &repo_path,
+            &file_path,
+            &content,
+            expected_version.as_deref(),
+        )
+        .map_err(err_to_string)?;
         cache.invalidate_containing_path(target_for_repo_lookup.to_string_lossy().as_ref());
-        Ok(())
+        Ok(result)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -120,6 +245,16 @@ pub async fn create_file(
     file_path: String,
     workspace_id: Option<String>,
 ) -> Result<(), String> {
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        let target = load_workspace_target(&state.db, workspace_id).await?;
+        if target.is_remote() {
+            let connection = target.remote_connection().map_err(err_to_string)?;
+            let root = remote_access_root(&target, &repo_path).await?;
+            return remote_fs::create_file(connection, &root, &file_path)
+                .await
+                .map_err(err_to_string);
+        }
+    }
     let db = state.db.clone();
     let cache = state.file_tree_cache.clone();
     tokio::task::spawn_blocking(move || {
@@ -155,6 +290,16 @@ pub async fn create_dir(
     dir_path: String,
     workspace_id: Option<String>,
 ) -> Result<(), String> {
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        let target = load_workspace_target(&state.db, workspace_id).await?;
+        if target.is_remote() {
+            let connection = target.remote_connection().map_err(err_to_string)?;
+            let root = remote_access_root(&target, &repo_path).await?;
+            return remote_fs::create_dir(connection, &root, &dir_path)
+                .await
+                .map_err(err_to_string);
+        }
+    }
     let db = state.db.clone();
     let cache = state.file_tree_cache.clone();
     tokio::task::spawn_blocking(move || {
@@ -191,6 +336,16 @@ pub async fn rename_path(
     new_name: String,
     workspace_id: Option<String>,
 ) -> Result<(), String> {
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        let target = load_workspace_target(&state.db, workspace_id).await?;
+        if target.is_remote() {
+            let connection = target.remote_connection().map_err(err_to_string)?;
+            let root = remote_access_root(&target, &repo_path).await?;
+            return remote_fs::rename_path(connection, &root, &old_path, &new_name)
+                .await
+                .map_err(err_to_string);
+        }
+    }
     let db = state.db.clone();
     let cache = state.file_tree_cache.clone();
     tokio::task::spawn_blocking(move || {
@@ -226,6 +381,16 @@ pub async fn delete_path(
     file_path: String,
     workspace_id: Option<String>,
 ) -> Result<(), String> {
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        let target = load_workspace_target(&state.db, workspace_id).await?;
+        if target.is_remote() {
+            let connection = target.remote_connection().map_err(err_to_string)?;
+            let root = remote_access_root(&target, &repo_path).await?;
+            return remote_fs::delete_path(connection, &root, &file_path)
+                .await
+                .map_err(err_to_string);
+        }
+    }
     let db = state.db.clone();
     let cache = state.file_tree_cache.clone();
     tokio::task::spawn_blocking(move || {
@@ -1416,6 +1581,44 @@ fn push_editor_reference_path_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
     if !roots.iter().any(|existing| existing == &root) {
         roots.push(root);
     }
+}
+
+async fn load_workspace_target(
+    db: &crate::db::Database,
+    workspace_id: &str,
+) -> Result<WorkspaceTarget, String> {
+    let db = db.clone();
+    let workspace_id = workspace_id.to_string();
+    tokio::task::spawn_blocking(move || resolve_workspace_target(&db, &workspace_id))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(err_to_string)
+}
+
+async fn remote_access_root(target: &WorkspaceTarget, repo_path: &str) -> Result<String, String> {
+    let workspace_id = target.workspace.id.as_str();
+    if repo_path == remote_repo_marker(workspace_id) || repo_path == target.workspace.root_path {
+        return Ok(target.workspace.root_path.clone());
+    }
+    if workspace_id_from_repo_marker(repo_path) != Some(workspace_id) {
+        return Err("远端文件路径不属于当前项目".to_string());
+    }
+    let worktree = worktree_path_from_repo_marker(repo_path)
+        .map_err(err_to_string)?
+        .ok_or_else(|| "远端文件路径不属于当前项目登记的工作树".to_string())?;
+    if worktree.relative_path.is_some() {
+        return Err("文件访问根目录不能指向工作树内的子目录".to_string());
+    }
+    let connection = target.remote_connection().map_err(err_to_string)?;
+    let registered = remote_git::worktrees(connection, &target.workspace.root_path)
+        .await
+        .map_err(err_to_string)?
+        .into_iter()
+        .any(|item| item.path == worktree.root_path);
+    if !registered {
+        return Err("远端工作树没有登记在当前项目中".to_string());
+    }
+    Ok(worktree.root_path)
 }
 
 fn err_to_string(error: impl std::fmt::Display) -> String {

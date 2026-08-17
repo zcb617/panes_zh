@@ -14,6 +14,7 @@ import {
 } from "react";
 import {
   FilePen,
+  Globe2,
   MessageSquare,
   PanelRightClose,
   PanelRightOpen,
@@ -575,6 +576,52 @@ export function WorkspacePaneShell({
           <span>{surfaceLabel(t, surfaceDrag.kind)}</span>
         </div>
       )}
+    </div>
+  );
+}
+
+function RemoteWorkspaceNotice({
+  connectionName,
+  connectionEnabled,
+}: {
+  connectionName: string | null;
+  connectionEnabled: boolean | null;
+}) {
+  const { t } = useTranslation("app");
+  return (
+    <div
+      style={{
+        display: "grid",
+        placeItems: "center",
+        height: "100%",
+        padding: 32,
+        boxSizing: "border-box",
+        textAlign: "center",
+      }}
+    >
+      <div style={{ maxWidth: 460 }}>
+        <div
+          style={{
+            display: "inline-grid",
+            placeItems: "center",
+            width: 48,
+            height: 48,
+            marginBottom: 16,
+            borderRadius: 14,
+            color: "var(--accent)",
+            background: "color-mix(in srgb, var(--accent) 14%, transparent)",
+          }}
+        >
+          <Globe2 size={23} />
+        </div>
+        <h2 style={{ margin: "0 0 9px", fontSize: 18 }}>{t("workspacePanes.remoteNoticeTitle")}</h2>
+        <p style={{ margin: 0, color: "var(--text-3)", fontSize: 13, lineHeight: 1.65 }}>
+          {connectionName ? `${connectionName} · ` : ""}
+          {connectionEnabled === false
+            ? t("workspacePanes.remoteNoticeDisabled")
+            : t("workspacePanes.remoteNoticeDescription")}
+        </p>
+      </div>
     </div>
   );
 }

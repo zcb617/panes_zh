@@ -64,6 +64,7 @@ pub fn list_worktrees(repo_path: &str) -> anyhow::Result<Vec<GitWorktreeDto>> {
             // Flush current block
             if let Some(p) = path.take() {
                 worktrees.push(GitWorktreeDto {
+                    display_path: Some(p.clone()),
                     path: p,
                     head_sha: head_sha.take(),
                     branch: branch.take(),
@@ -100,6 +101,7 @@ pub fn list_worktrees(repo_path: &str) -> anyhow::Result<Vec<GitWorktreeDto>> {
     // Flush last block (porcelain output may not end with blank line)
     if let Some(p) = path.take() {
         worktrees.push(GitWorktreeDto {
+            display_path: Some(p.clone()),
             path: p,
             head_sha: head_sha.take(),
             branch: branch.take(),

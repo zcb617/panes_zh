@@ -312,6 +312,11 @@ pub async fn schedule_workspace_catalog_refresh(
 ) -> Result<()> {
     let workspace = crate::db::workspaces::find_workspace_by_id(&state.db, workspace_id)?
         .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))?;
+    // SSH 扩展目录由当前 CLI 在当前目标上即时读取。这里的 SQLite 快照 key 只包含 cwd，
+    // 不能用于隔离不同 SSH 机器上同名项目的目录。
+    if workspace.location_kind == "ssh" {
+        return Ok(());
+    }
     let context_key = context_key(Some(&workspace.root_path));
     let mut first_error = None;
 
@@ -392,21 +397,9 @@ async fn run_catalog_refresh(
                 .codex_catalog_refresh_lock
                 .lock()
                 .await;
-            refresh_catalog_kinds(
-                &state.engines,
-                &key.provider_id,
-                cwd.as_deref(),
-                &[kind.clone()],
-            )
-            .await
+            refresh_catalog_kinds(&state, &key.provider_id, cwd.as_deref(), &[kind.clone()]).await
         } else {
-            refresh_catalog_kinds(
-                &state.engines,
-                &key.provider_id,
-                cwd.as_deref(),
-                &[kind.clone()],
-            )
-            .await
+            refresh_catalog_kinds(&state, &key.provider_id, cwd.as_deref(), &[kind.clone()]).await
         };
         let write_result = match refresh_result {
             Ok(results) => match results.into_iter().next() {
@@ -585,6 +578,7 @@ mod tests {
                 crate::computer_control_service::ComputerControlService::default(),
             ),
             remote_access: Arc::new(crate::remote::RemoteTunnelManager::default()),
+            ssh_monitor: Arc::new(crate::ssh::monitor::SshConnectionMonitor::default()),
         }
     }
 

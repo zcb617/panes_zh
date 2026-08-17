@@ -128,7 +128,8 @@ fn parse_skills(value: &Value, cwd: Option<&str>) -> Vec<ExtensionItemDto> {
                 requires_new_session: false,
                 read_only_reason: Some("opencode_skill".to_string()),
                 warning: None,
-            })
+
+                ..Default::default()})
         })
         .collect()
 }
@@ -166,7 +167,8 @@ fn parse_config(value: &Value) -> Vec<ExtensionItemDto> {
             requires_new_session: true,
             read_only_reason: Some("opencode_plugin_jsonc".to_string()),
             warning: None,
-        });
+
+            ..Default::default()});
     }
 
     if let Some(servers) = value.get("mcp").and_then(Value::as_object) {
@@ -228,6 +230,7 @@ fn mcp_item(name: &str, enabled: bool, health: &str) -> ExtensionItemDto {
         requires_new_session: false,
         read_only_reason: None,
         warning: None,
+        ..Default::default()
     }
 }
 

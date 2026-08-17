@@ -1,16 +1,19 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
     collections::HashMap, ffi::OsString, path::Path, process::Stdio, sync::Arc, time::Duration,
 };
 
 use anyhow::Context;
 use chrono::Utc;
+use futures::{SinkExt, StreamExt};
 use serde::Serialize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::TcpStream,
     process::{Child, ChildStdin, Command},
     sync::{broadcast, oneshot, Mutex},
 };
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::{process_utils, runtime_env};
 
@@ -64,9 +67,14 @@ pub struct CodexTransportDiagnostics {
     pub last_stderr: Option<String>,
 }
 
+type CodexWebSocketWriter =
+    futures::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+
 pub struct CodexTransport {
-    child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    child: Mutex<Option<Child>>,
+    stdin: Mutex<Option<ChildStdin>>,
+    websocket_writer: Mutex<Option<CodexWebSocketWriter>>,
+    websocket_alive: Arc<AtomicBool>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<RpcResponse>>>>,
     incoming_tx: broadcast::Sender<CodexTransportMessage>,
     last_event: Arc<Mutex<Option<CodexTransportEventDiagnostics>>>,
@@ -78,8 +86,11 @@ pub struct CodexTransport {
 impl Drop for CodexTransport {
     fn drop(&mut self) {
         if let Ok(mut child) = self.child.try_lock() {
-            let _ = child.start_kill();
+            if let Some(child) = child.as_mut() {
+                let _ = child.start_kill();
+            }
         }
+        self.websocket_alive.store(false, Ordering::Relaxed);
     }
 }
 
@@ -372,13 +383,102 @@ impl CodexTransport {
         }
 
         Ok(Self {
-            child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            child: Mutex::new(Some(child)),
+            stdin: Mutex::new(Some(stdin)),
+            websocket_writer: Mutex::new(None),
+            websocket_alive: Arc::new(AtomicBool::new(false)),
             pending,
             incoming_tx,
             last_event,
             last_stderr,
             next_request_id: std::sync::atomic::AtomicU64::new(1),
+            next_incoming_sequence,
+        })
+    }
+
+    pub async fn connect_websocket(url: &str) -> anyhow::Result<Self> {
+        let (socket, _) = connect_async(url)
+            .await
+            .with_context(|| format!("failed to connect codex app-server websocket `{url}`"))?;
+        let (writer, mut reader) = socket.split();
+        let (incoming_tx, _) = broadcast::channel(INCOMING_EVENT_BUFFER_CAPACITY);
+        let next_incoming_sequence = Arc::new(AtomicU64::new(1));
+        let pending = Arc::new(Mutex::new(
+            HashMap::<String, oneshot::Sender<RpcResponse>>::new(),
+        ));
+        let last_event = Arc::new(Mutex::new(None));
+        let last_stderr = Arc::new(Mutex::new(None));
+        let websocket_alive = Arc::new(AtomicBool::new(true));
+
+        {
+            let pending = pending.clone();
+            let incoming_tx = incoming_tx.clone();
+            let last_event = last_event.clone();
+            let next_incoming_sequence = next_incoming_sequence.clone();
+            let websocket_alive = websocket_alive.clone();
+            tokio::spawn(async move {
+                while let Some(message) = reader.next().await {
+                    match message {
+                        Ok(Message::Text(text)) => {
+                            dispatch_websocket_line(
+                                text.as_str(),
+                                &pending,
+                                &incoming_tx,
+                                &last_event,
+                                &next_incoming_sequence,
+                            )
+                            .await;
+                        }
+                        Ok(Message::Binary(bytes)) => match std::str::from_utf8(bytes.as_ref()) {
+                            Ok(text) => {
+                                dispatch_websocket_line(
+                                    text,
+                                    &pending,
+                                    &incoming_tx,
+                                    &last_event,
+                                    &next_incoming_sequence,
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                log::warn!("codex websocket returned non-UTF-8 payload: {error}");
+                            }
+                        },
+                        Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                        Ok(Message::Close(_)) => break,
+                        Ok(_) => {}
+                        Err(error) => {
+                            log::warn!("codex websocket read error: {error}");
+                            break;
+                        }
+                    }
+                }
+                websocket_alive.store(false, Ordering::Relaxed);
+                let sequence = next_incoming_sequence.fetch_add(1, Ordering::Relaxed);
+                publish_transport_message(
+                    &incoming_tx,
+                    sequence,
+                    IncomingMessage::Notification {
+                        method: "transport/eof".to_string(),
+                        params: serde_json::value::RawValue::from_string("{}".to_string())
+                            .expect("\"{}\" is valid json"),
+                    },
+                    "websocket_eof",
+                )
+                .await;
+            });
+        }
+
+        Ok(Self {
+            child: Mutex::new(None),
+            stdin: Mutex::new(None),
+            websocket_writer: Mutex::new(Some(writer)),
+            websocket_alive,
+            pending,
+            incoming_tx,
+            last_event,
+            last_stderr,
+            next_request_id: AtomicU64::new(1),
             next_incoming_sequence,
         })
     }
@@ -572,17 +672,30 @@ impl CodexTransport {
     }
 
     pub async fn diagnostics(&self) -> CodexTransportDiagnostics {
-        let process_status = {
+        let (pid, process_status) = {
             let mut child = self.child.lock().await;
-            match child.try_wait() {
-                Ok(Some(status)) => Some(format!("exited: {status}")),
-                Ok(None) => Some("running".to_string()),
-                Err(error) => Some(format!("status_error: {error}")),
+            match child.as_mut() {
+                Some(child) => {
+                    let status = match child.try_wait() {
+                        Ok(Some(status)) => Some(format!("exited: {status}")),
+                        Ok(None) => Some("running".to_string()),
+                        Err(error) => Some(format!("status_error: {error}")),
+                    };
+                    (child.id(), status)
+                }
+                None => (
+                    None,
+                    Some(if self.websocket_alive.load(Ordering::Relaxed) {
+                        "websocket_connected".to_string()
+                    } else {
+                        "websocket_closed".to_string()
+                    }),
+                ),
             }
         };
 
         CodexTransportDiagnostics {
-            pid: self.child.lock().await.id(),
+            pid,
             process_status,
             pending_count: self.pending.lock().await.len(),
             broadcast_receiver_count: self.incoming_tx.receiver_count(),
@@ -595,16 +708,33 @@ impl CodexTransport {
 
     pub async fn shutdown(&self) -> anyhow::Result<()> {
         let mut child = self.child.lock().await;
-        if child.try_wait()?.is_none() {
-            child.kill().await.ok();
-            child.wait().await.ok();
+        if let Some(child) = child.as_mut() {
+            if child.try_wait()?.is_none() {
+                child.kill().await.ok();
+                child.wait().await.ok();
+            }
+        }
+        self.websocket_alive.store(false, Ordering::Relaxed);
+        if let Some(writer) = self.websocket_writer.lock().await.as_mut() {
+            writer.close().await.ok();
         }
         Ok(())
     }
 
     async fn write_payload(&self, payload: &serde_json::Value) -> anyhow::Result<()> {
+        if let Some(writer) = self.websocket_writer.lock().await.as_mut() {
+            writer
+                .send(Message::Text(serde_json::to_string(payload)?.into()))
+                .await
+                .context("failed writing payload to codex websocket")?;
+            return Ok(());
+        }
+
         let serialized = serde_json::to_vec(payload)?;
         let mut stdin = self.stdin.lock().await;
+        let stdin = stdin
+            .as_mut()
+            .context("codex stdio transport is not available")?;
         stdin
             .write_all(&serialized)
             .await
@@ -619,13 +749,81 @@ impl CodexTransport {
 
     async fn ensure_alive(&self) -> anyhow::Result<()> {
         let mut child = self.child.lock().await;
-        if let Some(status) = child
-            .try_wait()
-            .context("failed to query codex process status")?
-        {
-            anyhow::bail!("codex app-server exited with status {status}");
+        if let Some(child) = child.as_mut() {
+            if let Some(status) = child
+                .try_wait()
+                .context("failed to query codex process status")?
+            {
+                anyhow::bail!("codex app-server exited with status {status}");
+            }
+            return Ok(());
         }
+        anyhow::ensure!(
+            self.websocket_alive.load(Ordering::Relaxed),
+            "codex app-server websocket is closed"
+        );
         Ok(())
+    }
+}
+
+async fn dispatch_websocket_line(
+    line: &str,
+    pending: &Arc<Mutex<HashMap<String, oneshot::Sender<RpcResponse>>>>,
+    incoming_tx: &broadcast::Sender<CodexTransportMessage>,
+    last_event: &Arc<Mutex<Option<CodexTransportEventDiagnostics>>>,
+    next_incoming_sequence: &Arc<AtomicU64>,
+) {
+    let sequence = next_incoming_sequence.fetch_add(1, Ordering::Relaxed);
+    match parse_incoming(line) {
+        Ok(IncomingMessage::Response(response)) => {
+            let diagnostics = CodexTransportEventDiagnostics {
+                sequence,
+                at: Utc::now().to_rfc3339(),
+                kind: "response".to_string(),
+                method: None,
+                id: Some(response.id.clone()),
+            };
+            record_last_event(last_event, diagnostics).await;
+            if let Some(sender) = pending.lock().await.remove(&response.id) {
+                let _ = sender.send(response);
+            }
+        }
+        Ok(message) => {
+            let mut diagnostics = diagnostics_for_message(&message);
+            diagnostics.sequence = sequence;
+            record_last_event(last_event, diagnostics).await;
+            publish_transport_message(
+                incoming_tx,
+                sequence,
+                trim_buffered_incoming_message(message),
+                "websocket",
+            )
+            .await;
+        }
+        Err(error) => {
+            log::warn!("codex websocket parse error: {error}");
+            record_last_event(
+                last_event,
+                CodexTransportEventDiagnostics {
+                    sequence,
+                    at: Utc::now().to_rfc3339(),
+                    kind: "parse_error".to_string(),
+                    method: Some("transport/parse_error".to_string()),
+                    id: None,
+                },
+            )
+            .await;
+            publish_transport_message(
+                incoming_tx,
+                sequence,
+                IncomingMessage::Notification {
+                    method: "transport/parse_error".to_string(),
+                    params: transport_parse_error_payload(&error.to_string(), line),
+                },
+                "websocket_parse_error",
+            )
+            .await;
+        }
     }
 }
 
@@ -805,6 +1003,50 @@ mod tests {
             INCOMING_EVENT_BUFFER_CAPACITY <= 6400,
             "Codex incoming events are live fan-out only; raising this can retain large protocol payloads while idle"
         );
+    }
+
+    #[tokio::test]
+    async fn websocket_transport_routes_rpc_response() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("websocket handshake");
+            let request = socket
+                .next()
+                .await
+                .expect("request frame")
+                .expect("request payload");
+            let Message::Text(request) = request else {
+                panic!("request must be text");
+            };
+            let request: Value = serde_json::from_str(request.as_str()).expect("request json");
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "id": request.get("id").cloned().expect("request id"),
+                        "result": {"pong": true}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("response");
+        });
+
+        let transport = CodexTransport::connect_websocket(&format!("ws://{address}"))
+            .await
+            .expect("connect websocket transport");
+        let response = transport
+            .request("test/ping", serde_json::json!({}), Duration::from_secs(2))
+            .await
+            .expect("rpc response");
+        assert_eq!(response, serde_json::json!({"pong": true}));
+        server.await.expect("server task");
     }
 
     #[test]

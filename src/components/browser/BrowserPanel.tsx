@@ -14,6 +14,7 @@ import { nextBrowserAnnotationNumber } from "../../lib/browserAnnotationNumber";
 import { ipc } from "../../lib/ipc";
 import { useChatStore } from "../../stores/chatStore";
 import { useChatComposerStore } from "../../stores/chatComposerStore";
+import { useDisplayScaleStore } from "../../stores/displayScaleStore";
 import { toast } from "../../stores/toastStore";
 import { useThreadStore } from "../../stores/threadStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
@@ -67,6 +68,16 @@ function getBrowserBounds(node: HTMLDivElement): BrowserBounds | null {
   };
 }
 
+export function scaleBrowserBounds(bounds: BrowserBounds, displayScale: number): BrowserBounds {
+  const scale = displayScale / 100;
+  return {
+    x: bounds.x * scale,
+    y: bounds.y * scale,
+    width: bounds.width * scale,
+    height: bounds.height * scale,
+  };
+}
+
 function normalizeBrowserUrl(value: string): string {
   const normalized = value.trim();
   if (!normalized) {
@@ -92,6 +103,7 @@ export function BrowserPanel({ visible = true }: BrowserPanelProps) {
   const annotationScopeRef = useRef<string | null>(null);
   const annotationWorkspaceRef = useRef<string | null>(null);
   const browserScopeTransferRef = useRef<BrowserScopeTransfer | null>(null);
+  const displayScale = useDisplayScaleStore((state) => state.displayScale);
   const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const activeThreadId = useThreadStore((state) => state.activeThreadId);
   const setWorkspaceAttachments = useChatComposerStore(
@@ -202,10 +214,11 @@ export function BrowserPanel({ visible = true }: BrowserPanelProps) {
     if (!host || !scope || !isTauri() || !visible) {
       return;
     }
-    const bounds = getBrowserBounds(host);
-    if (!bounds) {
+    const unscaledBounds = getBrowserBounds(host);
+    if (!unscaledBounds) {
       return;
     }
+    const bounds = scaleBrowserBounds(unscaledBounds, displayScale);
     try {
       const transfer = browserScopeTransferRef.current;
       if (transfer?.toScope === scope) {
@@ -227,7 +240,7 @@ export function BrowserPanel({ visible = true }: BrowserPanelProps) {
     } catch (error) {
       setBrowserError(error instanceof Error ? error.message : "浏览器初始化失败。");
     }
-  }, [visible]);
+  }, [displayScale, visible]);
 
   useEffect(() => {
     if (!isTauri()) {

@@ -1,6 +1,7 @@
 use tauri::{AppHandle, State};
 
 use crate::{
+    cli_tools::{factory::CliToolFactory, CliLocationKind},
     extensions,
     models::{CachedExtensionCatalogDto, ExtensionActionResultDto, ExtensionItemDto},
     state::AppState,
@@ -10,10 +11,19 @@ use crate::{
 pub async fn get_extension_catalog(
     state: State<'_, AppState>,
     provider_id: String,
+    workspace_id: Option<String>,
     cwd: Option<String>,
 ) -> Result<CachedExtensionCatalogDto, String> {
     let cwd = normalize_cwd(cwd);
-    extensions::refresh::load_cached_catalog(&state, provider_id.trim(), cwd.as_deref())
+    let (cli, context) = extensions::resolve_extension_cli(
+        state.inner(),
+        provider_id.trim(),
+        workspace_id.as_deref(),
+        cwd.as_deref(),
+    )
+    .await
+    .map_err(err_to_string)?;
+    cli.get_extension_catalog(&context, cwd.as_deref())
         .await
         .map_err(err_to_string)
 }
@@ -37,20 +47,39 @@ pub async fn request_extension_catalog_refresh(
     app: AppHandle,
     state: State<'_, AppState>,
     provider_id: String,
+    workspace_id: Option<String>,
     cwd: Option<String>,
     kinds: Option<Vec<String>>,
 ) -> Result<CachedExtensionCatalogDto, String> {
     let cwd = normalize_cwd(cwd);
+    let requested_kinds = kinds.unwrap_or_default();
+    let (cli, context) = extensions::resolve_extension_cli(
+        state.inner(),
+        provider_id.trim(),
+        workspace_id.as_deref(),
+        cwd.as_deref(),
+    )
+    .await
+    .map_err(err_to_string)?;
+    if context.location_kind == CliLocationKind::Ssh {
+        cli.refresh_extension_catalog(&context, cwd.as_deref(), &requested_kinds)
+            .await
+            .map_err(err_to_string)?;
+        return cli
+            .get_extension_catalog(&context, cwd.as_deref())
+            .await
+            .map_err(err_to_string);
+    }
     extensions::refresh::request_catalog_refresh(
         app,
         state.inner().clone(),
         provider_id.trim(),
         cwd.clone(),
-        kinds.unwrap_or_default(),
+        requested_kinds,
     )
     .await
     .map_err(err_to_string)?;
-    extensions::refresh::load_cached_catalog(&state, provider_id.trim(), cwd.as_deref())
+    cli.get_extension_catalog(&context, cwd.as_deref())
         .await
         .map_err(err_to_string)
 }
@@ -59,15 +88,24 @@ pub async fn request_extension_catalog_refresh(
 pub async fn get_extension_details(
     state: State<'_, AppState>,
     provider_id: String,
+    workspace_id: Option<String>,
     kind: String,
     extension_id: String,
     cwd: Option<String>,
 ) -> Result<ExtensionItemDto, String> {
     let cwd = normalize_cwd(cwd);
-    let catalog =
-        extensions::refresh::load_cached_catalog(&state, provider_id.trim(), cwd.as_deref())
-            .await
-            .map_err(err_to_string)?;
+    let (cli, context) = extensions::resolve_extension_cli(
+        state.inner(),
+        provider_id.trim(),
+        workspace_id.as_deref(),
+        cwd.as_deref(),
+    )
+    .await
+    .map_err(err_to_string)?;
+    let catalog = cli
+        .get_extension_catalog(&context, cwd.as_deref())
+        .await
+        .map_err(err_to_string)?;
 
     catalog
         .items
@@ -81,6 +119,7 @@ pub async fn perform_extension_action(
     app: AppHandle,
     state: State<'_, AppState>,
     provider_id: String,
+    workspace_id: Option<String>,
     kind: String,
     extension_id: String,
     action: String,
@@ -88,35 +127,59 @@ pub async fn perform_extension_action(
     cwd: Option<String>,
 ) -> Result<ExtensionActionResultDto, String> {
     let cwd = normalize_cwd(cwd);
-    let item = extensions::refresh::load_cached_catalog(&state, provider_id.trim(), cwd.as_deref())
+    let (cli, context) = extensions::resolve_extension_cli(
+        state.inner(),
+        provider_id.trim(),
+        workspace_id.as_deref(),
+        cwd.as_deref(),
+    )
+    .await
+    .map_err(err_to_string)?;
+    let item = cli
+        .get_extension_catalog(&context, cwd.as_deref())
         .await
         .map_err(err_to_string)?
         .items
         .into_iter()
         .find(|item| item.kind == kind.trim() && item.id == extension_id.trim())
         .ok_or_else(|| "extension not found in the cached catalog".to_string())?;
-    let result = extensions::perform_action_for_item(
-        provider_id.trim(),
-        item,
-        action.trim(),
-        scope.as_deref(),
-        cwd.as_deref(),
-    )
-    .await
-    .map_err(err_to_string)?;
-    if extensions::refresh::request_catalog_refresh(
-        app,
-        state.inner().clone(),
-        result.provider_id.as_str(),
-        cwd,
-        extensions::refresh::affected_refresh_kinds(&result.kind),
-    )
-    .await
-    .is_err()
+    let result = cli
+        .perform_extension_action(&context, item, action.trim(), scope.as_deref())
+        .await
+        .map_err(err_to_string)?;
+    if context.location_kind == CliLocationKind::Local
+        && extensions::refresh::request_catalog_refresh(
+            app,
+            state.inner().clone(),
+            result.provider_id.as_str(),
+            cwd,
+            extensions::refresh::affected_refresh_kinds(&result.kind),
+        )
+        .await
+        .is_err()
     {
         log::warn!("failed to queue extension catalog refresh after an extension action");
     }
     Ok(result)
+}
+
+/// 用户在聊天输入框中按下斜杠时，按当前 CLI 和 workspace 读取统一扩展菜单项。
+/// 业务调用只负责构造上下文、从工厂取得一个 CLI 实现并调用一次 get_extensions，
+/// 不按 codex/opencode/claude 分支取数。
+#[tauri::command]
+pub async fn get_cli_extensions(
+    state: State<'_, AppState>,
+    cli_id: String,
+    workspace_id: Option<String>,
+) -> Result<Vec<ExtensionItemDto>, String> {
+    let cli = CliToolFactory::new(state.inner().clone())
+        .create(cli_id.trim())
+        .map_err(err_to_string)?;
+    let context = cli
+        .execution_context(workspace_id.as_deref())
+        .await
+        .map_err(err_to_string)?;
+    cli.get_extensions(&context).await.map_err(err_to_string)
 }
 
 fn normalize_cwd(cwd: Option<String>) -> Option<String> {

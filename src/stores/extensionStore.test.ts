@@ -70,6 +70,17 @@ describe("extensionStore helpers", () => {
     ).toBe("claude::workspace::repo::d:/work/project");
   });
 
+  it("does not reuse the same path across different SSH workspaces", () => {
+    const baseContext = {
+      providerId: "claude" as const,
+      repoId: "repo",
+      cwd: "/srv/project",
+    };
+    expect(
+      buildExtensionCacheKey({ ...baseContext, workspaceId: "ssh-target-a" }),
+    ).not.toBe(buildExtensionCacheKey({ ...baseContext, workspaceId: "ssh-target-b" }));
+  });
+
   it("prefers the active thread provider over persisted and default providers", () => {
     expect(resolveExtensionProvider("workspace", { workspace: "claude" }, "opencode", "codex"))
       .toBe("opencode");
@@ -164,7 +175,7 @@ describe("extensionStore helpers", () => {
 
     await useExtensionStore.getState().requestRefresh(context);
 
-    expect(requestRefresh).toHaveBeenCalledWith("codex", "D:/work/project");
+    expect(requestRefresh).toHaveBeenCalledWith("codex", "workspace", "D:/work/project");
     expect(getCatalog).not.toHaveBeenCalled();
     expect(useExtensionStore.getState().entries[key]?.catalog?.items[0]?.id).toBe("cached");
     expect(useExtensionStore.getState().entries[key]?.refreshRequested).toBe(true);

@@ -16,13 +16,14 @@ use crate::{
         opencode::OpenCodeEngine,
     },
     models::{
-        CodexAppDto, CodexSkillDto, EngineCapabilitiesDto, EngineHealthDto, EngineInfoDto,
-        EngineModelAvailabilityNuxDto, EngineModelDto, EngineModelUpgradeInfoDto,
+        CodexAppDto, CodexPluginDto, CodexSkillDto, EngineCapabilitiesDto, EngineHealthDto,
+        EngineInfoDto, EngineModelAvailabilityNuxDto, EngineModelDto, EngineModelUpgradeInfoDto,
         OpenCodeRuntimeCatalogDto, ReasoningEffortOptionDto, ThreadDto,
     },
 };
 
 pub mod api_direct;
+pub mod claude_remote;
 pub mod claude_sidecar;
 pub mod codex;
 pub mod codex_event_mapper;
@@ -311,7 +312,7 @@ pub fn normalize_claude_approval_decision(value: &str) -> Option<&'static str> {
     }
 }
 
-fn map_engine_capabilities(capabilities: EngineCapabilities) -> EngineCapabilitiesDto {
+pub(crate) fn map_engine_capabilities(capabilities: EngineCapabilities) -> EngineCapabilitiesDto {
     EngineCapabilitiesDto {
         permission_modes: capabilities
             .permission_modes
@@ -404,6 +405,8 @@ pub struct TurnAttachment {
     pub size_bytes: u64,
     pub mime_type: Option<String>,
     pub browser_annotation: Option<BrowserAnnotationMetadata>,
+    pub is_remote: bool,
+    pub remote_text_content: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -493,8 +496,17 @@ impl EngineManager {
     }
 
     pub fn set_computer_control_service(&self, service: Arc<ComputerControlService>) {
-        self.codex.set_computer_control_service(Arc::clone(&service));
-        self.claude.set_computer_control_service(Arc::clone(&service));
+        self.claude.set_computer_control_service(service);
+    }
+
+    pub fn set_local_codex_computer_control_service(&self, service: Arc<ComputerControlService>) {
+        self.codex.set_computer_control_service(service);
+    }
+
+    pub fn set_local_opencode_computer_control_service(
+        &self,
+        service: Arc<ComputerControlService>,
+    ) {
         self.opencode.set_computer_control_service(service);
     }
 
@@ -659,6 +671,10 @@ impl EngineManager {
 
     pub async fn list_codex_apps(&self) -> anyhow::Result<Vec<CodexAppDto>> {
         self.codex.list_apps().await
+    }
+
+    pub async fn list_codex_plugins(&self, cwd: &str) -> anyhow::Result<Vec<CodexPluginDto>> {
+        self.codex.list_plugins(cwd).await
     }
 
     pub async fn opencode_runtime_catalog(
@@ -989,7 +1005,7 @@ impl EngineManager {
     }
 }
 
-fn map_provider_usage(
+pub(crate) fn map_provider_usage(
     engine_id: &str,
     name: &str,
     result: anyhow::Result<UsageLimitsSnapshot>,
@@ -1043,7 +1059,7 @@ fn map_provider_usage(
     }
 }
 
-fn map_model_info(model: ModelInfo) -> EngineModelDto {
+pub(crate) fn map_model_info(model: ModelInfo) -> EngineModelDto {
     EngineModelDto {
         id: model.id,
         display_name: model.display_name,

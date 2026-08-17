@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { ChildProcess, execFile } from "node:child_process";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -74,6 +75,7 @@ try {
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 const activeQueries = new Map();
+const sessionHandles = new Map();
 const pendingApprovals = new Map();
 let shuttingDown = false;
 const claudeCodeExecutable = process.env.PANES_CLAUDE_CODE_EXECUTABLE?.trim() || null;
@@ -398,6 +400,12 @@ function resolvePermissionMode(approvalPolicy, allowNetwork) {
 }
 
 function requiresApproval(permissionMode, toolName) {
+  if (
+    typeof toolName === "string" &&
+    toolName.startsWith("mcp__panes-computer-control__")
+  ) {
+    return false;
+  }
   if (permissionMode === "trusted") {
     return false;
   }
@@ -1483,7 +1491,7 @@ async function handleUsageLimits(req) {
   });
 }
 
-async function handleQuery(req) {
+async function handleQuery(req, persistentSession = null) {
   const { id, params = {} } = req;
   const {
     prompt,
@@ -1503,21 +1511,27 @@ async function handleQuery(req) {
     reasoningEffort,
     threadId,
     computerControlTools = [],
+    settingSources,
+    strictMcpConfig,
+    enforceApprovalRouting,
   } = params;
 
   const context = createQueryContext(id);
   context.threadId = threadId || sessionId || resume || id;
   activeQueries.set(id, context);
 
-  const toolList = allowedTools || [
-    "Read",
-    "Write",
-    "Edit",
-    "Bash",
-    "Glob",
-    "Grep",
-    ...(allowNetwork ? ["WebFetch"] : []),
-  ];
+  const toolList = Array.isArray(allowedTools)
+    ? [...allowedTools]
+    : [
+      "Read",
+      "Write",
+      "Edit",
+      "Bash",
+      "Glob",
+      "Grep",
+      ...(allowNetwork ? ["WebFetch"] : []),
+    ];
+  const permissionMode = resolvePermissionMode(approvalPolicy, allowNetwork);
 
   const sessionCwd = cwd || process.cwd();
   let actualSessionId = null;
@@ -1531,6 +1545,9 @@ async function handleQuery(req) {
     if (panesComputerControlServer) {
       toolList.push("mcp__panes-computer-control__*");
     }
+    const automaticallyAllowedTools = enforceApprovalRouting
+      ? toolList.filter((toolName) => !requiresApproval(permissionMode, toolName))
+      : toolList;
 
     const options = applyClaudeRuntime({
       cwd: sessionCwd,
@@ -1540,10 +1557,14 @@ async function handleQuery(req) {
         normalizedWritableRoots,
       ),
       permissionMode: planMode ? "plan" : "default",
-      allowedTools: toolList,
-      mcpServers: panesComputerControlServer
-        ? { "panes-computer-control": panesComputerControlServer }
-        : {},
+      allowedTools: automaticallyAllowedTools,
+      ...(panesComputerControlServer
+        ? {
+            mcpServers: {
+              "panes-computer-control": panesComputerControlServer,
+            },
+          }
+        : {}),
       canUseTool: buildPermissionHandler({
         context,
         cwd: sessionCwd,
@@ -1552,7 +1573,10 @@ async function handleQuery(req) {
         allowNetwork: Boolean(allowNetwork),
         approvalPolicy,
       }),
-      settingSources: ["project"],
+      settingSources: Array.isArray(settingSources)
+        ? settingSources.filter((source) => ["user", "project", "local"].includes(source))
+        : ["project"],
+      strictMcpConfig: Boolean(strictMcpConfig),
       sandbox: {
         enabled: true,
         autoAllowBashIfSandboxed: true,
@@ -1716,7 +1740,7 @@ async function handleQuery(req) {
 
     let sawTextDelta = false;
     let terminalStatus = "completed";
-    const promptInput = buildPromptInput(
+    const promptInput = persistentSession?.messageInput ?? buildPromptInput(
       prompt,
       attachments,
       sessionCwd,
@@ -1724,6 +1748,17 @@ async function handleQuery(req) {
     );
     const query = queryFn({ prompt: promptInput, options });
     context.query = query;
+    if (persistentSession) {
+      persistentSession.query = query;
+      persistentSession.context = context;
+      emit({
+        id,
+        type: "session_handle_created",
+        threadId: persistentSession.threadId,
+        handleId: persistentSession.handleId,
+        reused: false,
+      });
+    }
     void fetchClaudeUsageSnapshot().then((usage) => {
       if (usage && activeQueries.has(id)) {
         emit({ id, type: "usage_limits_updated", usage });
@@ -1791,6 +1826,15 @@ async function handleQuery(req) {
             message: formatSdkResultError(message),
             recoverable: false,
           });
+        }
+        if (persistentSession) {
+          emitTurnCompleted(
+            context,
+            persistentSession.interruptRequested ? "interrupted" : terminalStatus,
+          );
+          persistentSession.interruptRequested = false;
+          sawTextDelta = false;
+          terminalStatus = "completed";
         }
       } else if (message.type === "stream_event") {
         const streamEvent = message.event;
@@ -1876,6 +1920,233 @@ async function handleQuery(req) {
     cleanupPendingComputerControlCalls(context, "Claude query was canceled.");
     activeQueries.delete(id);
   }
+}
+
+async function createPersistentSessionHandle(req) {
+  const { id, params = {} } = req;
+  const threadId = typeof params.threadId === "string" ? params.threadId.trim() : "";
+  const handleId = typeof params.handleId === "string" ? params.handleId.trim() : "";
+  if (!threadId || !handleId) {
+    emit({
+      id,
+      type: "error",
+      message: "Claude persistent session requires threadId and handleId.",
+      recoverable: false,
+    });
+    return;
+  }
+
+  const existing = sessionHandles.get(threadId);
+  if (existing) {
+    emit({
+      id,
+      type: "session_handle_created",
+      threadId,
+      handleId: existing.handleId,
+      sessionId: existing.context?.sessionId ?? null,
+      reused: true,
+    });
+    return;
+  }
+
+  const messageInput = new Readable({
+    objectMode: true,
+    read() {},
+  });
+  const entry = {
+    threadId,
+    handleId,
+    messageInput,
+    query: null,
+    context: null,
+    runPromise: null,
+    interruptRequested: false,
+  };
+  sessionHandles.set(threadId, entry);
+
+  try {
+    const sessionCwd = params.cwd || process.cwd();
+    const initialInput = buildPromptInput(
+      params.prompt,
+      params.attachments || [],
+      sessionCwd,
+      params.sessionId || params.resume || "",
+    );
+    if (typeof initialInput === "string") {
+      messageInput.push({
+        type: "user",
+        message: {
+          role: "user",
+          content: initialInput,
+        },
+        parent_tool_use_id: null,
+        session_id: params.sessionId || params.resume || "",
+      });
+    } else {
+      for await (const message of initialInput) {
+        messageInput.push(message);
+      }
+    }
+
+    entry.runPromise = handleQuery(req, entry);
+    await entry.runPromise;
+  } catch (error) {
+    if (sessionHandles.get(threadId) === entry) {
+      sessionHandles.delete(threadId);
+    }
+    messageInput.destroy();
+    emit({
+      id,
+      type: "error",
+      message: error instanceof Error ? error.message : String(error),
+      recoverable: false,
+    });
+  }
+}
+
+async function sendPersistentSessionMessage(req) {
+  const { id, params = {} } = req;
+  const threadId = typeof params.threadId === "string" ? params.threadId.trim() : "";
+  const entry = sessionHandles.get(threadId);
+  if (!entry?.query || !entry.context) {
+    emit({
+      id,
+      type: "error",
+      message: "Claude persistent session handle was not found or is not ready.",
+      recoverable: false,
+    });
+    return;
+  }
+  if (!entry.context.turnCompleted) {
+    emit({
+      id,
+      type: "error",
+      message: "Claude persistent session already has an active turn.",
+      recoverable: true,
+    });
+    return;
+  }
+
+  try {
+    const sessionCwd = params.cwd || process.cwd();
+    const input = buildPromptInput(
+      params.prompt,
+      params.attachments || [],
+      sessionCwd,
+      entry.context.sessionId || params.sessionId || params.resume || "",
+    );
+    entry.context.cancelled = false;
+    entry.context.turnCompleted = false;
+    entry.context.tokenUsage = null;
+    entry.context.stopReason = null;
+    emit({ id: entry.context.id, type: "turn_started" });
+    if (typeof input === "string") {
+      entry.messageInput.push({
+        type: "user",
+        message: {
+          role: "user",
+          content: input,
+        },
+        parent_tool_use_id: null,
+        session_id: entry.context.sessionId || params.sessionId || params.resume || "",
+      });
+    } else {
+      for await (const message of input) {
+        entry.messageInput.push(message);
+      }
+    }
+    emit({
+      id,
+      type: "session_message_accepted",
+      threadId,
+      handleId: entry.handleId,
+      accepted: true,
+    });
+  } catch (error) {
+    entry.context.turnCompleted = true;
+    emit({
+      id,
+      type: "error",
+      message: error instanceof Error ? error.message : String(error),
+      recoverable: false,
+    });
+  }
+}
+
+async function interruptPersistentSessionHandle(req) {
+  const { id, params = {} } = req;
+  const threadId = typeof params.threadId === "string" ? params.threadId.trim() : "";
+  const entry = sessionHandles.get(threadId);
+  if (!entry?.query || !entry.context) {
+    emit({
+      id,
+      type: "error",
+      message: "Claude persistent session handle was not found or is not ready.",
+      recoverable: false,
+    });
+    return;
+  }
+
+  try {
+    entry.interruptRequested = true;
+    await entry.query.interrupt();
+    emit({
+      id,
+      type: "session_handle_interrupted",
+      threadId,
+      handleId: entry.handleId,
+      interrupted: true,
+    });
+  } catch (error) {
+    entry.interruptRequested = false;
+    emit({
+      id,
+      type: "error",
+      message: error instanceof Error ? error.message : String(error),
+      recoverable: false,
+    });
+  }
+}
+
+async function destroyPersistentSessionHandle(req) {
+  const { id, params = {} } = req;
+  const threadId = typeof params.threadId === "string" ? params.threadId.trim() : "";
+  if (!threadId) {
+    emit({
+      id,
+      type: "session_handle_destroyed",
+      threadId: null,
+      handleId: null,
+      success: false,
+      error: "Claude persistent session destroy requires threadId.",
+    });
+    return;
+  }
+
+  const entry = sessionHandles.get(threadId);
+  if (!entry) {
+    emit({
+      id,
+      type: "session_handle_destroyed",
+      threadId,
+      handleId: null,
+      success: false,
+      error: "Claude persistent session handle was not found.",
+    });
+    return;
+  }
+
+  sessionHandles.delete(threadId);
+  entry.messageInput.push(null);
+  entry.query?.close?.();
+  await entry.runPromise;
+  emit({
+    id,
+    type: "session_handle_destroyed",
+    threadId,
+    handleId: entry.handleId,
+    success: true,
+  });
 }
 
 function handleCancel(params = {}) {
@@ -2022,6 +2293,26 @@ rl.on("line", (line) => {
 
   if (req.method === "get_usage_limits") {
     void handleUsageLimits(req);
+    return;
+  }
+
+  if (req.method === "create_session_handle") {
+    void createPersistentSessionHandle(req);
+    return;
+  }
+
+  if (req.method === "send_session_message") {
+    void sendPersistentSessionMessage(req);
+    return;
+  }
+
+  if (req.method === "interrupt_session_handle") {
+    void interruptPersistentSessionHandle(req);
+    return;
+  }
+
+  if (req.method === "destroy_session_handle") {
+    void destroyPersistentSessionHandle(req);
     return;
   }
 

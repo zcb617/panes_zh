@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  AlertTriangle,
   Check,
   ChevronDown,
   ChevronRight,
   FileText,
   FileX2,
   Image as ImageIcon,
+  LoaderCircle,
   Paperclip,
+  RefreshCw,
   Search,
   Zap,
 } from "lucide-react";
@@ -28,6 +31,9 @@ interface ModelPickerProps {
   onEngineModelChange: (engineId: string, modelId: string) => void;
   onEffortChange: (effort: string) => void;
   onServiceTierChange: (serviceTier: CodexServiceTierValue) => void;
+  loading?: boolean;
+  error?: string;
+  onRetry?: () => void | Promise<void>;
   disabled?: boolean;
 }
 
@@ -341,6 +347,9 @@ export function ModelPicker({
   onEngineModelChange,
   onEffortChange,
   onServiceTierChange,
+  loading = false,
+  error,
+  onRetry,
   disabled = false,
 }: ModelPickerProps) {
   const { t } = useTranslation("chat");
@@ -348,11 +357,28 @@ export function ModelPicker({
   const [activeSection, setActiveSection] = useState<ModelPickerSectionId>("model");
   const [openCodeModelQuery, setOpenCodeModelQuery] = useState("");
   const [legacyExpanded, setLegacyExpanded] = useState(false);
+  const [showDelayedLoading, setShowDelayedLoading] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const wasOpenRef = useRef(false);
   const [pos, setPos] = useState({ bottom: 0, left: 0 });
   const ensureEngineHealth = useEngineStore((state) => state.ensureHealth);
+  const refreshEngineCatalog = useEngineStore((state) => state.refreshEngineCatalog);
+  const healthLoading = useEngineStore((state) => state.healthLoading);
+  const engineCatalogLoading = useEngineStore((state) => state.engineCatalogLoading);
+  const selectedRuntimeLoading =
+    loading ||
+    Boolean(healthLoading[selectedEngineId]) ||
+    Boolean(engineCatalogLoading[selectedEngineId]);
+
+  useEffect(() => {
+    if (!selectedRuntimeLoading) {
+      setShowDelayedLoading(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShowDelayedLoading(true), 500);
+    return () => window.clearTimeout(timer);
+  }, [selectedRuntimeLoading]);
 
   useEffect(() => {
     if (!open) {
@@ -364,8 +390,14 @@ export function ModelPicker({
     }
     wasOpenRef.current = true;
 
+    const inspectedEngineIds = new Set<string>();
     for (const engine of engines) {
+      inspectedEngineIds.add(engine.id);
       const engineHealth = health[engine.id];
+      if (engine.models.length === 0 && engineHealth?.available) {
+        void refreshEngineCatalog(engine.id);
+        continue;
+      }
       if (!engineHealth) {
         void ensureEngineHealth(engine.id);
         continue;
@@ -374,7 +406,21 @@ export function ModelPicker({
         void ensureEngineHealth(engine.id, { force: true });
       }
     }
-  }, [engines, ensureEngineHealth, health, open]);
+    if (!inspectedEngineIds.has(selectedEngineId)) {
+      void ensureEngineHealth(selectedEngineId, { force: true }).then((result) => {
+        if (result?.available) {
+          void refreshEngineCatalog(selectedEngineId);
+        }
+      });
+    }
+  }, [
+    engines,
+    ensureEngineHealth,
+    health,
+    open,
+    refreshEngineCatalog,
+    selectedEngineId,
+  ]);
 
   useLayoutEffect(() => {
     if (!open || !triggerRef.current) return;
@@ -494,6 +540,61 @@ export function ModelPicker({
   }
 
   function renderModelOptions() {
+    const selectedEngineHealth = health[selectedEngineId];
+    const selectedEngineHealthLoading =
+      Boolean(healthLoading[selectedEngineId]) ||
+      Boolean(engineCatalogLoading[selectedEngineId]);
+    const runtimeError = selectedEngineHealth?.available === false
+      ? selectedEngineHealth.details ?? error
+      : error;
+    if (currentModels.length === 0) {
+      return (
+        <div className={`mp-runtime-status${runtimeError ? " mp-runtime-status-error" : ""}`}>
+          {loading || selectedEngineHealthLoading ? (
+            <LoaderCircle size={16} className="mp-loading-spinner" />
+          ) : runtimeError ? (
+            <AlertTriangle size={16} />
+          ) : (
+            <LoaderCircle size={16} className="mp-loading-spinner" />
+          )}
+          <div className="mp-runtime-status-copy">
+            <strong>
+              {loading || selectedEngineHealthLoading
+                ? t("modelPicker.startingEngine", {
+                    engine: selectedEngineId === "claude" ? "Claude Code" : currentEngine?.name ?? selectedEngineId,
+                  })
+                : runtimeError
+                  ? t("modelPicker.engineStartFailed", {
+                      engine: selectedEngineId === "claude" ? "Claude Code" : currentEngine?.name ?? selectedEngineId,
+                    })
+                  : t("modelPicker.checkingEngine", {
+                      engine: selectedEngineId === "claude" ? "Claude Code" : currentEngine?.name ?? selectedEngineId,
+                    })}
+            </strong>
+            <span>
+              {runtimeError ?? t("modelPicker.startingEngineDescription")}
+            </span>
+          </div>
+          {!loading && !selectedEngineHealthLoading && onRetry ? (
+            <button
+              type="button"
+              className="mp-runtime-retry"
+              onClick={() => {
+                void ensureEngineHealth(selectedEngineId, { force: true }).then((result) => {
+                  if (!result?.available) {
+                    void onRetry();
+                  }
+                });
+              }}
+            >
+              <RefreshCw size={11} />
+              {t("modelPicker.retry")}
+            </button>
+          ) : null}
+        </div>
+      );
+    }
+
     const activeModels = selectedEngineId === "opencode"
       ? currentOpenCodeProvider?.activeModels ?? []
       : currentModels.filter((model) => !model.hidden);
@@ -579,7 +680,8 @@ export function ModelPicker({
           <div className="mp-options">
             {engines.map((engine) => {
               const selected = engine.id === selectedEngineId;
-              const available = health[engine.id]?.available !== false;
+              const checking = Boolean(healthLoading[engine.id]);
+              const available = engine.models.length > 0 && health[engine.id]?.available !== false;
               return (
                 <button
                   key={engine.id}
@@ -590,10 +692,14 @@ export function ModelPicker({
                 >
                   <span className="mp-option-icon">{getHarnessIcon(engine.id, 16)}</span>
                   <span className="mp-option-label">{engine.name}</span>
-                  <span
-                    className={`mp-health-dot${available ? " mp-health-dot-ok" : " mp-health-dot-error"}`}
-                    title={available ? t("modelPicker.available") : t("modelPicker.unavailable")}
-                  />
+                  {checking ? (
+                    <LoaderCircle size={10} className="mp-loading-spinner" />
+                  ) : (
+                    <span
+                      className={`mp-health-dot${available ? " mp-health-dot-ok" : " mp-health-dot-error"}`}
+                      title={available ? t("modelPicker.available") : t("modelPicker.unavailable")}
+                    />
+                  )}
                   {selected ? <Check size={13} className="mp-option-check" /> : null}
                 </button>
               );
@@ -715,9 +821,21 @@ export function ModelPicker({
     reasoning: selectedEffort ? effortDisplayLabel(t, selectedEffort) : "",
     speed: speedLabel,
   };
+  const selectedEngineHealth = health[selectedEngineId];
+  const selectedEngineDisplayName = selectedEngineId === "claude"
+    ? "Claude Code"
+    : currentEngine?.name ?? selectedEngineId;
+  const runtimeUnavailable =
+    !selectedRuntimeLoading &&
+    currentModels.length === 0 &&
+    (Boolean(error) || selectedEngineHealth?.available === false);
   const triggerLabel = currentModel
     ? formatModelName(currentModel.displayName)
-    : currentEngine?.name ?? t("modelPicker.selectModel");
+    : showDelayedLoading
+      ? t("modelPicker.startingEngine", { engine: selectedEngineDisplayName })
+      : runtimeUnavailable
+        ? t("modelPicker.engineStartFailed", { engine: selectedEngineDisplayName })
+        : currentEngine?.name ?? t("modelPicker.selectModel");
 
   const trigger = (
     <button
@@ -731,7 +849,13 @@ export function ModelPicker({
       aria-haspopup="dialog"
     >
       <span className="mp-trigger-icon">
-        {getHarnessIcon(selectedEngineId, 12)}
+        {showDelayedLoading ? (
+          <LoaderCircle size={12} className="mp-loading-spinner" />
+        ) : runtimeUnavailable ? (
+          <AlertTriangle size={12} className="mp-trigger-warning" />
+        ) : (
+          getHarnessIcon(selectedEngineId, 12)
+        )}
       </span>
       <span className="mp-trigger-label">{triggerLabel}</span>
       {selectedEffort && currentEfforts.length > 0 ? (

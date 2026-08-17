@@ -3,13 +3,18 @@ import type { FileTreeEntry } from "../../types";
 export interface ExplorerLoadSignature {
   generation: number;
   rootPath: string;
+  workspaceId?: string | null;
 }
 
 export function isCurrentExplorerLoad(
   request: ExplorerLoadSignature,
   current: ExplorerLoadSignature,
 ): boolean {
-  return request.generation === current.generation && request.rootPath === current.rootPath;
+  return (
+    request.generation === current.generation &&
+    request.rootPath === current.rootPath &&
+    (request.workspaceId ?? null) === (current.workspaceId ?? null)
+  );
 }
 
 export function isPathEqualOrDescendant(path: string, target: string): boolean {

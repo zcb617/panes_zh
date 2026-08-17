@@ -213,6 +213,13 @@ pub struct CodexEngine {
     runtime_events: broadcast::Sender<CodexRuntimeEvent>,
     computer_control_service:
         Arc<std::sync::Mutex<Option<Arc<crate::computer_control_service::ComputerControlService>>>>,
+    transport_target: CodexTransportTarget,
+}
+
+#[derive(Clone)]
+enum CodexTransportTarget {
+    Local,
+    WebSocket(String),
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +287,7 @@ impl Default for CodexEngine {
             transport_spawn_lock: Arc::new(Mutex::new(())),
             runtime_events,
             computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            transport_target: CodexTransportTarget::Local,
         }
     }
 }
@@ -519,7 +527,10 @@ impl Engine for CodexEngine {
     }
 
     async fn is_available(&self) -> bool {
-        resolve_codex_executable().await.executable.is_some()
+        match &self.transport_target {
+            CodexTransportTarget::Local => resolve_codex_executable().await.executable.is_some(),
+            CodexTransportTarget::WebSocket(_) => true,
+        }
     }
 
     async fn start_thread(
@@ -602,6 +613,10 @@ impl Engine for CodexEngine {
                     return Ok(EngineThread { engine_thread_id });
                 }
                 Err(error) => {
+                    if matches!(&self.transport_target, CodexTransportTarget::WebSocket(_)) {
+                        return Err(error)
+                            .context("SSH 远端 Codex 会话恢复失败；不会在远端或本机创建替代会话");
+                    }
                     log::warn!("codex thread resume failed, falling back to thread/start: {error}");
                 }
             }
@@ -1502,6 +1517,17 @@ impl CodexEngine {
             .and_then(|service| service.clone())
     }
 
+    pub fn new_remote_websocket(url: String) -> Self {
+        let (runtime_events, _) = broadcast::channel(256);
+        Self {
+            state: Arc::new(Mutex::new(CodexState::default())),
+            transport_spawn_lock: Arc::new(Mutex::new(())),
+            runtime_events,
+            computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            transport_target: CodexTransportTarget::WebSocket(url),
+        }
+    }
+
     pub async fn usage_limits_snapshot(&self) -> anyhow::Result<UsageLimitsSnapshot> {
         let transport = self.ensure_ready_transport().await?;
         let snapshot = request_with_fallback(
@@ -1554,6 +1580,40 @@ impl CodexEngine {
             MethodCallOutcome::Available(apps) => Ok(apps),
             MethodCallOutcome::Unsupported(detail) => {
                 anyhow::bail!("codex app/list unsupported: {}", detail.unwrap_or_default())
+            }
+            MethodCallOutcome::Error(detail) => anyhow::bail!(detail),
+        }
+    }
+
+    pub async fn list_plugins(&self, cwd: &str) -> anyhow::Result<Vec<CodexPluginDto>> {
+        let transport = self.ensure_ready_transport().await?;
+        let cwds = [cwd.to_string()];
+        match fetch_plugin_marketplaces(transport.as_ref(), Some(&cwds)).await {
+            MethodCallOutcome::Available(marketplaces) => {
+                let mut plugins_by_id = HashMap::new();
+                for plugin in marketplaces
+                    .into_iter()
+                    .filter(|marketplace| !marketplace.path.trim().is_empty())
+                    // OpenAI 内置但已落到本地 marketplace 的插件也属于当前运行时能力，不能排除。
+                    // .filter(|marketplace| !marketplace.name.starts_with("openai-"))
+                    .flat_map(|marketplace| marketplace.plugins)
+                    .filter(|plugin| plugin.installed && plugin.enabled)
+                {
+                    plugins_by_id.entry(plugin.id.clone()).or_insert(plugin);
+                }
+                let mut plugins = plugins_by_id.into_values().collect::<Vec<_>>();
+                plugins.sort_by(|left, right| {
+                    left.name
+                        .cmp(&right.name)
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                Ok(plugins)
+            }
+            MethodCallOutcome::Unsupported(detail) => {
+                anyhow::bail!(
+                    "codex plugin/list unsupported: {}",
+                    detail.unwrap_or_default()
+                )
             }
             MethodCallOutcome::Error(detail) => anyhow::bail!(detail),
         }
@@ -2722,17 +2782,40 @@ impl CodexEngine {
     }
 
     async fn spawn_transport_with_backoff(&self) -> anyhow::Result<Arc<CodexTransport>> {
-        let resolution = resolve_codex_executable().await;
-        let codex_executable = resolution.executable.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(codex_unavailable_details(&resolution)
-                .unwrap_or_else(|| CODEX_MISSING_DEFAULT_DETAILS.to_string()))
-        })?;
+        let codex_executable = match &self.transport_target {
+            CodexTransportTarget::Local => {
+                let resolution = resolve_codex_executable().await;
+                Some(
+                    resolution
+                        .executable
+                        .clone()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(codex_unavailable_details(&resolution)
+                                .unwrap_or_else(|| CODEX_MISSING_DEFAULT_DETAILS.to_string()))
+                        })?
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }
+            CodexTransportTarget::WebSocket(_) => None,
+        };
 
         let mut backoff = TRANSPORT_RESTART_BASE_BACKOFF;
         let mut last_error: Option<anyhow::Error> = None;
 
         for attempt in 0..TRANSPORT_RESTART_MAX_ATTEMPTS {
-            match CodexTransport::spawn(codex_executable.to_string_lossy().as_ref()).await {
+            let transport = match (&self.transport_target, codex_executable.as_deref()) {
+                (CodexTransportTarget::Local, Some(executable)) => {
+                    CodexTransport::spawn(executable).await
+                }
+                (CodexTransportTarget::WebSocket(url), _) => {
+                    CodexTransport::connect_websocket(url).await
+                }
+                (CodexTransportTarget::Local, None) => {
+                    unreachable!("local Codex executable was resolved above")
+                }
+            };
+            match transport {
                 Ok(transport) => {
                     let transport = Arc::new(transport);
                     let diagnostics = transport.diagnostics().await;
@@ -2873,7 +2956,9 @@ impl CodexEngine {
         Ok(())
     }
 
-    async fn protocol_diagnostics_snapshot(&self) -> Option<CodexProtocolDiagnosticsDto> {
+    pub(crate) async fn protocol_diagnostics_snapshot(
+        &self,
+    ) -> Option<CodexProtocolDiagnosticsDto> {
         let current = {
             let state = self.state.lock().await;
             state.protocol_diagnostics.clone()
@@ -4228,6 +4313,21 @@ async fn build_turn_input_items(
                   "path": attachment.file_path,
                 }));
             }
+            Some(AttachmentInputKind::Text) if attachment.is_remote => {
+                // Codex app-server 当前没有通用文本文件路径输入类型；旧的 mention 只表示
+                // 已存在的上下文引用，不能可靠读取缓存目录中的附件。
+                // items.push(serde_json::json!({
+                //   "type": "mention",
+                //   "name": attachment.file_name,
+                //   "path": attachment.file_path,
+                // }));
+                let text_payload = read_text_attachment_for_turn_input(attachment).await?;
+                items.push(serde_json::json!({
+                  "type": "text",
+                  "text": text_payload,
+                  "text_elements": [],
+                }));
+            }
             Some(AttachmentInputKind::Text) => {
                 let text_payload = read_text_attachment_for_turn_input(attachment).await?;
                 items.push(serde_json::json!({
@@ -4389,13 +4489,22 @@ async fn validate_turn_attachments(attachments: &[TurnAttachment]) -> anyhow::Re
             );
         }
 
-        let metadata = tokio_fs::metadata(path).await.with_context(|| {
-            format!(
-                "Attachment `{}` could not be read at `{}`",
-                attachment.file_name, attachment.file_path
-            )
-        })?;
-        let size_bytes = std::cmp::max(metadata.len(), attachment.size_bytes);
+        let size_bytes = if attachment.is_remote {
+            anyhow::ensure!(
+                path.starts_with('/'),
+                "SSH remote attachment `{}` must use an absolute remote path.",
+                attachment.file_name
+            );
+            attachment.size_bytes
+        } else {
+            let metadata = tokio_fs::metadata(path).await.with_context(|| {
+                format!(
+                    "Attachment `{}` could not be read at `{}`",
+                    attachment.file_name, attachment.file_path
+                )
+            })?;
+            std::cmp::max(metadata.len(), attachment.size_bytes)
+        };
         if size_bytes > MAX_ATTACHMENT_BYTES {
             anyhow::bail!(
                 "Attachment `{}` exceeds the 10 MB per-file limit.",
@@ -4508,15 +4617,20 @@ fn is_supported_text_extension(path: &str) -> bool {
 async fn read_text_attachment_for_turn_input(
     attachment: &TurnAttachment,
 ) -> anyhow::Result<String> {
-    let bytes = tokio_fs::read(attachment.file_path.trim())
-        .await
-        .with_context(|| {
-            format!(
-                "Attachment `{}` could not be read at `{}`",
-                attachment.file_name, attachment.file_path
-            )
-        })?;
-    let raw_text = String::from_utf8_lossy(&bytes);
+    let local_bytes;
+    let raw_text = if let Some(remote_text_content) = attachment.remote_text_content.as_deref() {
+        std::borrow::Cow::Borrowed(remote_text_content)
+    } else {
+        local_bytes = tokio_fs::read(attachment.file_path.trim())
+            .await
+            .with_context(|| {
+                format!(
+                    "Attachment `{}` could not be read at `{}`",
+                    attachment.file_name, attachment.file_path
+                )
+            })?;
+        String::from_utf8_lossy(&local_bytes)
+    };
     let (truncated_text, was_truncated) =
         truncate_text_to_max_chars(raw_text.as_ref(), MAX_TEXT_ATTACHMENT_CHARS);
     let mut payload = format!(
@@ -6232,11 +6346,19 @@ fn map_plugin_marketplaces(response: &serde_json::Value) -> Vec<CodexPluginMarke
 
 async fn fetch_plugin_marketplaces(
     transport: &CodexTransport,
+    cwds: Option<&[String]>,
 ) -> MethodCallOutcome<Vec<CodexPluginMarketplaceDto>> {
+    let params = cwds.map_or(serde_json::Value::Null, |cwds| {
+        serde_json::json!({
+            "cwds": cwds,
+            "forceRefetch": false,
+            "marketplaceKinds": ["local"],
+        })
+    });
     let response = match request_with_fallback(
         transport,
         PLUGIN_LIST_METHODS,
-        serde_json::Value::Null,
+        params,
         DEFAULT_TIMEOUT,
     )
     .await
@@ -6461,9 +6583,11 @@ async fn refresh_protocol_diagnostics_via_transport(
     ) = tokio::join!(
         fetch_experimental_features(transport),
         fetch_collaboration_modes(transport),
-        fetch_apps(transport),
+        // Apps/连接器不属于 Panes 管理的 Skill、Plugin、MCP 能力范围，不再请求 app/list。
+        // fetch_apps(transport),
+        async { MethodCallOutcome::Available(Vec::<CodexAppDto>::new()) },
         fetch_skills(transport),
-        fetch_plugin_marketplaces(transport),
+        fetch_plugin_marketplaces(transport, None),
         fetch_mcp_servers(transport),
         fetch_account_state(transport),
         fetch_config_state(transport),
@@ -7561,6 +7685,51 @@ mod tests {
     use super::*;
     use crate::engines::ActionResult;
     use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn remote_text_attachment_uses_remote_path_without_local_file_read() {
+        let attachment = TurnAttachment {
+            file_name: "说明.md".to_string(),
+            file_path: "/home/tester/.cache/panes/attachments/workspace/thread/file.md".to_string(),
+            size_bytes: 128,
+            mime_type: Some("text/markdown".to_string()),
+            browser_annotation: None,
+            is_remote: true,
+            remote_text_content: Some("Panes SSH 远端附件验证码：ATTACHMENT-PLAN4".to_string()),
+        };
+        validate_turn_attachments(std::slice::from_ref(&attachment))
+            .await
+            .expect("remote attachment validation");
+        let input = TurnInput {
+            message: "读取附件".to_string(),
+            attachments: vec![attachment],
+            plan_mode: false,
+            input_items: Vec::new(),
+        };
+
+        let items = build_turn_input_items(&input, false)
+            .await
+            .expect("remote input items");
+
+        assert!(items.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("text")
+                && item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| {
+                        text.contains(
+                            "/home/tester/.cache/panes/attachments/workspace/thread/file.md",
+                        ) && text.contains("ATTACHMENT-PLAN4")
+                    })
+        }));
+    }
+
+    #[tokio::test]
+    async fn remote_websocket_transport_does_not_depend_on_local_codex_availability() {
+        let engine = CodexEngine::new_remote_websocket("ws://127.0.0.1:43100".to_string());
+
+        assert!(engine.is_available().await);
+    }
 
     fn test_sandbox_policy(sandbox_mode: Option<&str>, allow_network: bool) -> SandboxPolicy {
         SandboxPolicy {

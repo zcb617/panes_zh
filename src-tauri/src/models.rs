@@ -7,9 +7,91 @@ pub struct WorkspaceDto {
     pub id: String,
     pub name: String,
     pub root_path: String,
+    pub location_kind: String,
+    pub ssh_connection_id: Option<String>,
+    pub connection_display_name: Option<String>,
+    pub connection_enabled: Option<bool>,
+    pub connection_deleted: Option<bool>,
+    pub connection_status: Option<String>,
     pub scan_depth: i64,
     pub created_at: String,
     pub last_opened_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshRemoteDirectoryDto {
+    pub path: String,
+    pub name: String,
+    pub readable: bool,
+    pub enterable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshConnectionDto {
+    pub id: String,
+    pub display_name: String,
+    pub source_kind: String,
+    pub config_alias: Option<String>,
+    pub host_name: String,
+    pub user: String,
+    pub port: u16,
+    pub identity_file: Option<String>,
+    pub host_key_type: String,
+    pub enabled: bool,
+    pub connection_status: String,
+    pub last_connected_at: Option<String>,
+    pub last_error: Option<String>,
+    pub deleted_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshConnectionInput {
+    pub display_name: String,
+    pub host_name: String,
+    pub user: String,
+    pub port: u16,
+    pub identity_file: Option<String>,
+    pub host_key: String,
+    pub config_alias: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshConfigHostDto {
+    pub alias: String,
+    pub host_name: String,
+    pub user: String,
+    pub port: u16,
+    pub identity_file: Option<String>,
+    pub imported: bool,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshConnectionImportResultDto {
+    pub alias: String,
+    pub connection: Option<SshConnectionDto>,
+    pub error: Option<String>,
+    pub restored: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshConnectionTestDto {
+    pub connection_id: String,
+    pub ok: bool,
+    pub os: Option<String>,
+    pub home: Option<String>,
+    pub shell: Option<String>,
+    pub git_version: Option<String>,
+    pub cli_versions: std::collections::BTreeMap<String, String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,6 +385,20 @@ pub struct EngineInfoDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExecutionTargetDto {
+    pub target_key: String,
+    pub kind: String,
+    pub display_name: String,
+    pub connection_id: Option<String>,
+    pub host_name: Option<String>,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+    pub project_path: Option<String>,
+    pub connection_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatProviderUsageDto {
     pub engine_id: String,
     pub name: String,
@@ -590,7 +686,7 @@ pub struct ExtensionSourceDto {
     pub official: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionItemDto {
     pub id: String,
@@ -617,6 +713,16 @@ pub struct ExtensionItemDto {
     pub requires_new_session: bool,
     pub read_only_reason: Option<String>,
     pub warning: Option<String>,
+    #[serde(default)]
+    pub insert_text: Option<String>,
+    #[serde(default)]
+    pub panel: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub search_terms: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -977,6 +1083,7 @@ pub struct GitStashDto {
 #[serde(rename_all = "camelCase")]
 pub struct GitWorktreeDto {
     pub path: String,
+    pub display_path: Option<String>,
     pub head_sha: Option<String>,
     pub branch: Option<String>,
     pub is_main: bool,
@@ -1008,6 +1115,13 @@ pub struct ReadFileResultDto {
     pub content: String,
     pub size_bytes: u64,
     pub is_binary: bool,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteFileResultDto {
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

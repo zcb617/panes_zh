@@ -1,0 +1,330 @@
+use std::{
+    collections::HashMap,
+    ops::Deref,
+    sync::{Arc, LazyLock},
+};
+
+use anyhow::Context;
+use tokio::sync::RwLock;
+
+use crate::{
+    engines::{
+        capabilities_for_engine, codex::CodexEngine, map_engine_capabilities, map_model_info,
+        Engine, ModelInfo, ThreadSyncSnapshot,
+    },
+    models::{EngineInfoDto, ThreadDto, WorkspaceDto},
+    ssh::cli_tunnel_registry,
+};
+
+#[derive(Clone)]
+struct RemoteCodexRuntimeEntry {
+    local_port: u16,
+    engine: Arc<CodexEngine>,
+}
+
+static REMOTE_CODEX_RUNTIMES: LazyLock<RwLock<HashMap<String, RemoteCodexRuntimeEntry>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+#[derive(Clone)]
+enum RemoteCodexUseKind {
+    Temporary,
+    Persistent { thread_id: String },
+}
+
+pub struct RemoteCodexServiceUse {
+    connection_id: String,
+    engine: Arc<CodexEngine>,
+    kind: RemoteCodexUseKind,
+    released: bool,
+}
+
+impl RemoteCodexServiceUse {
+    pub fn engine(&self) -> &Arc<CodexEngine> {
+        &self.engine
+    }
+
+    pub async fn release(mut self) {
+        self.released = true;
+        release_service_use(&self.connection_id, &self.kind, &self.engine).await;
+    }
+}
+
+impl Deref for RemoteCodexServiceUse {
+    type Target = CodexEngine;
+
+    fn deref(&self) -> &Self::Target {
+        self.engine.as_ref()
+    }
+}
+
+impl Drop for RemoteCodexServiceUse {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let connection_id = self.connection_id.clone();
+        let kind = self.kind.clone();
+        let engine = self.engine.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                release_service_use(&connection_id, &kind, &engine).await;
+            });
+        }
+    }
+}
+
+pub fn validate_remote_codex_workspace(workspace: &WorkspaceDto) -> anyhow::Result<&str> {
+    anyhow::ensure!(
+        workspace.location_kind == "ssh",
+        "workspace is not an SSH remote project"
+    );
+    anyhow::ensure!(
+        workspace.connection_deleted != Some(true),
+        "SSH 连接已删除，请先恢复连接"
+    );
+    anyhow::ensure!(
+        workspace.connection_enabled != Some(false),
+        "SSH 连接已禁用"
+    );
+    workspace
+        .ssh_connection_id
+        .as_deref()
+        .context("远端项目未绑定 SSH 连接")
+}
+
+pub async fn acquire_turn(
+    workspace: &WorkspaceDto,
+    thread_id: &str,
+) -> anyhow::Result<RemoteCodexServiceUse> {
+    let connection_id = validate_remote_codex_workspace(workspace)?.to_string();
+    let tunnel =
+        cli_tunnel_registry::acquire_persistent_service_use(&connection_id, "codex", thread_id)
+            .await
+            .with_context(|| remote_codex_context(workspace, "启动持续对话"))?;
+
+    match runtime_for_tunnel(&connection_id, tunnel.local_port()).await {
+        Ok(engine) => Ok(RemoteCodexServiceUse {
+            connection_id,
+            engine,
+            kind: RemoteCodexUseKind::Persistent {
+                thread_id: thread_id.to_string(),
+            },
+            released: false,
+        }),
+        Err(error) => {
+            let _ = cli_tunnel_registry::release_persistent_service_use(
+                &connection_id,
+                "codex",
+                thread_id,
+            )
+            .await;
+            Err(error)
+        }
+    }
+}
+
+pub async fn model_infos(
+    workspace: &WorkspaceDto,
+    active_use: Option<&RemoteCodexServiceUse>,
+) -> anyhow::Result<Vec<ModelInfo>> {
+    if let Some(service_use) = active_use {
+        return Ok(service_use.engine().list_models_runtime().await);
+    }
+    let service_use = acquire_temporary(workspace).await?;
+    let models = service_use.engine().list_models_runtime().await;
+    service_use.release().await;
+    Ok(models)
+}
+
+pub async fn engine_info(
+    workspace: &WorkspaceDto,
+    active_use: Option<&RemoteCodexServiceUse>,
+) -> anyhow::Result<EngineInfoDto> {
+    let models = model_infos(workspace, active_use).await?;
+    Ok(EngineInfoDto {
+        id: "codex".to_string(),
+        name: "Codex".to_string(),
+        models: models.into_iter().map(map_model_info).collect(),
+        capabilities: map_engine_capabilities(capabilities_for_engine("codex")),
+    })
+}
+
+pub async fn set_thread_archived(
+    workspace: &WorkspaceDto,
+    engine_thread_id: &str,
+    archived: bool,
+) -> anyhow::Result<()> {
+    let service_use = acquire_temporary(workspace).await?;
+    let result = if archived {
+        Engine::archive_thread(service_use.engine().as_ref(), engine_thread_id).await
+    } else {
+        Engine::unarchive_thread(service_use.engine().as_ref(), engine_thread_id).await
+    };
+    service_use.release().await;
+    result
+}
+
+pub async fn read_thread_sync_snapshot(
+    workspace: &WorkspaceDto,
+    engine_thread_id: &str,
+) -> anyhow::Result<ThreadSyncSnapshot> {
+    let service_use = acquire_temporary(workspace).await?;
+    let result = service_use
+        .engine()
+        .read_thread_sync_snapshot(engine_thread_id)
+        .await;
+    service_use.release().await;
+    result
+}
+
+pub async fn respond_to_approval(
+    workspace: &WorkspaceDto,
+    thread: &ThreadDto,
+    approval_id: &str,
+    response: serde_json::Value,
+    route: Option<crate::engines::ApprovalRequestRoute>,
+) -> anyhow::Result<()> {
+    let connection_id = validate_remote_codex_workspace(workspace)?;
+    let tunnel = cli_tunnel_registry::get(connection_id, "codex")
+        .await
+        .with_context(|| remote_codex_context(workspace, "回复审批"))?;
+    let engine = runtime_for_tunnel(connection_id, tunnel.local_port()).await?;
+    Engine::respond_to_approval(engine.as_ref(), approval_id, response, route)
+        .await
+        .with_context(|| format!("SSH 远端 Codex 审批回复失败: thread_id={}", thread.id))
+}
+
+pub async fn steer_message(
+    workspace: &WorkspaceDto,
+    thread: &ThreadDto,
+    engine_thread_id: &str,
+    client_steer_id: &str,
+    content: &str,
+    input: crate::engines::TurnInput,
+) -> anyhow::Result<crate::engines::EngineSteerReceipt> {
+    let connection_id = validate_remote_codex_workspace(workspace)?;
+    let tunnel = cli_tunnel_registry::get(connection_id, "codex")
+        .await
+        .with_context(|| remote_codex_context(workspace, "追加消息"))?;
+    let engine = runtime_for_tunnel(connection_id, tunnel.local_port()).await?;
+    Engine::steer_message(
+        engine.as_ref(),
+        engine_thread_id,
+        client_steer_id,
+        content,
+        input,
+    )
+    .await
+    .with_context(|| format!("SSH 远端 Codex 追加消息失败: thread_id={}", thread.id))
+}
+
+pub async fn interrupt(workspace: &WorkspaceDto, thread: &ThreadDto) -> anyhow::Result<()> {
+    let Some(engine_thread_id) = thread.engine_thread_id.as_deref() else {
+        return Ok(());
+    };
+    let connection_id = validate_remote_codex_workspace(workspace)?;
+    let tunnel = cli_tunnel_registry::get(connection_id, "codex")
+        .await
+        .with_context(|| remote_codex_context(workspace, "取消对话"))?;
+    let engine = runtime_for_tunnel(connection_id, tunnel.local_port()).await?;
+    Engine::interrupt(engine.as_ref(), engine_thread_id)
+        .await
+        .with_context(|| format!("SSH 远端 Codex 取消失败: thread_id={}", thread.id))
+}
+
+// 对话创建和发送直接调用 `Engine` trait；这里不再为单一调用点增加转发函数。
+
+pub(crate) async fn acquire_temporary(
+    workspace: &WorkspaceDto,
+) -> anyhow::Result<RemoteCodexServiceUse> {
+    let connection_id = validate_remote_codex_workspace(workspace)?.to_string();
+    let tunnel = cli_tunnel_registry::acquire_temporary_service_use(&connection_id, "codex")
+        .await
+        .with_context(|| remote_codex_context(workspace, "读取运行时"))?;
+    match runtime_for_tunnel(&connection_id, tunnel.local_port()).await {
+        Ok(engine) => Ok(RemoteCodexServiceUse {
+            connection_id,
+            engine,
+            kind: RemoteCodexUseKind::Temporary,
+            released: false,
+        }),
+        Err(error) => {
+            let _ =
+                cli_tunnel_registry::release_temporary_service_use(&connection_id, "codex").await;
+            Err(error)
+        }
+    }
+}
+
+async fn runtime_for_tunnel(
+    connection_id: &str,
+    local_port: u16,
+) -> anyhow::Result<Arc<CodexEngine>> {
+    if let Some(entry) = REMOTE_CODEX_RUNTIMES.read().await.get(connection_id) {
+        if entry.local_port == local_port {
+            return Ok(entry.engine.clone());
+        }
+    }
+
+    let engine = Arc::new(CodexEngine::new_remote_websocket(format!(
+        "ws://127.0.0.1:{local_port}"
+    )));
+    let mut runtimes = REMOTE_CODEX_RUNTIMES.write().await;
+    if let Some(entry) = runtimes.get(connection_id) {
+        if entry.local_port == local_port {
+            return Ok(entry.engine.clone());
+        }
+    }
+    runtimes.insert(
+        connection_id.to_string(),
+        RemoteCodexRuntimeEntry {
+            local_port,
+            engine: engine.clone(),
+        },
+    );
+    Ok(engine)
+}
+
+async fn release_service_use(
+    connection_id: &str,
+    kind: &RemoteCodexUseKind,
+    engine: &Arc<CodexEngine>,
+) {
+    let result = match kind {
+        RemoteCodexUseKind::Temporary => {
+            cli_tunnel_registry::release_temporary_service_use(connection_id, "codex").await
+        }
+        RemoteCodexUseKind::Persistent { thread_id } => {
+            cli_tunnel_registry::release_persistent_service_use(connection_id, "codex", thread_id)
+                .await
+        }
+    };
+    match result {
+        Ok(true) => {
+            let mut runtimes = REMOTE_CODEX_RUNTIMES.write().await;
+            if runtimes
+                .get(connection_id)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.engine, engine))
+            {
+                runtimes.remove(connection_id);
+            }
+        }
+        Ok(false) => {}
+        Err(error) => {
+            log::warn!(
+                "释放 SSH 远端 Codex 服务占用失败: connection_id={connection_id} error={error:#}"
+            );
+        }
+    }
+}
+
+fn remote_codex_context(workspace: &WorkspaceDto, action: &str) -> String {
+    let connection_name = workspace
+        .connection_display_name
+        .as_deref()
+        .unwrap_or("未命名 SSH 连接");
+    format!(
+        "SSH 远端 Codex {action}失败: connection={connection_name} workspace={}",
+        workspace.name
+    )
+}

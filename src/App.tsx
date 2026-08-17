@@ -1,3 +1,4 @@
+import { emit } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { ThreeColumnLayout } from "./components/layout/ThreeColumnLayout";
 import { CommandPalette } from "./components/shared/CommandPalette";
@@ -17,6 +18,7 @@ import {
   listenCodexRemoteThreadRemoved,
   listenEngineRuntimeUpdated,
   listenMenuAction,
+  listenSshRemoteProjectSessionsRefreshed,
   listenThreadUpdated,
   type CodexRemoteThreadRemovedEvent,
 } from "./lib/ipc";
@@ -134,6 +136,7 @@ function resolveChatNotificationBody(
 export function App() {
   const loadWorkspaces = useWorkspaceStore((s) => s.loadWorkspaces);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const loadEngines = useEngineStore((s) => s.load);
   const engines = useEngineStore((s) => s.engines);
   const applyEngineRuntimeUpdate = useEngineStore((s) => s.applyRuntimeUpdate);
@@ -144,6 +147,9 @@ export function App() {
   const keepAwakeSessionTimer = useKeepAwakeStore((s) => s.state?.sessionRemainingSecs);
   const refreshAllThreads = useThreadStore((s) => s.refreshAllThreads);
   const refreshThreads = useThreadStore((s) => s.refreshThreads);
+  const reloadThreadsFromLocalDatabase = useThreadStore(
+    (s) => s.reloadThreadsFromLocalDatabase,
+  );
   const refreshArchivedThreads = useThreadStore((s) => s.refreshArchivedThreads);
   const applyThreadUpdateLocal = useThreadStore((s) => s.applyThreadUpdateLocal);
   const commandPaletteOpen = useUiStore((s) => s.commandPaletteOpen);
@@ -169,6 +175,7 @@ export function App() {
         ? "Codex"
         : computerControlApproval?.agent ?? "AI";
   const customWindowFrameState = useCustomWindowFrameState();
+  const [workspaceCatalogLoaded, setWorkspaceCatalogLoaded] = useState(false);
 
   useEffect(() => {
     document.addEventListener("contextmenu", preventNativeContextMenu);
@@ -176,15 +183,53 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    void loadWorkspaces();
-    void loadEngines();
+    let disposed = false;
+    void loadWorkspaces().finally(() => {
+      if (!disposed) {
+        setWorkspaceCatalogLoaded(true);
+      }
+    });
     void loadKeepAwake();
     void loadTerminalNotificationSettings();
-  }, [loadWorkspaces, loadEngines, loadKeepAwake, loadTerminalNotificationSettings]);
+    return () => {
+      disposed = true;
+    };
+  }, [loadWorkspaces, loadKeepAwake, loadTerminalNotificationSettings]);
 
   useEffect(() => {
-    void refreshAllThreads(workspaces.map((workspace) => workspace.id));
-  }, [engines, workspaces, refreshAllThreads]);
+    if (!workspaceCatalogLoaded) {
+      return;
+    }
+    void loadEngines(activeWorkspaceId);
+  }, [activeWorkspaceId, loadEngines, workspaceCatalogLoaded]);
+
+  useEffect(() => {
+    const localWorkspaceIds = workspaces
+      .filter((workspace) => workspace.locationKind !== "ssh")
+      .map((workspace) => workspace.id);
+    if (localWorkspaceIds.length > 0) {
+      void refreshAllThreads(localWorkspaceIds);
+    }
+
+    // SSH 项目只展示本地数据库中的缓存；远端扫描由 SSH 专用后端服务完成，
+    // 完成后再通过通知触发同样的数据库重载，绝不能走本地 CLI 发现路线。
+    for (const workspace of workspaces) {
+      if (workspace.locationKind !== "ssh") {
+        continue;
+      }
+      void reloadThreadsFromLocalDatabase(workspace.id).catch((error) => {
+        console.warn(
+          `Failed to load cached SSH remote project sessions for workspace ${workspace.id}:`,
+          error,
+        );
+      });
+    }
+  }, [
+    engines,
+    workspaces,
+    refreshAllThreads,
+    reloadThreadsFromLocalDatabase,
+  ]);
 
   useEffect(() => {
     const hasSessionTimer = keepAwakeSessionTimer != null;
@@ -245,6 +290,43 @@ export function App() {
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
+    void listenSshRemoteProjectSessionsRefreshed(async (event) => {
+      if (useWorkspaceStore.getState().activeWorkspaceId === event.workspaceId) {
+        void loadEngines(event.workspaceId);
+      }
+      try {
+        await reloadThreadsFromLocalDatabase(event.workspaceId);
+      } catch (error) {
+        console.warn(
+          `Failed to reload SSH remote project sessions for workspace ${event.workspaceId}:`,
+          error,
+        );
+      }
+
+      if (event.failedCliIds.length > 0) {
+        toast.warning(
+          `SSH 远端项目会话同步失败：${event.failedCliIds.length} 个 CLI 未能同步。`,
+        );
+      }
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [loadEngines, reloadThreadsFromLocalDatabase]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
     void listenCodexRemoteThreadRemoved((event) => {
       setCodexRemoteThreadPrompts((current) => {
         if (current.some((item) => item.thread.id === event.thread.id)) {
@@ -257,6 +339,9 @@ export function App() {
         fn();
       } else {
         unlisten = fn;
+        void emit("ssh-remote-project-session-sync-ready").catch((error) => {
+          console.warn("Failed to signal SSH remote project session sync readiness:", error);
+        });
       }
     });
 

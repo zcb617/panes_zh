@@ -21,6 +21,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use self::osc_notifications::{TerminalOscNotification, TerminalOscNotificationParser};
+use crate::db::ssh_connections::SshConnectionRecord;
 use crate::models::{
     TerminalEnvSnapshotDto, TerminalIoCountersDto, TerminalLatencySnapshotDto,
     TerminalOutputThrottleSnapshotDto, TerminalRendererDiagnosticsDto, TerminalReplayChunkDto,
@@ -29,6 +30,7 @@ use crate::models::{
 #[cfg(target_os = "windows")]
 use crate::process_utils;
 use crate::runtime_env;
+use crate::ssh::gateway;
 use crate::state::AppState;
 use crate::terminal_notifications::{TerminalNotificationManager, TerminalNotificationSessionEnv};
 
@@ -388,6 +390,7 @@ impl TerminalManager {
         notifications: Arc<TerminalNotificationManager>,
         workspace_id: String,
         cwd: String,
+        remote_connection: Option<SshConnectionRecord>,
         cols: u16,
         rows: u16,
     ) -> anyhow::Result<TerminalSessionDto> {
@@ -395,11 +398,13 @@ impl TerminalManager {
         let notification_env = notifications.session_env(&workspace_id, &session_id).await;
         let workspace_for_spawn = workspace_id.clone();
         let cwd_for_spawn = cwd.clone();
+        let remote_for_spawn = remote_connection.clone();
         let spawned = tokio::task::spawn_blocking(move || {
             spawn_session(
                 session_id,
                 workspace_for_spawn,
                 cwd_for_spawn,
+                remote_for_spawn,
                 cols,
                 rows,
                 notification_env,
@@ -1392,6 +1397,7 @@ fn spawn_session(
     session_id: String,
     workspace_id: String,
     cwd: String,
+    remote_connection: Option<SshConnectionRecord>,
     cols: u16,
     rows: u16,
     notification_env: Option<TerminalNotificationSessionEnv>,
@@ -1406,14 +1412,26 @@ fn spawn_session(
         })
         .context("failed to open terminal pty")?;
 
-    let shell = default_shell();
-    let mut cmd = CommandBuilder::new(shell.clone());
-    cmd.cwd(PathBuf::from(&cwd));
+    let (shell, mut cmd) = if let Some(connection) = remote_connection.as_ref() {
+        let (program, args) = gateway::build_pty_command(connection, &cwd)?;
+        let mut command = CommandBuilder::new(program);
+        for arg in args {
+            command.arg(arg);
+        }
+        (format!("ssh {}", connection.dto.display_name), command)
+    } else {
+        let shell = default_shell();
+        let mut command = CommandBuilder::new(shell.clone());
+        command.cwd(PathBuf::from(&cwd));
+        (shell, command)
+    };
     let env_snapshot = configure_terminal_env(&mut cmd, notification_env.as_ref());
-    #[cfg(not(target_os = "windows"))]
-    {
-        for arg in runtime_env::terminal_shell_args(Path::new(&shell)) {
-            cmd.arg(arg);
+    if remote_connection.is_none() {
+        #[cfg(not(target_os = "windows"))]
+        {
+            for arg in runtime_env::terminal_shell_args(Path::new(&shell)) {
+                cmd.arg(arg);
+            }
         }
     }
     let child = pair
