@@ -497,14 +497,77 @@ impl CliTool for OpenCodeCli {
         engine_thread_id: &str,
     ) -> Result<CliSessionSnapshot> {
         let workspace = self.load_workspace(context).await?;
-        let summary = self
-            .list_workspace_sessions(context, &workspace, None, None)
+        // 旧实现仅作架构迁移留痕，禁止恢复执行：
+        // let summary = self
+        //     .list_workspace_sessions(context, &workspace, None, None)
+        //     .await?
+        //     .into_iter()
+        //     .find(|session| session.engine_thread_id == engine_thread_id)
+        //     .ok_or_else(|| {
+        //         anyhow::anyhow!(
+        //             "OpenCode 会话不属于当前 workspace 或已不存在: {engine_thread_id}"
+        //         )
+        //     })?;
+        // SSH 只能通过 CLI Service Lifecycle 取得 OpenCode 客户端，并且只发一次按 ID 请求。
+        if context.location_kind != CliLocationKind::Ssh {
+            // 本机 OpenCode 允许 workspace 根目录和各仓库目录分别拥有会话；只有明确的
+            // 404 才继续尝试下一个目录，其他错误必须原样返回，不能误报为“会话不存在”。
+            let roots = self.workspace_roots(&workspace).await?;
+            for cwd in roots.iter() {
+                match self
+                    .state
+                    .engines
+                    .read_opencode_remote_session(cwd, engine_thread_id)
+                    .await
+                {
+                    Ok(summary) => {
+                        anyhow::ensure!(
+                            summary.engine_thread_id == engine_thread_id,
+                            "OpenCode 返回了错误的会话 ID: expected={} actual={}",
+                            engine_thread_id,
+                            summary.engine_thread_id
+                        );
+                        anyhow::ensure!(
+                            roots
+                                .iter()
+                                .any(|root| path_utils::paths_equal(root, &summary.cwd)),
+                            "OpenCode 会话目录不属于当前 workspace: {}",
+                            summary.cwd
+                        );
+                        return Ok(Self::map_session(summary, false));
+                    }
+                    Err(error) => {
+                        let is_not_found = error
+                            .downcast_ref::<reqwest::Error>()
+                            .and_then(|cause| cause.status())
+                            .is_some_and(|status| status == reqwest::StatusCode::NOT_FOUND);
+                        if !is_not_found {
+                            return Err(error);
+                        }
+                    }
+                }
+            }
+            anyhow::bail!("OpenCode 会话不属于当前 workspace 或已不存在: {engine_thread_id}");
+        }
+
+        let summary = remote_project_opencode_runtime_service::runtime(&workspace)
             .await?
-            .into_iter()
-            .find(|session| session.engine_thread_id == engine_thread_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!("OpenCode 会话不属于当前 workspace 或已不存在: {engine_thread_id}")
-            })?;
+            .read_session(&workspace.root_path, engine_thread_id)
+            .await?;
+        anyhow::ensure!(
+            summary.engine_thread_id == engine_thread_id,
+            "OpenCode 返回了错误的会话 ID: expected={} actual={}",
+            engine_thread_id,
+            summary.engine_thread_id
+        );
+        let roots = self.workspace_roots(&workspace).await?;
+        anyhow::ensure!(
+            roots
+                .iter()
+                .any(|root| path_utils::paths_equal(root, &summary.cwd)),
+            "OpenCode 会话目录不属于当前 workspace: {}",
+            summary.cwd
+        );
         Ok(Self::map_session(
             summary,
             context.location_kind == CliLocationKind::Ssh,

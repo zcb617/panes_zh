@@ -10,7 +10,7 @@ use std::{
 use anyhow::Context;
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -692,23 +692,68 @@ impl ClaudeRemoteEngine {
         self.ensure_transport().await.map(|_| ())
     }
 
-    async fn validate_remote_session(&self, cwd: &str, session_id: &str) -> anyhow::Result<()> {
-        let sessions = reqwest::Client::new()
-            .get(format!("{}/sessions", self.base_url))
-            .query(&[("cwd", cwd)])
+    /// 通过远端 Claude 按会话 ID读取单个会话摘要。
+    ///
+    /// 该方法只负责 Claude 协议请求；远端服务入口由上层
+    /// `remote_project_claude_runtime_service` 通过 CLI Service Lifecycle 提供。
+    pub async fn read_remote_session(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<RemoteClaudeSession> {
+        let mut url = reqwest::Url::parse(&format!("{}/", self.base_url))
+            .context("构造 SSH 远端 Claude 会话地址失败")?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("SSH 远端 Claude 会话地址不支持路径片段"))?
+            .push("sessions")
+            .push(session_id);
+
+        let response = reqwest::Client::new()
+            .get(url)
             .timeout(REQUEST_TIMEOUT)
             .send()
             .await
-            .context("读取 SSH 远端 Claude 会话失败")?
-            .error_for_status()
-            .context("SSH 远端 Claude 会话读取被拒绝")?
-            .json::<Vec<RemoteClaudeSession>>()
+            .context("读取 SSH 远端 Claude 会话失败")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "SSH 远端 Claude 按 ID 读取失败: HTTP {status} session_id={session_id} detail={body}"
+            );
+        }
+
+        response
+            .json::<RemoteClaudeSession>()
             .await
-            .context("解析 SSH 远端 Claude 会话失败")?;
+            .context("解析 SSH 远端 Claude 会话失败")
+    }
+
+    async fn validate_remote_session(&self, cwd: &str, session_id: &str) -> anyhow::Result<()> {
+        // 旧实现：请求 `/sessions?cwd=...` 列表后匹配 ID 和 cwd。
+        // 该逻辑保留为注释，按 ID 校验必须统一复用 read_remote_session：
+        // let sessions = reqwest::Client::new()
+        //     .get(format!("{}/sessions", self.base_url))
+        //     .query(&[("cwd", cwd)])
+        //     .timeout(REQUEST_TIMEOUT)
+        //     .send()
+        //     .await
+        //     .context("读取 SSH 远端 Claude 会话失败")?
+        //     .error_for_status()
+        //     .context("SSH 远端 Claude 会话读取被拒绝")?
+        //     .json::<Vec<RemoteClaudeSession>>()
+        //     .await
+        //     .context("解析 SSH 远端 Claude 会话失败")?;
+        // anyhow::ensure!(
+        //     sessions
+        //         .iter()
+        //         .any(|session| session.id == session_id && session.cwd == cwd),
+        //     "SSH 远端 Claude 会话不存在或目录不匹配；不会在远端或本机创建替代会话: session_id={session_id} cwd={cwd}"
+        // );
+
+        let session = self.read_remote_session(session_id).await?;
         anyhow::ensure!(
-            sessions
-                .iter()
-                .any(|session| session.id == session_id && session.cwd == cwd),
+            session.id == session_id
+                && session.session_id == session_id
+                && crate::path_utils::paths_equal(&session.cwd, cwd),
             "SSH 远端 Claude 会话不存在或目录不匹配；不会在远端或本机创建替代会话: session_id={session_id} cwd={cwd}"
         );
         Ok(())
@@ -735,10 +780,21 @@ impl ClaudeRemoteEngine {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct RemoteClaudeSession {
-    id: String,
-    cwd: String,
+/// Claude 远端按 ID 接口返回的单个会话摘要。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RemoteClaudeSession {
+    /// 远端会话主标识。
+    pub id: String,
+    /// 远端接口显式返回的会话标识。
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    /// 会话所属的远端工作目录。
+    pub cwd: String,
+    /// 会话标题。
+    pub title: String,
+    /// 会话最后更新时间。
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
 }
 
 #[async_trait]
@@ -1106,6 +1162,8 @@ impl Engine for ClaudeRemoteEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn remote_event_routes_request_identity() {
@@ -1127,5 +1185,82 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(event, RemoteClaudeEvent::Models { models, .. } if models.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn read_remote_session_uses_id_path_without_cwd_query() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let session_id = "11111111-1111-4111-8111-111111111111";
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with(&format!("GET /sessions/{session_id} HTTP/1.1")));
+            assert!(!request.contains("cwd="));
+            let body = format!(
+                r#"{{"id":"{session_id}","sessionId":"{session_id}","cwd":"/work/project","title":"检查远端项目","updatedAt":"2026-08-19T00:00:00.000Z"}}"#
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let engine = ClaudeRemoteEngine::new(format!("http://{address}"));
+        let session = engine.read_remote_session(session_id).await.unwrap();
+        assert_eq!(session.id, session_id);
+        assert_eq!(session.session_id, session_id);
+        assert_eq!(session.cwd, "/work/project");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_remote_session_preserves_http_status_and_body() {
+        for (status, reason, detail) in [
+            (400, "Bad Request", "invalid session id"),
+            (404, "Not Found", "session not found"),
+            (409, "Conflict", "multiple session files"),
+            (500, "Internal Server Error", "session summary unavailable"),
+        ] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let detail_for_server = detail.to_string();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).await.unwrap();
+                let body = format!(r#"{{"error":"{detail_for_server}"}}"#);
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            });
+
+            let engine = ClaudeRemoteEngine::new(format!("http://{address}"));
+            let error = engine
+                .read_remote_session("22222222-2222-4222-8222-222222222222")
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&format!("HTTP {status} {reason}")));
+            assert!(error.contains(detail));
+            server.await.unwrap();
+        }
     }
 }

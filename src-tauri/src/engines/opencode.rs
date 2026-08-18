@@ -1439,13 +1439,30 @@ impl OpenCodeEngine {
     ) -> Result<OpenCodeRemoteSessionSummary> {
         let server = self.ensure_server(cwd).await?;
         let result = async {
+            // 旧实现仅作架构迁移留痕，禁止恢复执行：
+            // let session = self
+            //     .request(
+            //         server.as_ref(),
+            //         reqwest::Method::GET,
+            //         &format!("/session/{session_id}"),
+            //     )
+            //     .query(&[("directory", cwd)])
+            //     .send()
+            //     .await?
+            //     .error_for_status()
+            //     .context("failed to read OpenCode session")?
+            //     .json::<OpenCodeSessionRecord>()
+            //     .await
+            //     .context("failed to parse OpenCode session")?;
+            // OpenCode 按 ID 查询只需要路径和现有 Basic 认证；这里不能附加目录头或 query。
+            let url = format!(
+                "{}/session/{session_id}",
+                server.base_url.trim_end_matches('/')
+            );
             let session = self
-                .request(
-                    server.as_ref(),
-                    reqwest::Method::GET,
-                    &format!("/session/{session_id}"),
-                )
-                .query(&[("directory", cwd)])
+                .http
+                .request(reqwest::Method::GET, url)
+                .headers(auth_headers(&server.password))
                 .send()
                 .await?
                 .error_for_status()
@@ -3612,6 +3629,19 @@ mod tests {
             Some("/var/work/project-a")
         );
         assert!(request.headers().contains_key(AUTHORIZATION));
+
+        let read_request = engine
+            .http
+            .request(
+                reqwest::Method::GET,
+                "http://127.0.0.1:43101/session/ses_test",
+            )
+            .headers(auth_headers("runtime-secret"))
+            .build()
+            .unwrap();
+        assert_eq!(read_request.url().path(), "/session/ses_test");
+        assert!(read_request.url().query().is_none());
+        assert!(!read_request.headers().contains_key("X-OpenCode-Directory"));
     }
 
     #[test]

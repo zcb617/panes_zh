@@ -627,13 +627,72 @@ impl CliTool for ClaudeCodeCli {
         context: &CliExecutionContext,
         engine_thread_id: &str,
     ) -> Result<CliSessionSnapshot> {
-        self.list_sessions(context, None, Some(false))
+        // 旧实现：先读取当前 workspace 的会话列表，再在内存中按 ID 查找。
+        // 该逻辑保留为注释，不能重新启用为 SSH 远端按 ID 查询的后备路径：
+        // self.list_sessions(context, None, Some(false))
+        //     .await?
+        //     .into_iter()
+        //     .find(|session| session.engine_thread_id == engine_thread_id)
+        //     .ok_or_else(|| {
+        //         anyhow::anyhow!(
+        //             "Claude Code 会话不存在或目录不匹配: session_id={engine_thread_id}"
+        //         )
+        //     })
+        //
+        // 本机行为保持原状；SSH 远端只能使用 Claude 自己的按 ID 协议请求，
+        // 不能在远端失败后回退本机或旧的列表查询。
+        if context.location_kind == CliLocationKind::Local {
+            return self
+                .list_sessions(context, None, Some(false))
+                .await?
+                .into_iter()
+                .find(|session| session.engine_thread_id == engine_thread_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Claude Code 会话不存在或目录不匹配: session_id={engine_thread_id}"
+                    )
+                });
+        }
+
+        let workspace = self.load_workspace(context).await?;
+        let session = remote_project_claude_runtime_service::runtime(&workspace)
             .await?
-            .into_iter()
-            .find(|session| session.engine_thread_id == engine_thread_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!("Claude Code 会话不存在或目录不匹配: session_id={engine_thread_id}")
-            })
+            .read_remote_session(engine_thread_id)
+            .await?;
+        anyhow::ensure!(
+            session.id == engine_thread_id && session.session_id == engine_thread_id,
+            "SSH 远端 Claude 返回的会话 ID 与请求不一致: requested={engine_thread_id} id={} sessionId={}",
+            session.id,
+            session.session_id
+        );
+        anyhow::ensure!(
+            path_utils::is_path_within_root(&session.cwd, &workspace.root_path),
+            "SSH 远端 Claude 会话不属于当前 workspace: session_id={engine_thread_id} cwd={} workspace_root={}",
+            session.cwd,
+            workspace.root_path
+        );
+        let remote_metadata =
+            serde_json::to_value(&session).context("序列化 SSH 远端 Claude 会话元数据失败")?;
+
+        Ok(CliSessionSnapshot {
+            engine_thread_id: session.id.clone(),
+            title: session.title.clone(),
+            preview: None,
+            cwd: session.cwd.clone(),
+            model_id: "unknown".to_string(),
+            created_at: None,
+            updated_at: Some(session.updated_at.clone()),
+            source_kind: Some("claude".to_string()),
+            raw_status: Some("idle".to_string()),
+            active_flags: Vec::new(),
+            status: ThreadStatusDto::Idle,
+            archived: false,
+            metadata: json!({
+                "sshRemote": true,
+                "claudeRemoteCwd": session.cwd.clone(),
+                "claudeRemote": remote_metadata,
+            }),
+        })
     }
 
     async fn acquire_turn(&self, context: &CliExecutionContext, thread: &ThreadDto) -> Result<()> {

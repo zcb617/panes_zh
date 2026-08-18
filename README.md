@@ -268,7 +268,7 @@ Git is recommended for the repo-management features, but the app can still launc
 ```bash
 pnpm tauri:dev          # full desktop app in dev mode
 pnpm tauri:build        # native desktop bundles
-
+pnpm tauri:build --no-bundle # 只生成panes.exe程序，不制作安装包
 pnpm dev                # frontend-only dev server
 pnpm build              # frontend production build
 pnpm test               # Vitest suite
