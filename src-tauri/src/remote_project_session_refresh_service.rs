@@ -9,9 +9,11 @@ use std::{
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures::{SinkExt, StreamExt};
+use rusqlite::{params_from_iter, types::Value as SqlValue};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use uuid::Uuid;
 
 use crate::{
     cli_tools::{factory::CliToolFactory, CliExecutionContext, CliTool},
@@ -21,7 +23,7 @@ use crate::{
         SshRemoteProjectSessionsRefreshedEvent,
     },
     models::{ThreadStatusDto, WorkspaceDto},
-    path_utils,
+    path_utils, runtime_env,
     ssh::{
         cli_service_lifecycle,
         cli_tunnel_registry::{self, SshCliTunnel},
@@ -318,6 +320,81 @@ async fn persist_sessions(
     engine_id: &str,
     sessions: Vec<RemoteSessionSnapshot>,
 ) -> Result<()> {
+    if sessions.is_empty() {
+        return Ok(());
+    }
+
+    if engine_id == "claude" {
+        // Claude Code 启动同步只负责导入本地尚不存在的会话。把整批远端数据
+        // 一次交给 SQLite，通过 NOT EXISTS 在 INSERT 前排除已有记录；这里不
+        // 做前置 SELECT、不逐条查库，也不在 Rust 中维护已有 ID 集合。
+        let value_groups = vec!["(?, ?, ?, ?, ?, ?, ?, ?)"; sessions.len()].join(", ");
+        let sql = format!(
+            r#"
+            WITH remote_sessions (
+                id, engine_thread_id, model_id, title, status,
+                engine_metadata_json, last_activity_at, created_at
+            ) AS (VALUES {value_groups})
+            INSERT INTO threads (
+                id, workspace_id, repo_id, engine_id, model_id, engine_thread_id,
+                engine_metadata_json, title, status, last_activity_at, created_at
+            )
+            SELECT
+                remote.id, ?, NULL, 'claude', remote.model_id, remote.engine_thread_id,
+                remote.engine_metadata_json, remote.title, remote.status,
+                CASE
+                    WHEN remote.last_activity_at <> '' THEN remote.last_activity_at
+                    ELSE remote.created_at
+                END,
+                remote.created_at
+            FROM remote_sessions AS remote
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM threads AS local
+                WHERE local.workspace_id = ?
+                  AND local.engine_id = 'claude'
+                  AND local.engine_thread_id = remote.engine_thread_id
+            )
+            "#
+        );
+        let mut bind_values = Vec::with_capacity(sessions.len() * 8 + 2);
+        for session in sessions {
+            let model_id = if session.model_id.trim().is_empty() {
+                "unknown".to_string()
+            } else {
+                session.model_id.trim().to_string()
+            };
+            let created_at = runtime_env::system_time_rfc3339();
+            bind_values.extend([
+                SqlValue::Text(Uuid::new_v4().to_string()),
+                SqlValue::Text(session.engine_thread_id),
+                SqlValue::Text(model_id),
+                SqlValue::Text(session.title),
+                SqlValue::Text(session.status.as_str().to_string()),
+                SqlValue::Text(session.metadata.to_string()),
+                SqlValue::Text(session.updated_at.unwrap_or_default()),
+                SqlValue::Text(created_at),
+            ]);
+        }
+        bind_values.push(SqlValue::Text(workspace.id.clone()));
+        bind_values.push(SqlValue::Text(workspace.id.clone()));
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = db.connect()?;
+            let tx = conn
+                .transaction()
+                .context("failed begin Claude remote thread import transaction")?;
+            tx.execute(&sql, params_from_iter(bind_values))
+                .context("failed insert Claude remote thread snapshots")?;
+            tx.commit()
+                .context("failed commit Claude remote thread import transaction")?;
+            Ok(())
+        })
+        .await
+        .context("Claude remote thread import task failed")??;
+        return Ok(());
+    }
+
     for session in sessions {
         let workspace_id = workspace.id.clone();
         let engine_id = engine_id.to_string();
@@ -655,6 +732,274 @@ fn status_from_value(value: Option<&Value>) -> ThreadStatusDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use rusqlite::params;
+
+    fn test_database_and_workspace() -> (Database, WorkspaceDto) {
+        let path = std::env::temp_dir().join(format!("panes-claude-refresh-{}.db", Uuid::new_v4()));
+        let db = Database::open(path).expect("failed to create test database");
+        let workspace_id = format!("workspace-{}", Uuid::new_v4());
+        let root_path = format!("/tmp/panes-claude-refresh-{}", Uuid::new_v4());
+        let conn = db.connect().expect("failed to connect test database");
+        conn.execute(
+            "INSERT INTO workspaces (id, name, root_path, location_kind)
+             VALUES (?1, ?2, ?3, 'local')",
+            params![workspace_id, "Test workspace", root_path],
+        )
+        .expect("failed to insert test workspace");
+        let workspace = WorkspaceDto {
+            id: workspace_id,
+            name: "Test workspace".to_string(),
+            root_path,
+            location_kind: "ssh".to_string(),
+            ssh_connection_id: Some("test-connection".to_string()),
+            connection_display_name: None,
+            connection_enabled: Some(true),
+            connection_deleted: Some(false),
+            connection_status: Some("ok".to_string()),
+            scan_depth: 3,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            last_opened_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        (db, workspace)
+    }
+
+    fn test_snapshot(engine_thread_id: &str, title: &str) -> RemoteSessionSnapshot {
+        RemoteSessionSnapshot {
+            engine_thread_id: engine_thread_id.to_string(),
+            title: title.to_string(),
+            cwd: "/tmp/project".to_string(),
+            model_id: String::new(),
+            updated_at: Some("2026-08-18T10:00:00Z".to_string()),
+            status: ThreadStatusDto::Idle,
+            metadata: json!({"remote": true}),
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_batch_import_inserts_all_new_sessions() {
+        let (db, workspace) = test_database_and_workspace();
+        let snapshots = vec![
+            test_snapshot("claude-new-1", "first"),
+            test_snapshot("claude-new-2", "second"),
+        ];
+
+        persist_sessions(Arc::new(db.clone()), &workspace, "claude", snapshots)
+            .await
+            .expect("Claude batch import should succeed");
+
+        let conn = db.connect().expect("failed to connect test database");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM threads
+                 WHERE workspace_id = ?1 AND engine_id = 'claude'",
+                params![workspace.id],
+                |row| row.get(0),
+            )
+            .expect("failed to count imported Claude sessions");
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn claude_batch_import_accepts_remote_limit_of_500_sessions() {
+        let (db, workspace) = test_database_and_workspace();
+        let snapshots: Vec<_> = (0..500)
+            .map(|index| {
+                test_snapshot(
+                    &format!("claude-batch-{index}"),
+                    &format!("batch title {index}"),
+                )
+            })
+            .collect();
+
+        persist_sessions(Arc::new(db.clone()), &workspace, "claude", snapshots)
+            .await
+            .expect("Claude 500-session batch import should succeed");
+
+        let conn = db.connect().expect("failed to connect test database");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM threads
+                 WHERE workspace_id = ?1 AND engine_id = 'claude'",
+                params![workspace.id],
+                |row| row.get(0),
+            )
+            .expect("failed to count 500 imported Claude sessions");
+        assert_eq!(count, 500);
+    }
+
+    #[tokio::test]
+    async fn claude_batch_import_skips_existing_archived_and_unarchived_sessions() {
+        let (db, workspace) = test_database_and_workspace();
+        let conn = db.connect().expect("failed to connect test database");
+        conn.execute(
+            "INSERT INTO threads (
+                 id, workspace_id, engine_id, model_id, engine_thread_id,
+                 engine_metadata_json, title, status, archived_at,
+                 created_at, last_activity_at
+             ) VALUES (?1, ?2, 'claude', 'local-model', 'claude-existing',
+                       ?3, 'local-title', 'completed', ?4, ?5, ?6)",
+            params![
+                "local-thread-id",
+                workspace.id,
+                r#"{"local":true}"#,
+                "2026-08-17T10:00:00Z",
+                "2026-08-16T10:00:00Z",
+                "2026-08-16T11:00:00Z",
+            ],
+        )
+        .expect("failed to insert existing Claude session");
+        conn.execute(
+            "INSERT INTO threads (
+                 id, workspace_id, engine_id, model_id, engine_thread_id,
+                 engine_metadata_json, title, status, archived_at,
+                 created_at, last_activity_at
+             ) VALUES (?1, ?2, 'claude', 'local-active-model', 'claude-existing-active',
+                       ?3, 'local-active-title', 'idle', NULL, ?4, ?5)",
+            params![
+                "local-active-thread-id",
+                workspace.id,
+                r#"{"local":true,"active":true}"#,
+                "2026-08-15T10:00:00Z",
+                "2026-08-15T11:00:00Z",
+            ],
+        )
+        .expect("failed to insert active existing Claude session");
+        drop(conn);
+
+        let mut existing = test_snapshot("claude-existing", "remote-title");
+        existing.model_id = "remote-model".to_string();
+        existing.status = ThreadStatusDto::Streaming;
+        let mut active_existing = test_snapshot("claude-existing-active", "remote-active-title");
+        active_existing.model_id = "remote-active-model".to_string();
+        active_existing.status = ThreadStatusDto::Completed;
+        let snapshots = vec![
+            existing,
+            active_existing,
+            test_snapshot("claude-new", "new title"),
+        ];
+        persist_sessions(Arc::new(db.clone()), &workspace, "claude", snapshots)
+            .await
+            .expect("Claude mixed batch import should succeed");
+
+        let conn = db.connect().expect("failed to connect test database");
+        let existing_row: (
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT title, model_id, status, archived_at, created_at, last_activity_at,
+                        COALESCE(engine_metadata_json, '')
+                 FROM threads
+                 WHERE workspace_id = ?1 AND engine_thread_id = 'claude-existing'",
+                params![workspace.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .expect("failed to read existing Claude session");
+        assert_eq!(existing_row.0, "local-title");
+        assert_eq!(existing_row.1, "local-model");
+        assert_eq!(existing_row.2, "completed");
+        assert_eq!(existing_row.3.as_deref(), Some("2026-08-17T10:00:00Z"));
+        assert_eq!(existing_row.4, "2026-08-16T10:00:00Z");
+        assert_eq!(existing_row.5, "2026-08-16T11:00:00Z");
+        assert_eq!(existing_row.6, r#"{"local":true}"#);
+
+        let active_existing_row: (
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT title, model_id, status, archived_at, created_at, last_activity_at,
+                        COALESCE(engine_metadata_json, '')
+                 FROM threads
+                 WHERE workspace_id = ?1 AND engine_thread_id = 'claude-existing-active'",
+                params![workspace.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .expect("failed to read active existing Claude session");
+        assert_eq!(active_existing_row.0, "local-active-title");
+        assert_eq!(active_existing_row.1, "local-active-model");
+        assert_eq!(active_existing_row.2, "idle");
+        assert_eq!(active_existing_row.3, None);
+        assert_eq!(active_existing_row.4, "2026-08-15T10:00:00Z");
+        assert_eq!(active_existing_row.5, "2026-08-15T11:00:00Z");
+        assert_eq!(active_existing_row.6, r#"{"local":true,"active":true}"#);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM threads
+                 WHERE workspace_id = ?1 AND engine_id = 'claude'",
+                params![workspace.id],
+                |row| row.get(0),
+            )
+            .expect("failed to count mixed Claude sessions");
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn non_claude_batch_persistence_keeps_existing_upsert_behavior() {
+        let (db, workspace) = test_database_and_workspace();
+        persist_sessions(
+            Arc::new(db.clone()),
+            &workspace,
+            "codex",
+            vec![test_snapshot("codex-session", "first title")],
+        )
+        .await
+        .expect("Codex import should succeed");
+        persist_sessions(
+            Arc::new(db.clone()),
+            &workspace,
+            "codex",
+            vec![test_snapshot("codex-session", "updated title")],
+        )
+        .await
+        .expect("Codex refresh should succeed");
+
+        let conn = db.connect().expect("failed to connect test database");
+        let (count, title): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(title) FROM threads
+                 WHERE workspace_id = ?1 AND engine_id = 'codex'",
+                params![workspace.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("failed to read Codex session");
+        assert_eq!(count, 1);
+        assert_eq!(title, "updated title");
+    }
+
     #[test]
     fn codex_parser_filters_by_cwd() {
         let value = json!({"thread":{"id":"same","cwd":"/a","createdAt":1}});

@@ -874,6 +874,9 @@ impl CliTool for ClaudeCodeCli {
     ) -> Result<()> {
         self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
+            // Claude Code 的 SSH 服务没有普通会话归档协议。这里仍然通过统一
+            // CliTool 接口返回成功，由上层公共流程随后写入 Panes 本地
+            // `threads.archived_at`；不能在此处通过远端运行时发送归档请求。
             Ok(())
         } else {
             self.state.engines.archive_thread(thread).await
@@ -1122,5 +1125,109 @@ impl CliTool for ClaudeCodeCli {
     ) -> Result<()> {
         self.load_workspace(context).await?;
         Err(Self::unsupported("Codex 代码审查"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, sync::Arc};
+
+    use super::*;
+    use crate::{
+        config::app_config::AppConfig,
+        engines::EngineManager,
+        git::{repo::FileTreeCache, watcher::GitWatcherManager},
+        models::SshConnectionInput,
+        power::KeepAwakeManager,
+        state::{AppState, TurnManager},
+        terminal::TerminalManager,
+        terminal_notifications::TerminalNotificationManager,
+    };
+    use uuid::Uuid;
+
+    fn test_app_state() -> AppState {
+        let root = std::env::temp_dir().join(format!("panes-claude-archive-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("failed to create test root");
+        let db = crate::db::Database::open(root.join("workspaces.db"))
+            .expect("failed to create test database");
+        AppState {
+            db,
+            config: Arc::new(AppConfig::default()),
+            config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            engines: Arc::new(EngineManager::new()),
+            git_watchers: Arc::new(GitWatcherManager::default()),
+            terminals: Arc::new(TerminalManager::default()),
+            notifications: Arc::new(TerminalNotificationManager::default()),
+            keep_awake: Arc::new(KeepAwakeManager::new()),
+            turns: Arc::new(TurnManager::default()),
+            file_tree_cache: Arc::new(FileTreeCache::new()),
+            extension_catalog_refreshes: Arc::new(
+                crate::extensions::refresh::ExtensionCatalogRefreshManager::default(),
+            ),
+            scheduled_tasks: Arc::new(crate::scheduled_tasks::ScheduledTaskManager::new()),
+            computer_control_service: Arc::new(
+                crate::computer_control_service::ComputerControlService::default(),
+            ),
+            remote_access: Arc::new(crate::remote::RemoteTunnelManager::default()),
+            ssh_monitor: Arc::new(crate::ssh::monitor::SshConnectionMonitor::default()),
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_archive_hook_returns_without_remote_archive_service() {
+        let state = test_app_state();
+        let connection_id = format!("ssh-test-{}", Uuid::new_v4());
+        let input = SshConnectionInput {
+            display_name: "Claude archive test SSH".to_string(),
+            host_name: "192.0.2.10".to_string(),
+            user: "tester".to_string(),
+            port: 22,
+            identity_file: None,
+            host_key: String::new(),
+            config_alias: None,
+        };
+        let connection = crate::db::ssh_connections::insert(
+            &state.db,
+            &connection_id,
+            "manual",
+            &input,
+            "ssh-ed25519",
+            "test-key",
+        )
+        .expect("failed to create test SSH connection");
+        crate::db::ssh_connections::set_status_if_current(
+            &state.db,
+            &connection.id,
+            &connection.updated_at,
+            crate::db::ssh_connections::STATUS_OK,
+            None,
+        )
+        .expect("failed to mark test SSH connection ready");
+        let workspace = crate::db::workspaces::create_ssh_workspace(
+            &state.db,
+            &connection_id,
+            "Claude archive test workspace",
+            &format!("/tmp/panes-claude-archive-{}", Uuid::new_v4()),
+            None,
+        )
+        .expect("failed to create test SSH workspace");
+        let thread = crate::db::threads::create_thread(
+            &state.db,
+            &workspace.id,
+            None,
+            "claude",
+            "claude-sonnet-4-6",
+            "Claude archive test thread",
+        )
+        .expect("failed to create test Claude thread");
+        let context = CliExecutionContext::from_workspace(&workspace)
+            .expect("failed to build Claude SSH execution context");
+
+        // 故意不登记 Claude 远端服务；若实现访问了远端归档协议，统一接口调用应失败。
+        let cli = ClaudeCodeCli::new(state);
+        let cli: &dyn CliTool = &cli;
+        cli.archive_thread(&context, &thread, "remote-claude-thread")
+            .await
+            .expect("SSH Claude archive hook should not require remote service");
     }
 }

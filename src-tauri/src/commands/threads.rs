@@ -1698,6 +1698,8 @@ pub async fn archive_thread(state: State<'_, AppState>, thread_id: String) -> Re
                 log::warn!("failed to interrupt Claude thread before archive: {error:#}");
             }
             if thread.engine_thread_id.is_some() {
+                // 归档必须经过统一 CliTool 接口；SSH Claude 的具体实现不访问远端归档协议，
+                // 成功返回后才由下面的公共数据库流程写入本地 archived_at。
                 cli.archive_thread(&context, &thread, engine_thread_id)
                     .await
                     .map_err(err_to_string)?;
