@@ -57,6 +57,8 @@ const STREAM_EVENT_COALESCE_IDLE_FLUSH_INTERVAL: Duration = Duration::from_milli
 const STREAM_DB_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const STREAM_DB_BLOCKS_FLUSH_INTERVAL: Duration = Duration::from_millis(900);
 const ENGINE_EVENT_QUEUE_CAPACITY: usize = 1_280;
+const TURN_EVENT_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
+const TURN_TASK_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const ACTION_OUTPUT_MAX_CHUNKS: usize = 240;
 const ENGINE_EVENT_LOG_ACTION_OUTPUT_MAX_CHARS: usize = 4_096;
 const TRUNCATED_SUFFIX: &str = "\n... [truncated]";
@@ -2459,15 +2461,14 @@ async fn run_turn(
     let thread_for_engine = thread.clone();
     let input_for_engine = turn_input.clone();
     let engine_thread_for_engine = engine_thread_id.clone();
-    let cancellation_for_engine = cancellation.clone();
+    let engine_cancellation = CancellationToken::new();
+    let cancellation_for_engine = engine_cancellation.clone();
     let cli_turn = codex_cli.or(opencode_cli).or(claude_cli);
-    let cli_turn_for_join_error = cli_turn.clone();
-    let engines_for_join_error = engines.clone();
-    let thread_for_join_error = thread_for_engine.clone();
-    let engine_thread_for_join_error = engine_thread_for_engine.clone();
+    let cli_turn_for_engine = cli_turn.clone();
+    let engines_for_engine = engines.clone();
 
-    let engine_task = tokio::spawn(async move {
-        if let Some((cli, context)) = cli_turn {
+    let mut engine_task = tokio::spawn(async move {
+        if let Some((cli, context)) = cli_turn_for_engine {
             let send_result = cli
                 .send_message(
                     &context,
@@ -2478,6 +2479,9 @@ async fn run_turn(
                     cancellation_for_engine,
                 )
                 .await;
+            /*
+             * 旧实现只在 send_message 返回 Err 时自行记录并取消，无法覆盖同一轮中的
+             * 事件接收、超时和任务退出异常。保留原代码，统一异常处理移到 run_turn。
             if let Err(send_error) = send_result {
                 log::error!(
                     "chat turn failed: engine_id={}, thread_id={}, engine_thread_id={}, error={send_error:#}",
@@ -2506,8 +2510,10 @@ async fn run_turn(
                 };
             }
             Ok(())
+             */
+            send_result
         } else {
-            let send_result = engines
+            let send_result = engines_for_engine
                 .send_message(
                     &thread_for_engine,
                     &engine_thread_for_engine,
@@ -2516,6 +2522,8 @@ async fn run_turn(
                     cancellation_for_engine,
                 )
                 .await;
+            /*
+             * 旧 Engine 兼容入口的异常收尾同样移到 run_turn，发送任务只返回 Result。
             if let Err(send_error) = send_result {
                 log::error!(
                     "chat turn failed: engine_id={}, thread_id={}, engine_thread_id={}, error={send_error:#}",
@@ -2523,7 +2531,7 @@ async fn run_turn(
                     thread_for_engine.id,
                     engine_thread_for_engine,
                 );
-                return match engines.interrupt(&thread_for_engine).await {
+                return match engines_for_engine.interrupt(&thread_for_engine).await {
                     Ok(()) => Err(anyhow::anyhow!(
                         "本轮对话执行失败，远端执行已取消：{send_error:#}"
                     )),
@@ -2541,6 +2549,8 @@ async fn run_turn(
                 };
             }
             Ok(())
+             */
+            send_result
         }
     });
 
@@ -2610,78 +2620,149 @@ async fn run_turn(
     )
     .await;
 
-    loop {
-        let incoming_event = if pending_event.is_some() {
-            match tokio::time::timeout(
-                STREAM_EVENT_COALESCE_IDLE_FLUSH_INTERVAL,
-                receive_engine_event_with_diagnostics(&mut event_rx, "chat_coalesce"),
-            )
-            .await
-            {
-                Ok(event) => event,
-                Err(_) => {
-                    if let Some(event) = pending_event.take() {
-                        let progress = process_stream_event(
-                            &app,
-                            &state,
-                            &thread,
-                            &assistant_message_id,
-                            &stream_event_topic,
-                            &approval_event_topic,
-                            &event,
-                            &mut blocks,
-                            &mut action_index,
-                            &mut approval_index,
-                            max_output_chars,
-                        )
-                        .await;
-                        let force_persist = apply_stream_progress(
-                            progress,
-                            &mut message_status,
-                            &mut thread_status,
-                            &mut turn_model_id,
-                            &mut token_usage,
-                            &mut blocks_dirty,
-                            &mut message_state_dirty,
-                            &mut thread_status_dirty,
-                            &mut turn_model_dirty,
-                        );
-                        flush_stream_state(
-                            &state,
-                            &thread,
-                            &assistant_message_id,
-                            &blocks,
-                            &message_status,
-                            &thread_status,
-                            &turn_model_id,
-                            &mut blocks_dirty,
-                            &mut message_state_dirty,
-                            &mut thread_status_dirty,
-                            &mut turn_model_dirty,
-                            &mut last_persisted_thread_status,
-                            &mut last_persist_at,
-                            &mut last_blocks_persist_at,
-                            force_persist,
-                        )
-                        .await;
-                    }
-                    continue;
-                }
+    enum TurnOutcome {
+        Completed,
+        Cancelled,
+        Failed(anyhow::Error),
+    }
+
+    enum TurnWait {
+        Engine(
+            std::result::Result<anyhow::Result<()>, tokio::task::JoinError>,
+        ),
+        Event(Option<EngineEvent>),
+        FlushPending,
+        Cancelled,
+        TimedOut,
+    }
+
+    let mut engine_task_finished = false;
+    let mut event_channel_closed = false;
+    let mut failed_completion_processed = false;
+    let mut turn_outcome = 'turn_loop: loop {
+        let wait = if pending_event.is_some() {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => TurnWait::Cancelled,
+                result = &mut engine_task, if !engine_task_finished => TurnWait::Engine(result),
+                event = receive_engine_event_with_diagnostics(&mut event_rx, "chat_coalesce"), if !event_channel_closed => TurnWait::Event(event),
+                _ = tokio::time::sleep(STREAM_EVENT_COALESCE_IDLE_FLUSH_INTERVAL) => TurnWait::FlushPending,
+                _ = tokio::time::sleep(TURN_EVENT_IDLE_TIMEOUT) => TurnWait::TimedOut,
             }
         } else {
-            receive_engine_event_with_diagnostics(&mut event_rx, "chat_direct").await
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => TurnWait::Cancelled,
+                result = &mut engine_task, if !engine_task_finished => TurnWait::Engine(result),
+                event = receive_engine_event_with_diagnostics(&mut event_rx, "chat_direct"), if !event_channel_closed => TurnWait::Event(event),
+                _ = tokio::time::sleep(TURN_EVENT_IDLE_TIMEOUT) => TurnWait::TimedOut,
+            }
         };
 
-        let Some(incoming_event) = incoming_event else {
-            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
-                "at": chrono::Utc::now().to_rfc3339(),
-                "event": "engine_event_channel_closed",
-                "consumer": "chat",
-                "thread_id": thread.id.clone(),
-            }))
-            .await;
-            break;
+        let incoming_event = match wait {
+            TurnWait::Engine(Ok(Ok(()))) => {
+                engine_task_finished = true;
+                if event_channel_closed {
+                    break 'turn_loop TurnOutcome::Completed;
+                }
+                continue;
+            }
+            TurnWait::Engine(Ok(Err(error))) => {
+                engine_task_finished = true;
+                break 'turn_loop TurnOutcome::Failed(error);
+            }
+            TurnWait::Engine(Err(error)) => {
+                engine_task_finished = true;
+                break 'turn_loop TurnOutcome::Failed(anyhow::anyhow!(
+                    "执行本轮对话的后台任务异常退出：{error}"
+                ));
+            }
+            TurnWait::Event(Some(event)) => event,
+            TurnWait::Event(None) => {
+                event_channel_closed = true;
+                crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                    "at": chrono::Utc::now().to_rfc3339(),
+                    "event": "engine_event_channel_closed",
+                    "consumer": "chat",
+                    "thread_id": thread.id.clone(),
+                }))
+                .await;
+                if engine_task_finished {
+                    break 'turn_loop TurnOutcome::Completed;
+                }
+                continue;
+            }
+            TurnWait::FlushPending => {
+                if let Some(event) = pending_event.take() {
+                    let progress = process_stream_event(
+                        &app,
+                        &state,
+                        &thread,
+                        &assistant_message_id,
+                        &stream_event_topic,
+                        &approval_event_topic,
+                        &event,
+                        &mut blocks,
+                        &mut action_index,
+                        &mut approval_index,
+                        max_output_chars,
+                    )
+                    .await;
+                    let force_persist = apply_stream_progress(
+                        progress,
+                        &mut message_status,
+                        &mut thread_status,
+                        &mut turn_model_id,
+                        &mut token_usage,
+                        &mut blocks_dirty,
+                        &mut message_state_dirty,
+                        &mut thread_status_dirty,
+                        &mut turn_model_dirty,
+                    );
+                    flush_stream_state(
+                        &state,
+                        &thread,
+                        &assistant_message_id,
+                        &blocks,
+                        &message_status,
+                        &thread_status,
+                        &turn_model_id,
+                        &mut blocks_dirty,
+                        &mut message_state_dirty,
+                        &mut thread_status_dirty,
+                        &mut turn_model_dirty,
+                        &mut last_persisted_thread_status,
+                        &mut last_persist_at,
+                        &mut last_blocks_persist_at,
+                        force_persist,
+                    )
+                    .await;
+                }
+                continue;
+            }
+            TurnWait::Cancelled => break 'turn_loop TurnOutcome::Cancelled,
+            TurnWait::TimedOut => {
+                break 'turn_loop TurnOutcome::Failed(anyhow::anyhow!(
+                    "本轮对话在15分钟内没有收到新的执行事件"
+                ));
+            }
         };
+
+        if let EngineEvent::Error {
+            message,
+            recoverable: false,
+        } = &incoming_event
+        {
+            break 'turn_loop TurnOutcome::Failed(anyhow::anyhow!(message.clone()));
+        }
+
+        let failed_completion = matches!(
+            &incoming_event,
+            EngineEvent::TurnCompleted {
+                status: TurnCompletionStatus::Failed,
+                ..
+            }
+        );
 
         let mut current_event = incoming_event;
 
@@ -2837,7 +2918,14 @@ async fn run_turn(
                 break;
             }
         }
-    }
+
+        if failed_completion {
+            failed_completion_processed = true;
+            break 'turn_loop TurnOutcome::Failed(anyhow::anyhow!(
+                "当前 CLI 报告本轮对话执行失败"
+            ));
+        }
+    };
 
     if let Some(event) = pending_event.take() {
         let progress = process_stream_event(
@@ -2885,6 +2973,17 @@ async fn run_turn(
         .await;
     }
 
+    if matches!(&turn_outcome, TurnOutcome::Completed)
+        && matches!(message_status, MessageStatusDto::Streaming)
+    {
+        turn_outcome = TurnOutcome::Failed(anyhow::anyhow!(
+            "当前 CLI 已结束本轮任务，但没有上报本轮完成状态"
+        ));
+    }
+
+    /*
+     * 旧实现只在事件通道关闭后检查 engine_task，并分别处理发送错误和 JoinError。
+     * 它没有统一等待事件异常、取消和超时。保留原代码，改由下方唯一出口处理。
     let mut engine_failed = false;
     match engine_task.await {
         Ok(Ok(())) => {
@@ -2983,6 +3082,128 @@ async fn run_turn(
                     message: error_message,
                     recoverable: false,
                 },
+            );
+        }
+    }
+     */
+
+    let must_interrupt = !matches!(&turn_outcome, TurnOutcome::Completed);
+    let interrupt_result = if must_interrupt {
+        Some(if let Some((cli, context)) = cli_turn.as_ref() {
+            cli.interrupt(context, &thread, &engine_thread_id).await
+        } else {
+            engines.interrupt(&thread).await
+        })
+    } else {
+        None
+    };
+
+    if must_interrupt {
+        engine_cancellation.cancel();
+        if !engine_task_finished {
+            if tokio::time::timeout(TURN_TASK_CLEANUP_TIMEOUT, &mut engine_task)
+                .await
+                .is_err()
+            {
+                engine_task.abort();
+                let _ = engine_task.await;
+            }
+        }
+    }
+
+    let interrupt_error = interrupt_result.and_then(Result::err);
+    let turn_failure_message = match turn_outcome {
+        TurnOutcome::Completed => {
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "event": "engine_task_complete",
+                "consumer": "chat",
+                "thread_id": thread.id.clone(),
+                "result": "ok",
+            }))
+            .await;
+            None
+        }
+        TurnOutcome::Cancelled => interrupt_error.map(|error| {
+            format!("本轮对话已停止，但取消远端执行失败：{error:#}")
+        }),
+        TurnOutcome::Failed(error) => {
+            log::error!(
+                "chat turn failed: engine_id={}, thread_id={}, engine_thread_id={}, error={error:#}",
+                thread.engine_id,
+                thread.id,
+                engine_thread_id,
+            );
+            crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+                "at": chrono::Utc::now().to_rfc3339(),
+                "event": "engine_task_complete",
+                "consumer": "chat",
+                "thread_id": thread.id.clone(),
+                "result": "error",
+                "error": error.to_string(),
+            }))
+            .await;
+            Some(match interrupt_error {
+                Some(interrupt_error) => format!(
+                    "本轮对话执行失败，并且取消远端执行失败。执行错误：{error:#}；取消错误：{interrupt_error:#}"
+                ),
+                None => format!("本轮对话执行失败，远端执行已取消：{error:#}"),
+            })
+        }
+    };
+
+    let mut engine_failed = false;
+    if let Some(error_message) = turn_failure_message {
+        engine_failed = true;
+        blocks.push(ContentBlock::Error {
+            message: error_message.clone(),
+        });
+        blocks_dirty = true;
+        if message_status != MessageStatusDto::Error {
+            message_status = MessageStatusDto::Error;
+            message_state_dirty = true;
+        }
+        if thread_status != ThreadStatusDto::Error {
+            thread_status = ThreadStatusDto::Error;
+            thread_status_dirty = true;
+        }
+        let _ = app.emit(
+            &stream_event_topic,
+            EngineEvent::Error {
+                message: error_message,
+                recoverable: false,
+            },
+        );
+
+        if !failed_completion_processed {
+            let failed_event = EngineEvent::TurnCompleted {
+                token_usage: None,
+                status: TurnCompletionStatus::Failed,
+            };
+            let failed_progress = process_stream_event(
+                &app,
+                &state,
+                &thread,
+                &assistant_message_id,
+                &stream_event_topic,
+                &approval_event_topic,
+                &failed_event,
+                &mut blocks,
+                &mut action_index,
+                &mut approval_index,
+                max_output_chars,
+            )
+            .await;
+            apply_stream_progress(
+                failed_progress,
+                &mut message_status,
+                &mut thread_status,
+                &mut turn_model_id,
+                &mut token_usage,
+                &mut blocks_dirty,
+                &mut message_state_dirty,
+                &mut thread_status_dirty,
+                &mut turn_model_dirty,
             );
         }
     }

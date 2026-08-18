@@ -70,7 +70,7 @@ enum OpenCodeTransportTarget {
 struct RemoteOpenCodeEndpoint {
     base_url: String,
     password: String,
-    event_bus: broadcast::Sender<Arc<OpenCodeBusEvent>>,
+    event_bus: broadcast::Sender<OpenCodeBusItem>,
     pump_cancel: CancellationToken,
 }
 
@@ -103,7 +103,7 @@ struct OpenCodeServer {
     base_url: String,
     password: String,
     child: Mutex<Option<Child>>,
-    event_bus: broadcast::Sender<Arc<OpenCodeBusEvent>>,
+    event_bus: broadcast::Sender<OpenCodeBusItem>,
     pump_cancel: Option<CancellationToken>,
     callback_cancel: Option<CancellationToken>,
     run_dir: Option<PathBuf>,
@@ -287,14 +287,22 @@ struct OpenCodeBusEvent {
     properties: Value,
 }
 
+#[derive(Debug, Clone)]
+enum OpenCodeBusItem {
+    Event(Arc<OpenCodeBusEvent>),
+    Failure(String),
+}
+
+#[derive(Debug)]
 enum OpenCodeIncomingEvent {
     Message(Arc<OpenCodeBusEvent>),
+    Failure(String),
     Lagged(u64),
     Closed,
 }
 
 fn spawn_opencode_incoming_pump(
-    event_bus: broadcast::Sender<Arc<OpenCodeBusEvent>>,
+    event_bus: broadcast::Sender<OpenCodeBusItem>,
 ) -> mpsc::Receiver<OpenCodeIncomingEvent> {
     let (queue_tx, queue_rx) = mpsc::channel(OPENCODE_EVENT_QUEUE_CAPACITY);
     let mut subscription = event_bus.subscribe();
@@ -305,7 +313,12 @@ fn spawn_opencode_incoming_pump(
                 _ = queue_tx.closed() => break,
                 incoming = subscription.recv() => {
                     let item = match incoming {
-                        Ok(event) => OpenCodeIncomingEvent::Message(event),
+                        Ok(OpenCodeBusItem::Event(event)) => {
+                            OpenCodeIncomingEvent::Message(event)
+                        }
+                        Ok(OpenCodeBusItem::Failure(message)) => {
+                            OpenCodeIncomingEvent::Failure(message)
+                        }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             OpenCodeIncomingEvent::Lagged(skipped)
                         }
@@ -878,11 +891,13 @@ impl Engine for OpenCodeEngine {
                 incoming = timeout(SSE_IDLE_TIMEOUT, incoming_rx.recv()) => {
                     let event = match incoming.context("timed out waiting for OpenCode events")? {
                         Some(OpenCodeIncomingEvent::Message(event)) => event,
+                        Some(OpenCodeIncomingEvent::Failure(message)) => {
+                            anyhow::bail!("OpenCode 事件监听失败：{message}");
+                        }
                         Some(OpenCodeIncomingEvent::Lagged(skipped)) => {
-                            log::warn!(
-                                "opencode event bus lagged by {skipped} events for thread {engine_thread_id}"
+                            anyhow::bail!(
+                                "OpenCode 事件监听丢失了 {skipped} 条本轮事件"
                             );
-                            continue;
                         }
                         None | Some(OpenCodeIncomingEvent::Closed) => {
                             anyhow::bail!("OpenCode event bus closed before the turn completed");
@@ -1066,7 +1081,7 @@ impl OpenCodeEngine {
 
     pub fn new_remote_http(base_url: String, password: String) -> Self {
         let (event_bus, _) =
-            broadcast::channel::<Arc<OpenCodeBusEvent>>(OPENCODE_EVENT_BUFFER_CAPACITY);
+            broadcast::channel::<OpenCodeBusItem>(OPENCODE_EVENT_BUFFER_CAPACITY);
         let pump_cancel = CancellationToken::new();
         tokio::spawn(run_event_pump(
             base_url.clone(),
@@ -2966,7 +2981,7 @@ async fn start_server(
         .context("OpenCode server exited before startup completed")?;
 
     let (event_bus, _) =
-        broadcast::channel::<Arc<OpenCodeBusEvent>>(OPENCODE_EVENT_BUFFER_CAPACITY);
+        broadcast::channel::<OpenCodeBusItem>(OPENCODE_EVENT_BUFFER_CAPACITY);
     let pump_cancel = CancellationToken::new();
     let server = OpenCodeServer {
         cwd: cwd.to_string(),
@@ -3003,7 +3018,7 @@ async fn run_event_pump(
     base_url: String,
     password: String,
     http: reqwest::Client,
-    event_bus: broadcast::Sender<Arc<OpenCodeBusEvent>>,
+    event_bus: broadcast::Sender<OpenCodeBusItem>,
     cancel: CancellationToken,
 ) {
     let url = format!("{}/event", base_url.trim_end_matches('/'));
@@ -3018,7 +3033,9 @@ async fn run_event_pump(
         let response = match http.get(&url).headers(auth_headers(&password)).send().await {
             Ok(response) => response,
             Err(error) => {
-                log::warn!("opencode SSE pump connect failed: {error}");
+                let message = format!("SSE连接失败：{error}");
+                log::warn!("opencode {message}");
+                let _ = event_bus.send(OpenCodeBusItem::Failure(message));
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = sleep(backoff) => {}
@@ -3031,7 +3048,9 @@ async fn run_event_pump(
         let response = match response.error_for_status() {
             Ok(response) => response,
             Err(error) => {
-                log::warn!("opencode SSE pump status error: {error}");
+                let message = format!("SSE连接状态异常：{error}");
+                log::warn!("opencode {message}");
+                let _ = event_bus.send(OpenCodeBusItem::Failure(message));
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     _ = sleep(backoff) => {}
@@ -3053,7 +3072,9 @@ async fn run_event_pump(
                     let chunk = match chunk {
                         Ok(chunk) => chunk,
                         Err(error) => {
-                            log::warn!("opencode SSE pump read failed: {error}");
+                            let message = format!("SSE事件读取失败：{error}");
+                            log::warn!("opencode {message}");
+                            let _ = event_bus.send(OpenCodeBusItem::Failure(message));
                             break;
                         }
                     };
@@ -3072,10 +3093,13 @@ async fn run_event_pump(
                                     log::warn!(
                                         "opencode event parse failed: {error}; event={raw_event}"
                                     );
+                                    let _ = event_bus.send(OpenCodeBusItem::Failure(format!(
+                                        "SSE事件解析失败：{error}"
+                                    )));
                                     continue;
                                 }
                             };
-                            let _ = event_bus.send(Arc::new(event));
+                            let _ = event_bus.send(OpenCodeBusItem::Event(Arc::new(event)));
                         }
                     }
                 }
@@ -3547,6 +3571,24 @@ fn opencode_sort_prefix_for_millis(now_ms: u64, counter: u64) -> String {
 mod tests {
     use super::*;
     use crate::engines::TurnAttachment;
+
+    #[tokio::test]
+    async fn listener_failure_is_forwarded_to_the_active_turn() {
+        let (event_bus, _) =
+            broadcast::channel::<OpenCodeBusItem>(OPENCODE_EVENT_BUFFER_CAPACITY);
+        let mut incoming = spawn_opencode_incoming_pump(event_bus.clone());
+
+        event_bus
+            .send(OpenCodeBusItem::Failure("event stream failed".to_string()))
+            .expect("active turn must subscribe to the event bus");
+
+        match incoming.recv().await {
+            Some(OpenCodeIncomingEvent::Failure(message)) => {
+                assert_eq!(message, "event stream failed");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn remote_http_target_uses_shared_endpoint_and_directory_header() {

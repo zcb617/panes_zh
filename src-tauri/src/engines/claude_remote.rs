@@ -240,7 +240,7 @@ impl RemoteClaudeTransport {
         tokio::spawn(async move {
             let mut stream = response.bytes_stream();
             let mut buffered = Vec::<u8>::new();
-            while let Some(chunk) = stream.next().await {
+            'event_stream: while let Some(chunk) = stream.next().await {
                 let Ok(chunk) = chunk else {
                     break;
                 };
@@ -258,6 +258,7 @@ impl RemoteClaudeTransport {
                         }
                         Err(error) => {
                             log::warn!("解析 SSH 远端 Claude 事件失败: {error}; line={line}");
+                            break 'event_stream;
                         }
                     }
                 }

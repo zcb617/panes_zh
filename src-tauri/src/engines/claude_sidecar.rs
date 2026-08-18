@@ -347,17 +347,40 @@ impl ClaudeTransport {
                                 let _ = tx.send(trim_sidecar_event_for_buffer(event));
                             }
                             Err(e) => {
+                                let message = format!("Claude事件解析失败：{e}");
                                 log::warn!(
                                     "claude sidecar: failed to parse event: {e} — line: {line}"
                                 );
+                                let _ = tx.send(SidecarEvent::Error {
+                                    id: None,
+                                    message,
+                                    recoverable: Some(false),
+                                    error_type: Some("event_parse_error".to_string()),
+                                    is_auth_error: Some(false),
+                                });
+                                break;
                             }
                         },
                         Ok(None) => {
                             log::info!("claude sidecar stdout EOF");
+                            let _ = tx.send(SidecarEvent::Error {
+                                id: None,
+                                message: "Claude事件流已关闭".to_string(),
+                                recoverable: Some(false),
+                                error_type: Some("event_stream_closed".to_string()),
+                                is_auth_error: Some(false),
+                            });
                             break;
                         }
                         Err(e) => {
                             log::warn!("claude sidecar stdout read error: {e}");
+                            let _ = tx.send(SidecarEvent::Error {
+                                id: None,
+                                message: format!("Claude事件读取失败：{e}"),
+                                recoverable: Some(false),
+                                error_type: Some("event_read_error".to_string()),
+                                is_auth_error: Some(false),
+                            });
                             break;
                         }
                     }
