@@ -1066,5 +1066,13 @@
     "helperInstallingButton": "正在安装…",
     "helperApprovalNote": "打开“系统设置 → 通用 → 登录项”以批准。",
     "helperPasswordFallback": "启用合盖防护时会显示密码提示。"
+  },
+  "cliServiceRecovery": {
+    "title": "重启远端 {{engine}} 服务？",
+    "message": "本轮执行失败后，Panes 无法取消远端 {{engine}} 任务。重启服务会中断同一 SSH 连接上由该服务承载的其他会话。\n\n取消失败原因：{{reason}}",
+    "restart": "重启服务",
+    "restarting": "正在重启…",
+    "restartSuccess": "远端 {{engine}} 服务已重启。",
+    "restartFailed": "远端 {{engine}} 服务重启失败：{{error}}"
   }
 }

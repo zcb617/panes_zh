@@ -13,6 +13,7 @@ import { useUpdateStore } from "./stores/updateStore";
 import {
   ipc,
   listenChatApprovalRequested,
+  listenCliServiceRestartRequired,
   listenComputerControlApprovalRequested,
   listenChatTurnFinished,
   listenCodexRemoteThreadRemoved,
@@ -20,6 +21,7 @@ import {
   listenMenuAction,
   listenSshRemoteProjectSessionsRefreshed,
   listenThreadUpdated,
+  type CliServiceRestartRequiredEvent,
   type CodexRemoteThreadRemovedEvent,
 } from "./lib/ipc";
 import { useWorkspaceStore } from "./stores/workspaceStore";
@@ -167,6 +169,11 @@ export function App() {
   >([]);
   const [computerControlApprovalUpdating, setComputerControlApprovalUpdating] = useState(false);
   const computerControlApproval = computerControlApprovals[0] ?? null;
+  const [cliServiceRestartPrompts, setCliServiceRestartPrompts] = useState<
+    CliServiceRestartRequiredEvent[]
+  >([]);
+  const [cliServiceRestartRunning, setCliServiceRestartRunning] = useState(false);
+  const cliServiceRestartPrompt = cliServiceRestartPrompts[0] ?? null;
   const computerControlAgentName = computerControlApproval?.agent === "claude"
     ? "Claude Code"
     : computerControlApproval?.agent === "opencode"
@@ -359,6 +366,37 @@ export function App() {
     void listenComputerControlApprovalRequested((event) => {
       setComputerControlApprovals((current) => {
         if (current.some((item) => item.requestId === event.requestId)) {
+          return current;
+        }
+        return [...current, event];
+      });
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenCliServiceRestartRequired((event) => {
+      setCliServiceRestartPrompts((current) => {
+        if (
+          current.some(
+            (item) =>
+              item.connectionId === event.connectionId && item.engineId === event.engineId,
+          )
+        ) {
           return current;
         }
         return [...current, event];
@@ -859,6 +897,38 @@ export function App() {
     }
   }
 
+  function dismissCliServiceRestartPrompt() {
+    if (cliServiceRestartRunning) return;
+    setCliServiceRestartPrompts((current) => current.slice(1));
+  }
+
+  async function restartRemoteCliService() {
+    const prompt = cliServiceRestartPrompt;
+    if (!prompt || cliServiceRestartRunning) return;
+    const engine = resolveAgentDisplayName(prompt.engineId as ChatEngineId);
+    setCliServiceRestartRunning(true);
+    try {
+      await ipc.restartRemoteCliService(prompt.threadId);
+      toast.success(t("app:cliServiceRecovery.restartSuccess", { engine }));
+      setCliServiceRestartPrompts((current) =>
+        current.filter(
+          (item) =>
+            item.connectionId !== prompt.connectionId || item.engineId !== prompt.engineId,
+        ),
+      );
+    } catch (error) {
+      console.warn(`Failed to restart remote ${prompt.engineId} service:`, error);
+      toast.error(
+        t("app:cliServiceRecovery.restartFailed", {
+          engine,
+          error: String(error),
+        }),
+      );
+    } finally {
+      setCliServiceRestartRunning(false);
+    }
+  }
+
   return (
     <div
       className={`app-shell${customWindowFrame ? " app-shell-custom-frame" : ""}${
@@ -875,7 +945,34 @@ export function App() {
       <UsageLimitsModal />
       <OnboardingWizard />
       <ConfirmDialog
-        open={codexRemoteThreadPrompt !== null && computerControlApproval === null}
+        open={cliServiceRestartPrompt !== null}
+        title={t("app:cliServiceRecovery.title", {
+          engine: cliServiceRestartPrompt
+            ? resolveAgentDisplayName(cliServiceRestartPrompt.engineId as ChatEngineId)
+            : "CLI",
+        })}
+        message={cliServiceRestartPrompt
+          ? t("app:cliServiceRecovery.message", {
+              engine: resolveAgentDisplayName(
+                cliServiceRestartPrompt.engineId as ChatEngineId,
+              ),
+              reason: cliServiceRestartPrompt.reason,
+            })
+          : ""}
+        confirmLabel={cliServiceRestartRunning
+          ? t("app:cliServiceRecovery.restarting")
+          : t("app:cliServiceRecovery.restart")}
+        cancelLabel={t("common:actions.cancel")}
+        confirmVariant="primary"
+        onConfirm={() => void restartRemoteCliService()}
+        onCancel={dismissCliServiceRestartPrompt}
+      />
+      <ConfirmDialog
+        open={
+          cliServiceRestartPrompt === null &&
+          codexRemoteThreadPrompt !== null &&
+          computerControlApproval === null
+        }
         title={t("app:sidebar.codexRemoteThreadRemovedTitle")}
         message={
           codexRemoteThreadPrompt
@@ -893,7 +990,7 @@ export function App() {
         onCancel={dismissCodexRemoteThreadPrompt}
       />
       <ConfirmDialog
-        open={computerControlApproval !== null}
+        open={cliServiceRestartPrompt === null && computerControlApproval !== null}
         title={t("app:settingsPage.computerControl.approvalTitle")}
         message={computerControlApproval
           ? t("app:settingsPage.computerControl.approvalMessage", {

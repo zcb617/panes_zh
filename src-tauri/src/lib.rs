@@ -346,6 +346,7 @@ pub fn run() {
             commands::chat::start_codex_review,
             commands::chat::steer_message,
             commands::chat::cancel_turn,
+            commands::chat::restart_remote_cli_service,
             commands::scheduled_tasks::list_scheduled_tasks,
             commands::scheduled_tasks::create_scheduled_task,
             commands::scheduled_tasks::update_scheduled_task,

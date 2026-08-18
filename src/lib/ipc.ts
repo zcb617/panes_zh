@@ -649,6 +649,8 @@ export const ipc = {
       delivery,
     }),
   cancelTurn: (threadId: string) => invoke<void>("cancel_turn", { threadId }),
+  restartRemoteCliService: (threadId: string) =>
+    invoke<void>("restart_remote_cli_service", { threadId }),
   respondApproval: (threadId: string, approvalId: string, response: ApprovalResponse) =>
     invoke<void>("respond_to_approval", { threadId, approvalId, response }),
   getThreadMessages: (threadId: string) =>
@@ -948,6 +950,24 @@ export async function listenThreadEvents(
   onEvent: (event: StreamEvent) => void
 ): Promise<UnlistenFn> {
   return listen<StreamEvent>(`stream-event-${threadId}`, ({ payload }) => onEvent(payload));
+}
+
+export interface CliServiceRestartRequiredEvent {
+  threadId: string;
+  workspaceId: string;
+  engineId: string;
+  threadTitle: string;
+  connectionId: string;
+  reason: string;
+}
+
+export async function listenCliServiceRestartRequired(
+  onEvent: (event: CliServiceRestartRequiredEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<CliServiceRestartRequiredEvent>(
+    "chat-cli-service-restart-required",
+    ({ payload }) => onEvent(payload),
+  );
 }
 
 export interface GitRepoChangedEvent {

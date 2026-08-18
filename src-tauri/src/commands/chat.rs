@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    cli_tools::{factory::CliToolFactory, CliExecutionContext, CliTool},
+    cli_tools::{factory::CliToolFactory, CliExecutionContext, CliLocationKind, CliTool},
     commands::threads::migrate_legacy_codex_on_failure_thread_metadata,
     db,
     engines::{
@@ -58,6 +58,7 @@ const STREAM_DB_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const STREAM_DB_BLOCKS_FLUSH_INTERVAL: Duration = Duration::from_millis(900);
 const ENGINE_EVENT_QUEUE_CAPACITY: usize = 1_280;
 const TURN_EVENT_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
+const TURN_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(10);
 const TURN_TASK_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const ACTION_OUTPUT_MAX_CHUNKS: usize = 240;
 const ENGINE_EVENT_LOG_ACTION_OUTPUT_MAX_CHARS: usize = 4_096;
@@ -289,6 +290,17 @@ struct ChatApprovalRequestedEvent {
     engine_id: String,
     thread_title: String,
     summary: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliServiceRestartRequiredEvent {
+    thread_id: String,
+    workspace_id: String,
+    engine_id: String,
+    thread_title: String,
+    connection_id: String,
+    reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2013,6 +2025,46 @@ pub async fn cancel_turn(state: State<'_, AppState>, thread_id: String) -> Resul
     cancel_turn_inner(state.inner(), thread_id).await
 }
 
+#[tauri::command]
+pub async fn restart_remote_cli_service(
+    state: State<'_, AppState>,
+    thread_id: String,
+) -> Result<(), String> {
+    let db = state.db.clone();
+    let thread = run_db(db.clone(), {
+        let thread_id = thread_id.clone();
+        move |db| db::threads::get_thread(db, &thread_id)
+    })
+    .await?
+    .ok_or_else(|| format!("thread not found: {thread_id}"))?;
+    let workspace = run_db(db, {
+        let workspace_id = thread.workspace_id.clone();
+        move |db| {
+            db::workspaces::find_workspace_by_id(db, &workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace_id}"))
+        }
+    })
+    .await?;
+    if workspace.location_kind != "ssh" {
+        return Err("当前会话不是 SSH 远端会话，不能重启远端 CLI 服务".to_string());
+    }
+    if !matches!(thread.engine_id.as_str(), "codex" | "opencode" | "claude") {
+        return Err(format!("不支持重启该远端 CLI 服务: {}", thread.engine_id));
+    }
+    let connection_id = workspace
+        .ssh_connection_id
+        .as_deref()
+        .ok_or_else(|| "SSH 远端项目未绑定连接".to_string())?;
+
+    crate::ssh::cli_service_lifecycle::terminate(connection_id, &thread.engine_id)
+        .await
+        .map_err(err_to_string)?;
+    crate::ssh::cli_service_lifecycle::set(connection_id, &thread.engine_id)
+        .await
+        .map_err(err_to_string)?;
+    Ok(())
+}
+
 pub(crate) async fn cancel_turn_inner(state: &AppState, thread_id: String) -> Result<(), String> {
     state.turns.cancel(&thread_id).await;
 
@@ -3087,13 +3139,83 @@ async fn run_turn(
     }
      */
 
+    let initial_failure_message = match &turn_outcome {
+        TurnOutcome::Failed(error) => {
+            Some(format!("本轮对话执行失败，正在取消远端执行：{error:#}"))
+        }
+        TurnOutcome::Completed | TurnOutcome::Cancelled => None,
+    };
+    if let Some(error_message) = initial_failure_message {
+        log::error!(
+            "chat turn failed: engine_id={}, thread_id={}, engine_thread_id={}, error={error_message}",
+            thread.engine_id,
+            thread.id,
+            engine_thread_id,
+        );
+        crate::engines::codex::append_codex_transport_log(&serde_json::json!({
+            "at": chrono::Utc::now().to_rfc3339(),
+            "event": "engine_task_complete",
+            "consumer": "chat",
+            "thread_id": thread.id.clone(),
+            "result": "error",
+            "error": error_message.clone(),
+        }))
+        .await;
+        blocks.push(ContentBlock::Error {
+            message: error_message.clone(),
+        });
+        blocks_dirty = true;
+        if message_status != MessageStatusDto::Error {
+            message_status = MessageStatusDto::Error;
+            message_state_dirty = true;
+        }
+        if thread_status != ThreadStatusDto::Error {
+            thread_status = ThreadStatusDto::Error;
+            thread_status_dirty = true;
+        }
+        let _ = app.emit(
+            &stream_event_topic,
+            EngineEvent::Error {
+                message: error_message,
+                recoverable: false,
+            },
+        );
+        flush_stream_state(
+            &state,
+            &thread,
+            &assistant_message_id,
+            &blocks,
+            &message_status,
+            &thread_status,
+            &turn_model_id,
+            &mut blocks_dirty,
+            &mut message_state_dirty,
+            &mut thread_status_dirty,
+            &mut turn_model_dirty,
+            &mut last_persisted_thread_status,
+            &mut last_persist_at,
+            &mut last_blocks_persist_at,
+            true,
+        )
+        .await;
+    }
+
     let must_interrupt = !matches!(&turn_outcome, TurnOutcome::Completed);
     let interrupt_result = if must_interrupt {
-        Some(if let Some((cli, context)) = cli_turn.as_ref() {
-            cli.interrupt(context, &thread, &engine_thread_id).await
-        } else {
-            engines.interrupt(&thread).await
-        })
+        Some(
+            match tokio::time::timeout(TURN_INTERRUPT_TIMEOUT, async {
+                if let Some((cli, context)) = cli_turn.as_ref() {
+                    cli.interrupt(context, &thread, &engine_thread_id).await
+                } else {
+                    engines.interrupt(&thread).await
+                }
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!("取消远端执行超过10秒仍未完成")),
+            },
+        )
     } else {
         None
     };
@@ -3112,6 +3234,32 @@ async fn run_turn(
     }
 
     let interrupt_error = interrupt_result.and_then(Result::err);
+    if let Some(interrupt_error) = &interrupt_error {
+        log::error!(
+            "failed to interrupt chat turn: engine_id={}, thread_id={}, engine_thread_id={}, error={interrupt_error:#}",
+            thread.engine_id,
+            thread.id,
+            engine_thread_id,
+        );
+        if let Some((_, context)) = cli_turn.as_ref() {
+            if context.location_kind == CliLocationKind::Ssh {
+                if let Some(connection_id) = context.ssh_connection_id.as_ref() {
+                    let _ = app.emit(
+                        "chat-cli-service-restart-required",
+                        CliServiceRestartRequiredEvent {
+                            thread_id: thread.id.clone(),
+                            workspace_id: thread.workspace_id.clone(),
+                            engine_id: thread.engine_id.clone(),
+                            thread_title: thread.title.clone(),
+                            connection_id: connection_id.clone(),
+                            reason: format!("{interrupt_error:#}"),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    let mut engine_failed = matches!(&turn_outcome, TurnOutcome::Failed(_));
     let turn_failure_message = match turn_outcome {
         TurnOutcome::Completed => {
             crate::engines::codex::append_codex_transport_log(&serde_json::json!({
@@ -3124,10 +3272,13 @@ async fn run_turn(
             .await;
             None
         }
-        TurnOutcome::Cancelled => interrupt_error.map(|error| {
-            format!("本轮对话已停止，但取消远端执行失败：{error:#}")
-        }),
+        TurnOutcome::Cancelled => {
+            interrupt_error.map(|error| format!("本轮对话已停止，但取消远端执行失败：{error:#}"))
+        }
         TurnOutcome::Failed(error) => {
+            /*
+             * 旧实现直到 interrupt 返回后才记录本轮错误并通知界面。远端取消卡住时，
+             * 用户也会一直看不到错误。日志和首次界面反馈已移到 interrupt 之前。
             log::error!(
                 "chat turn failed: engine_id={}, thread_id={}, engine_thread_id={}, error={error:#}",
                 thread.engine_id,
@@ -3143,16 +3294,50 @@ async fn run_turn(
                 "error": error.to_string(),
             }))
             .await;
-            Some(match interrupt_error {
-                Some(interrupt_error) => format!(
+             */
+            match interrupt_error {
+                Some(interrupt_error) => Some(format!(
                     "本轮对话执行失败，并且取消远端执行失败。执行错误：{error:#}；取消错误：{interrupt_error:#}"
-                ),
-                None => format!("本轮对话执行失败，远端执行已取消：{error:#}"),
-            })
+                )),
+                None => {
+                    let notice = EngineEvent::Notice {
+                        kind: "remote_interrupt_completed".to_string(),
+                        level: "info".to_string(),
+                        title: "远端任务已终止".to_string(),
+                        message: "本轮异常对应的远端执行已经取消。".to_string(),
+                    };
+                    let progress = process_stream_event(
+                        &app,
+                        &state,
+                        &thread,
+                        &assistant_message_id,
+                        &stream_event_topic,
+                        &approval_event_topic,
+                        &notice,
+                        &mut blocks,
+                        &mut action_index,
+                        &mut approval_index,
+                        max_output_chars,
+                    )
+                    .await;
+                    apply_stream_progress(
+                        progress,
+                        &mut message_status,
+                        &mut thread_status,
+                        &mut turn_model_id,
+                        &mut token_usage,
+                        &mut blocks_dirty,
+                        &mut message_state_dirty,
+                        &mut thread_status_dirty,
+                        &mut turn_model_dirty,
+                    );
+                    None
+                }
+            }
         }
     };
 
-    let mut engine_failed = false;
+    // engine_failed 已在统一异常出口根据 TurnOutcome 初始化。
     if let Some(error_message) = turn_failure_message {
         engine_failed = true;
         blocks.push(ContentBlock::Error {

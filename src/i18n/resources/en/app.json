@@ -1067,5 +1067,13 @@
     "helperInstallingButton": "Installing...",
     "helperApprovalNote": "Open System Settings → General → Login Items to approve.",
     "helperPasswordFallback": "A password prompt will appear when activating lid-close prevention."
+  },
+  "cliServiceRecovery": {
+    "title": "Restart the remote {{engine}} service?",
+    "message": "Panes could not cancel the remote {{engine}} task after this turn failed. Restarting the service will interrupt other sessions using this service on the same SSH connection.\n\nCancellation failure: {{reason}}",
+    "restart": "Restart service",
+    "restarting": "Restarting…",
+    "restartSuccess": "The remote {{engine}} service was restarted.",
+    "restartFailed": "Failed to restart the remote {{engine}} service: {{error}}"
   }
 }

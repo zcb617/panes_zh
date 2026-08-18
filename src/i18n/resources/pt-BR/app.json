@@ -1067,5 +1067,13 @@
     "helperInstallingButton": "Instalando...",
     "helperApprovalNote": "Abra Configurações do Sistema → Geral → Itens de Login para aprovar.",
     "helperPasswordFallback": "Uma solicitação de senha aparecerá ao ativar a prevenção de suspensão ao fechar a tampa."
+  },
+  "cliServiceRecovery": {
+    "title": "Reiniciar o serviço remoto {{engine}}?",
+    "message": "O Panes não conseguiu cancelar a tarefa remota do {{engine}} após a falha desta execução. Reiniciar o serviço interromperá outras sessões que usam este serviço na mesma conexão SSH.\n\nFalha no cancelamento: {{reason}}",
+    "restart": "Reiniciar serviço",
+    "restarting": "Reiniciando…",
+    "restartSuccess": "O serviço remoto {{engine}} foi reiniciado.",
+    "restartFailed": "Falha ao reiniciar o serviço remoto {{engine}}: {{error}}"
   }
 }
