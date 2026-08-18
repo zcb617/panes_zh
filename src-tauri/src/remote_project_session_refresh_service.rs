@@ -21,7 +21,10 @@ use crate::{
     },
     models::{ThreadStatusDto, WorkspaceDto},
     path_utils,
-    ssh::cli_tunnel_registry::{self, SshCliTunnel},
+    ssh::{
+        cli_service_lifecycle,
+        cli_tunnel_registry::{self, SshCliTunnel},
+    },
     state::AppState,
 };
 
@@ -180,6 +183,16 @@ async fn sync_cli(
     cli_id: &str,
     db: Arc<Database>,
 ) -> Result<()> {
+    // 会话扫描前先登记常驻服务。应用启动时首次建立服务并写入 Map，后续刷新复用
+    // 已登记的服务；CLI 实现仍走各自的读取逻辑，但服务不会因一次扫描结束而关闭。
+    cli_service_lifecycle::set(connection_id, cli_id)
+        .await
+        .with_context(|| {
+            format!(
+                "启动并登记 SSH 远端 CLI 服务失败: connection_id={connection_id} cli_id={cli_id}"
+            )
+        })?;
+
     if cli_id == "codex" {
         let state = app.state::<AppState>();
         let context = CliExecutionContext::from_workspace(workspace)?;
