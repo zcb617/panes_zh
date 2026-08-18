@@ -10,6 +10,8 @@ const { fileURLToPath } = await import("no" + "de:url");
 
 const MAX_SESSIONS = 500;
 const MAX_TRANSCRIPT_LINES = 200;
+// Claude Code 会话文件名使用 UUID 作为会话 ID；只接受该格式，避免把请求路径当作文件路径。
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseArguments(argv) {
   let host = "127.0.0.1";
@@ -65,7 +67,7 @@ function titleFor(sessionId, candidate) {
   return title ? title.slice(0, 120) : `Claude session ${sessionId.slice(0, 8)}`;
 }
 
-async function readSessionSummary(filePath, expectedCwd) {
+async function readSessionSummary(filePath, expectedCwd, strict = false) {
   const file = path.basename(filePath);
   const sessionId = file.endsWith(".jsonl") ? file.slice(0, -".jsonl".length) : "";
   if (!sessionId) {
@@ -73,6 +75,9 @@ async function readSessionSummary(filePath, expectedCwd) {
   }
   let firstPrompt = "";
   let cwd = "";
+  let sawNonEmptyLine = false;
+  let validRecordCount = 0;
+  let parseError = false;
   const lines = readline.createInterface({
     input: createReadStream(filePath, { encoding: "utf8" }),
     crlfDelay: Infinity,
@@ -83,8 +88,10 @@ async function readSessionSummary(filePath, expectedCwd) {
     if (count > MAX_TRANSCRIPT_LINES) {
       break;
     }
+    sawNonEmptyLine ||= line.trim().length > 0;
     try {
       const record = JSON.parse(line);
+      validRecordCount += 1;
       if (!cwd && typeof record.cwd === "string") {
         cwd = path.posix.resolve(record.cwd);
       }
@@ -95,10 +102,17 @@ async function readSessionSummary(filePath, expectedCwd) {
         break;
       }
     } catch {
+      parseError = true;
       // Claude 正在追加的末行可能尚未形成完整 JSON。
     }
   }
-  if (cwd !== expectedCwd) {
+  if (strict && sawNonEmptyLine && validRecordCount === 0 && parseError) {
+    throw new Error(`Claude 会话文件不是有效的 JSONL：${filePath}`);
+  }
+  if (!cwd && strict) {
+    throw new Error(`Claude 会话文件缺少 cwd：${filePath}`);
+  }
+  if (expectedCwd && cwd !== expectedCwd) {
     return null;
   }
   const fileStat = await stat(filePath);
@@ -491,6 +505,85 @@ const server = http.createServer(async (request, response) => {
       writeJson(response, 202, { accepted: true });
     } catch (error) {
       writeJson(response, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+  // 按 ID 查询只在固定的 Claude 数据根目录内枚举文件名，不接受请求方传入目录。
+  const rawPathname = (request.url ?? "/").split("?", 1)[0];
+  if (request.method === "GET" && rawPathname.startsWith("/sessions/")) {
+    let sessionId;
+    try {
+      const encodedSessionId = rawPathname.slice("/sessions/".length);
+      if (!encodedSessionId || encodedSessionId.includes("/")) {
+        throw new Error("session_id is required and must be a single path segment");
+      }
+      sessionId = decodeURIComponent(encodedSessionId);
+      if (
+        !sessionId ||
+        sessionId.includes("/") ||
+        sessionId.includes("\\") ||
+        sessionId.includes("..") ||
+        !SESSION_ID_PATTERN.test(sessionId)
+      ) {
+        throw new Error("session_id is not a valid Claude session ID");
+      }
+    } catch (error) {
+      writeJson(response, 400, {
+        error:
+          error instanceof URIError
+            ? "session_id contains invalid URI encoding"
+            : error instanceof Error
+              ? error.message
+              : String(error),
+      });
+      return;
+    }
+    try {
+      const directories = [projectsRoot()];
+      const files = [];
+      const targetFileName = `${sessionId}.jsonl`;
+      while (directories.length > 0) {
+        const directory = directories.pop();
+        let entries;
+        try {
+          entries = await readdir(directory, { withFileTypes: true });
+        } catch (error) {
+          if (error && error.code === "ENOENT") {
+            continue;
+          }
+          throw error;
+        }
+        for (const entry of entries) {
+          const entryPath = path.join(directory, entry.name);
+          if (entry.isDirectory()) {
+            directories.push(entryPath);
+          } else if (entry.isFile() && entry.name === targetFileName) {
+            files.push(entryPath);
+          }
+        }
+      }
+      if (files.length === 0) {
+        writeJson(response, 404, { error: `Claude session not found: ${sessionId}` });
+        return;
+      }
+      if (files.length > 1) {
+        writeJson(response, 409, {
+          error: `Multiple Claude session files found for session_id: ${sessionId}`,
+        });
+        return;
+      }
+      const summary = await readSessionSummary(files[0], undefined, true);
+      if (!summary) {
+        writeJson(response, 500, { error: `Claude session summary is unavailable: ${sessionId}` });
+        return;
+      }
+      writeJson(response, 200, {
+        ...summary,
+        // 新接口提供显式 sessionId，同时保留现有摘要的 id 字段兼容客户端。
+        sessionId: summary.id,
+      });
+    } catch (error) {
+      writeJson(response, 500, { error: error instanceof Error ? error.message : String(error) });
     }
     return;
   }
