@@ -898,6 +898,7 @@ async fn resolve_codex_runtime_approval(
         let message_id = message_id.clone();
         move |db| {
             let mut conn = db.connect()?;
+            let answered_at = runtime_env::system_time_rfc3339();
             let tx = conn
                 .transaction()
                 .context("failed to start approval resolution transaction")?;
@@ -905,9 +906,9 @@ async fn resolve_codex_runtime_approval(
             // Resolve the approval record.
             tx.execute(
                 "UPDATE approvals
-                 SET status = 'answered', answered_at = COALESCE(answered_at, datetime('now'))
-                 WHERE id = ?1",
-                rusqlite::params![approval_id],
+                 SET status = 'answered', answered_at = COALESCE(answered_at, ?1)
+                 WHERE id = ?2",
+                rusqlite::params![answered_at, approval_id],
             )
             .context("failed to resolve approval")?;
 
@@ -975,11 +976,12 @@ async fn resolve_codex_runtime_approval(
             if has_local_turn {
                 tx.execute(
                     "UPDATE threads
-                     SET status = ?1, last_activity_at = datetime('now')
-                     WHERE id = ?2
-                       AND status = ?3",
+                     SET status = ?1, last_activity_at = ?2
+                     WHERE id = ?3
+                       AND status = ?4",
                     rusqlite::params![
                         ThreadStatusDto::Streaming.as_str(),
+                        runtime_env::system_time_rfc3339(),
                         thread_id,
                         ThreadStatusDto::AwaitingApproval.as_str()
                     ],

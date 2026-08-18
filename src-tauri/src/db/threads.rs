@@ -3,6 +3,7 @@ use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
 use crate::models::{ThreadDto, ThreadStatusDto};
+use crate::runtime_env;
 
 use super::Database;
 
@@ -21,11 +22,13 @@ pub fn create_thread(
     title: &str,
 ) -> anyhow::Result<ThreadDto> {
     let id = Uuid::new_v4().to_string();
+    let created_at = runtime_env::system_time_rfc3339();
     let conn = db.connect()?;
     conn.execute(
-        "INSERT INTO threads (id, workspace_id, repo_id, engine_id, model_id, title, status)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle')",
-        params![id, workspace_id, repo_id, engine_id, model_id, title],
+        "INSERT INTO threads (
+            id, workspace_id, repo_id, engine_id, model_id, title, status, created_at, last_activity_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?7)",
+        params![id, workspace_id, repo_id, engine_id, model_id, title, created_at],
     )
     .context("failed to create thread")?;
 
@@ -156,15 +159,16 @@ pub fn upsert_ssh_remote_thread_snapshot(
                  archived_at = NULL,
                  last_activity_at = CASE
                      WHEN ?5 <> '' THEN ?5
-                     ELSE datetime('now')
+                     ELSE ?6
                  END
-             WHERE id = ?6",
+             WHERE id = ?7",
             params![
                 next_model,
                 title,
                 status.as_str(),
                 next_metadata.to_string(),
                 last_activity,
+                runtime_env::system_time_rfc3339(),
                 thread_id,
             ],
         )
@@ -174,9 +178,9 @@ pub fn upsert_ssh_remote_thread_snapshot(
         tx.execute(
             "INSERT INTO threads (
                 id, workspace_id, repo_id, engine_id, model_id, engine_thread_id,
-                engine_metadata_json, title, status, last_activity_at
+                engine_metadata_json, title, status, last_activity_at, created_at
              ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8,
-                       CASE WHEN ?9 <> '' THEN ?9 ELSE datetime('now') END)",
+                       CASE WHEN ?9 <> '' THEN ?9 ELSE ?10 END, ?10)",
             params![
                 thread_id,
                 workspace_id,
@@ -187,6 +191,7 @@ pub fn upsert_ssh_remote_thread_snapshot(
                 title,
                 status.as_str(),
                 last_activity,
+                runtime_env::system_time_rfc3339(),
             ],
         )
         .context("failed insert SSH remote thread snapshot")?;
@@ -261,12 +266,13 @@ pub fn update_thread_status(
     status: ThreadStatusDto,
 ) -> anyhow::Result<()> {
     let conn = db.connect()?;
+    let updated_at = runtime_env::system_time_rfc3339();
     conn.execute(
         "UPDATE threads
-     SET status = ?1, last_activity_at = datetime('now')
-     WHERE id = ?2
+     SET status = ?1, last_activity_at = ?2
+     WHERE id = ?3
        AND status != ?1",
-        params![status.as_str(), thread_id],
+        params![status.as_str(), updated_at, thread_id],
     )
     .context("failed to update thread status")?;
     Ok(())
@@ -369,13 +375,14 @@ pub fn delete_thread(db: &Database, thread_id: &str) -> anyhow::Result<()> {
 
 pub fn archive_thread(db: &Database, thread_id: &str) -> anyhow::Result<()> {
     let conn = db.connect()?;
+    let archived_at = runtime_env::system_time_rfc3339();
     let affected = conn
         .execute(
             "UPDATE threads
-       SET archived_at = datetime('now')
+       SET archived_at = ?2
        WHERE id = ?1
          AND archived_at IS NULL",
-            params![thread_id],
+            params![thread_id, archived_at],
         )
         .context("failed to archive thread")?;
 
@@ -427,13 +434,14 @@ pub fn bump_message_counters(
 ) -> anyhow::Result<()> {
     let (input, output) = tokens.unwrap_or((0, 0));
     let conn = db.connect()?;
+    let updated_at = runtime_env::system_time_rfc3339();
     conn.execute(
         "UPDATE threads
      SET message_count = message_count + 1,
          total_tokens = total_tokens + ?1 + ?2,
-         last_activity_at = datetime('now')
-     WHERE id = ?3",
-        params![input as i64, output as i64, thread_id],
+         last_activity_at = ?3
+     WHERE id = ?4",
+        params![input as i64, output as i64, updated_at, thread_id],
     )
     .context("failed to bump thread counters")?;
     Ok(())
@@ -468,9 +476,15 @@ pub fn refresh_thread_message_stats(db: &Database, thread_id: &str) -> anyhow::R
         "UPDATE threads
          SET message_count = ?1,
              total_tokens = ?2,
-             last_activity_at = COALESCE(?3, datetime('now'))
-         WHERE id = ?4",
-        params![message_count, total_tokens, latest_message_at, thread_id],
+             last_activity_at = COALESCE(?3, ?4)
+         WHERE id = ?5",
+        params![
+            message_count,
+            total_tokens,
+            latest_message_at,
+            runtime_env::system_time_rfc3339(),
+            thread_id
+        ],
     )
     .context("failed to persist recalculated thread message stats")?;
 

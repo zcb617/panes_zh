@@ -108,6 +108,14 @@ pub fn app_data_dir() -> PathBuf {
     )
 }
 
+pub fn format_system_time(value: chrono::DateTime<chrono::Local>) -> String {
+    value.to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
+}
+
+pub fn system_time_rfc3339() -> String {
+    format_system_time(chrono::Local::now())
+}
+
 pub fn legacy_app_data_dir() -> Option<PathBuf> {
     home_dir().map(|home| legacy_app_data_dir_for(&home))
 }
@@ -1067,6 +1075,17 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     use uuid::Uuid;
+
+    #[test]
+    fn system_time_contains_the_operating_system_offset() {
+        let value = system_time_rfc3339();
+        let parsed = chrono::DateTime::parse_from_rfc3339(&value).unwrap();
+        assert_eq!(
+            parsed.offset().local_minus_utc(),
+            chrono::Local::now().offset().local_minus_utc()
+        );
+        assert!(!value.ends_with('Z'));
+    }
 
     fn normalize_path(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")

@@ -3,6 +3,7 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
 
 use crate::engines::events::{ActionResult, ActionType};
+use crate::runtime_env;
 
 use super::Database;
 
@@ -18,10 +19,11 @@ pub fn insert_action_started(
     details: &Value,
 ) -> anyhow::Result<()> {
     let conn = db.connect()?;
+    let created_at = runtime_env::system_time_rfc3339();
     conn.execute(
         "INSERT OR REPLACE INTO actions (
-      id, thread_id, message_id, engine_action_id, action_type, summary, details_json, status
-    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running')",
+      id, thread_id, message_id, engine_action_id, action_type, summary, details_json, status, created_at
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'running', ?8)",
         params![
             action_id,
             thread_id,
@@ -29,7 +31,8 @@ pub fn insert_action_started(
             engine_action_id,
             action_type.as_str(),
             summary,
-            details.to_string()
+            details.to_string(),
+            created_at
         ],
     )
     .context("failed to insert action")?;
@@ -68,17 +71,19 @@ pub fn insert_approval(
     details: &Value,
 ) -> anyhow::Result<()> {
     let conn = db.connect()?;
+    let created_at = runtime_env::system_time_rfc3339();
     conn.execute(
         "INSERT OR REPLACE INTO approvals (
-      id, thread_id, message_id, action_type, summary, details_json, status
-    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending')",
+      id, thread_id, message_id, action_type, summary, details_json, status, created_at
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
         params![
             approval_id,
             thread_id,
             message_id,
             action_type.as_str(),
             summary,
-            details.to_string()
+            details.to_string(),
+            created_at
         ],
     )
     .context("failed to insert approval")?;
@@ -87,11 +92,12 @@ pub fn insert_approval(
 
 pub fn answer_approval(db: &Database, approval_id: &str, decision: &str) -> anyhow::Result<()> {
     let conn = db.connect()?;
+    let answered_at = runtime_env::system_time_rfc3339();
     conn.execute(
         "UPDATE approvals
-     SET status = 'answered', decision = ?1, answered_at = datetime('now')
-     WHERE id = ?2",
-        params![decision, approval_id],
+     SET status = 'answered', decision = ?1, answered_at = ?2
+     WHERE id = ?3",
+        params![decision, answered_at, approval_id],
     )
     .context("failed to answer approval")?;
     Ok(())
@@ -100,11 +106,12 @@ pub fn answer_approval(db: &Database, approval_id: &str, decision: &str) -> anyh
 #[cfg(test)]
 pub fn resolve_approval(db: &Database, approval_id: &str) -> anyhow::Result<()> {
     let conn = db.connect()?;
+    let answered_at = runtime_env::system_time_rfc3339();
     conn.execute(
         "UPDATE approvals
-     SET status = 'answered', answered_at = COALESCE(answered_at, datetime('now'))
-     WHERE id = ?1",
-        params![approval_id],
+     SET status = 'answered', answered_at = COALESCE(answered_at, ?1)
+     WHERE id = ?2",
+        params![answered_at, approval_id],
     )
     .context("failed to resolve approval")?;
     Ok(())
@@ -177,9 +184,11 @@ pub fn append_event_log(
     event: &Value,
 ) -> anyhow::Result<()> {
     let conn = db.connect()?;
+    let created_at = runtime_env::system_time_rfc3339();
     conn.execute(
-        "INSERT INTO engine_event_logs (thread_id, message_id, event_json) VALUES (?1, ?2, ?3)",
-        params![thread_id, message_id, event.to_string()],
+        "INSERT INTO engine_event_logs (thread_id, message_id, event_json, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![thread_id, message_id, event.to_string(), created_at],
     )
     .context("failed to append engine event log")?;
     Ok(())

@@ -1,5 +1,5 @@
 use anyhow::Context;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{Duration as ChronoDuration, Local};
 use std::collections::HashMap;
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
@@ -10,6 +10,7 @@ use crate::models::{
     ActionOutputChunkDto, ActionOutputDto, MessageDto, MessageStatusDto, MessageWindowCursorDto,
     MessageWindowDto, SearchResultDto, TokenUsageDto,
 };
+use crate::runtime_env;
 
 use super::Database;
 
@@ -97,9 +98,9 @@ pub fn clone_thread_messages(
                 input: 0,
                 output: 0,
             });
-        let created_at = (Utc::now() + ChronoDuration::milliseconds(index as i64))
-            .format("%Y-%m-%d %H:%M:%S%.3f")
-            .to_string();
+        let created_at = runtime_env::format_system_time(
+            Local::now() + ChronoDuration::milliseconds(index as i64),
+        );
 
         tx.execute(
             "INSERT INTO messages (
@@ -141,7 +142,7 @@ pub fn append_thread_messages(
         .transaction()
         .context("failed to start thread message import transaction")?;
 
-    let fallback_created_at_base = Utc::now();
+    let fallback_created_at_base = Local::now();
     let mut inserted = 0;
     for (index, message) in messages.iter().enumerate() {
         let Some(remote_turn_id) = message
@@ -156,9 +157,9 @@ pub fn append_thread_messages(
             bind_legacy_local_turn_to_remote_turn(&tx, thread_id, message, remote_turn_id)?;
         }
         let created_at = message.created_at.clone().unwrap_or_else(|| {
-            (fallback_created_at_base + ChronoDuration::milliseconds(index as i64))
-                .format("%Y-%m-%d %H:%M:%S%.3f")
-                .to_string()
+            runtime_env::format_system_time(
+                fallback_created_at_base + ChronoDuration::milliseconds(index as i64),
+            )
         });
         let existing = tx
             .query_row(
@@ -1078,12 +1079,13 @@ fn insert_message(
     turn_reasoning_effort: Option<&str>,
 ) -> anyhow::Result<MessageDto> {
     let id = Uuid::new_v4().to_string();
+    let created_at = runtime_env::system_time_rfc3339();
     let conn = db.connect()?;
     conn.execute(
         "INSERT INTO messages (
-            id, thread_id, role, content, blocks_json, schema_version, status, turn_engine_id, turn_model_id, turn_reasoning_effort
+            id, thread_id, role, content, blocks_json, schema_version, status, turn_engine_id, turn_model_id, turn_reasoning_effort, created_at
         )
-     VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9)",
+     VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8, ?9, ?10)",
         params![
             id,
             thread_id,
@@ -1093,7 +1095,8 @@ fn insert_message(
             status.as_str(),
             turn_engine_id,
             turn_model_id,
-            turn_reasoning_effort
+            turn_reasoning_effort,
+            created_at
         ],
     )
     .context("failed to insert message")?;
@@ -1364,6 +1367,21 @@ mod tests {
             threads::create_thread(db, &workspace_id, None, "codex", "gpt-5.3-codex", "test")
                 .unwrap();
         thread.id
+    }
+
+    #[test]
+    fn created_times_use_the_operating_system_offset() {
+        let db = test_db();
+        let thread_id = test_thread(&db);
+        let message = insert_user_message(&db, &thread_id, "hello", None, None, None, None)
+            .unwrap();
+        let thread = threads::get_thread(&db, &thread_id).unwrap().unwrap();
+        let expected_offset = chrono::Local::now().offset().local_minus_utc();
+
+        let message_time = chrono::DateTime::parse_from_rfc3339(&message.created_at).unwrap();
+        let thread_time = chrono::DateTime::parse_from_rfc3339(&thread.created_at).unwrap();
+        assert_eq!(message_time.offset().local_minus_utc(), expected_offset);
+        assert_eq!(thread_time.offset().local_minus_utc(), expected_offset);
     }
 
     fn approval_blocks_json(approval_id: &str) -> Value {
