@@ -1,12 +1,11 @@
 use std::{
-    // collections::HashMap,
+    collections::HashMap,
     ops::Deref,
-    // sync::{Arc, LazyLock},
-    sync::Arc,
+    sync::{Arc, LazyLock},
 };
 
 use anyhow::Context;
-// use tokio::sync::RwLock;
+use tokio::sync::RwLock;
 
 use crate::{
     engines::{
@@ -14,7 +13,7 @@ use crate::{
         map_model_info, Engine, ModelInfo,
     },
     models::{EngineInfoDto, ThreadDto, WorkspaceDto},
-    ssh::cli_tunnel_registry::{self, RemoteCliRuntimeCache, SshCliTunnel},
+    ssh::cli_service_lifecycle::{self, SshCliService},
 };
 
 // Claude 运行时缓存原先独立保存在 REMOTE_CLAUDE_RUNTIMES 中，服务被通用生命周期
@@ -27,6 +26,16 @@ use crate::{
 //
 // static REMOTE_CLAUDE_RUNTIMES: LazyLock<RwLock<HashMap<String, RemoteClaudeRuntimeEntry>>> =
 //     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+#[derive(Clone)]
+struct RemoteClaudeRuntimeEntry {
+    service_generation: u64,
+    local_port: u16,
+    engine: Arc<ClaudeRemoteEngine>,
+}
+
+static REMOTE_CLAUDE_RUNTIMES: LazyLock<RwLock<HashMap<String, RemoteClaudeRuntimeEntry>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[derive(Clone)]
 enum RemoteClaudeUseKind {
@@ -95,16 +104,23 @@ pub fn validate_remote_claude_workspace(workspace: &WorkspaceDto) -> anyhow::Res
         .context("远端项目未绑定 SSH 连接")
 }
 
+/// 取得 Claude 客户端运行对象。远端 Claude 服务端必须已经由
+/// `cli_service_lifecycle` 在启动刷新阶段创建并登记。
+pub async fn runtime(workspace: &WorkspaceDto) -> anyhow::Result<Arc<ClaudeRemoteEngine>> {
+    let connection_id = validate_remote_claude_workspace(workspace)?;
+    let service = cli_service_lifecycle::get(connection_id, "claude").await?;
+    runtime_for_service(service.as_ref()).await
+}
+
 pub async fn acquire_turn(
     workspace: &WorkspaceDto,
     thread_id: &str,
 ) -> anyhow::Result<RemoteClaudeServiceUse> {
     let connection_id = validate_remote_claude_workspace(workspace)?.to_string();
-    let tunnel =
-        cli_tunnel_registry::acquire_persistent_service_use(&connection_id, "claude", thread_id)
-            .await
-            .with_context(|| remote_claude_context(workspace, "启动持续对话"))?;
-    match runtime_for_tunnel(tunnel.as_ref()).await {
+    let service = cli_service_lifecycle::get(&connection_id, "claude")
+        .await
+        .with_context(|| remote_claude_context(workspace, "取得持续对话服务"))?;
+    match runtime_for_service(service.as_ref()).await {
         Ok(engine) => Ok(RemoteClaudeServiceUse {
             connection_id,
             engine,
@@ -113,15 +129,7 @@ pub async fn acquire_turn(
             },
             released: false,
         }),
-        Err(error) => {
-            let _ = cli_tunnel_registry::release_persistent_service_use(
-                &connection_id,
-                "claude",
-                thread_id,
-            )
-            .await;
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -194,21 +202,17 @@ pub(crate) async fn acquire_temporary(
     workspace: &WorkspaceDto,
 ) -> anyhow::Result<RemoteClaudeServiceUse> {
     let connection_id = validate_remote_claude_workspace(workspace)?.to_string();
-    let tunnel = cli_tunnel_registry::acquire_temporary_service_use(&connection_id, "claude")
+    let service = cli_service_lifecycle::get(&connection_id, "claude")
         .await
         .with_context(|| remote_claude_context(workspace, "读取运行时"))?;
-    match runtime_for_tunnel(tunnel.as_ref()).await {
+    match runtime_for_service(service.as_ref()).await {
         Ok(engine) => Ok(RemoteClaudeServiceUse {
             connection_id,
             engine,
             kind: RemoteClaudeUseKind::Temporary,
             released: false,
         }),
-        Err(error) => {
-            let _ =
-                cli_tunnel_registry::release_temporary_service_use(&connection_id, "claude").await;
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -242,27 +246,34 @@ pub(crate) async fn acquire_temporary(
 //     Ok(engine)
 // }
 
-async fn runtime_for_tunnel(tunnel: &SshCliTunnel) -> anyhow::Result<Arc<ClaudeRemoteEngine>> {
-    let service_generation = tunnel.service_lifecycle.lock().await.service_generation;
-    anyhow::ensure!(service_generation > 0, "SSH 远端 Claude 服务实例尚未启动");
-
-    let mut cached_runtime = tunnel.service_runtime.lock().await;
-    if let Some(entry) = cached_runtime.as_ref() {
-        if entry.service_generation == service_generation {
-            if let Ok(engine) = entry.runtime.clone().downcast::<ClaudeRemoteEngine>() {
-                return Ok(engine);
-            }
+async fn runtime_for_service(service: &SshCliService) -> anyhow::Result<Arc<ClaudeRemoteEngine>> {
+    anyhow::ensure!(service.cli_id() == "claude", "远端 CLI 服务类型不是 Claude");
+    let connection_id = service.connection_id();
+    let local_port = service.local_port();
+    let service_generation = service.generation();
+    if let Some(entry) = REMOTE_CLAUDE_RUNTIMES.read().await.get(connection_id) {
+        if entry.service_generation == service_generation && entry.local_port == local_port {
+            return Ok(entry.engine.clone());
         }
     }
 
     let engine = Arc::new(ClaudeRemoteEngine::new(format!(
-        "http://127.0.0.1:{}",
-        tunnel.local_port()
+        "http://127.0.0.1:{local_port}"
     )));
-    *cached_runtime = Some(RemoteCliRuntimeCache {
-        service_generation,
-        runtime: engine.clone(),
-    });
+    let mut runtimes = REMOTE_CLAUDE_RUNTIMES.write().await;
+    if let Some(entry) = runtimes.get(connection_id) {
+        if entry.service_generation == service_generation && entry.local_port == local_port {
+            return Ok(entry.engine.clone());
+        }
+    }
+    runtimes.insert(
+        connection_id.to_string(),
+        RemoteClaudeRuntimeEntry {
+            service_generation,
+            local_port,
+            engine: engine.clone(),
+        },
+    );
     Ok(engine)
 }
 
@@ -271,6 +282,8 @@ async fn release_service_use(
     kind: &RemoteClaudeUseKind,
     engine: &Arc<ClaudeRemoteEngine>,
 ) {
+    /*
+    旧实现会在每次业务调用结束后直接释放 Tunnel 的远端服务占用：
     let result = match kind {
         RemoteClaudeUseKind::Temporary => {
             cli_tunnel_registry::release_temporary_service_use(connection_id, "claude").await
@@ -300,6 +313,10 @@ async fn release_service_use(
             );
         }
     }
+    */
+    // 远端 Claude 服务由 cli_service_lifecycle 常驻管理，业务调用结束只释放当前
+    // 客户端引用，不再改变远端服务端和 Tunnel 的生命周期。
+    let _ = (connection_id, kind, engine);
 }
 
 fn remote_claude_context(workspace: &WorkspaceDto, action: &str) -> String {

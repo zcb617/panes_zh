@@ -217,14 +217,11 @@ impl OpenCodeCli {
         let roots = self.workspace_roots(workspace).await?;
         let mut sessions = Vec::new();
         if context.location_kind == CliLocationKind::Ssh {
-            let service_use =
-                remote_project_opencode_runtime_service::acquire_temporary(workspace).await?;
-            let connection_id =
-                remote_project_opencode_runtime_service::validate_remote_opencode_workspace(
-                    workspace,
-                )?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "opencode").await?;
-            let engine = service.get_runtime::<OpenCodeEngine>().await?;
+            // 旧实现先取得 Tunnel 临时占用；现在远端服务端由 cli_service_lifecycle
+            // 常驻管理，CLI 实现只创建自己的 OpenCode 客户端。
+            // let service_use =
+            //     remote_project_opencode_runtime_service::acquire_temporary(workspace).await?;
+            let engine = remote_project_opencode_runtime_service::runtime(workspace).await?;
             let result = async {
                 for cwd in roots.iter() {
                     sessions.extend(engine.list_sessions(cwd, search_term, archived).await?);
@@ -232,7 +229,7 @@ impl OpenCodeCli {
                 Ok::<_, anyhow::Error>(())
             }
             .await;
-            service_use.release().await;
+            // service_use.release().await;
             result?;
         } else {
             for cwd in roots.iter() {
@@ -346,13 +343,7 @@ impl CliTool for OpenCodeCli {
     async fn get_engine_info(&self, context: &CliExecutionContext) -> Result<EngineInfoDto> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_opencode_runtime_service::validate_remote_opencode_workspace(
-                    &workspace,
-                )?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "opencode").await?;
-            let models = service
-                .get_runtime::<OpenCodeEngine>()
+            let models = remote_project_opencode_runtime_service::runtime(&workspace)
                 .await?
                 .list_models_runtime_for_cwd(&workspace.root_path)
                 .await;
@@ -385,13 +376,7 @@ impl CliTool for OpenCodeCli {
     ) -> Result<Vec<ModelInfo>> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_opencode_runtime_service::validate_remote_opencode_workspace(
-                    &workspace,
-                )?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "opencode").await?;
-            let models = service
-                .get_runtime::<OpenCodeEngine>()
+            let models = remote_project_opencode_runtime_service::runtime(&workspace)
                 .await?
                 .list_models_runtime_for_cwd(&workspace.root_path)
                 .await;
@@ -431,11 +416,9 @@ impl CliTool for OpenCodeCli {
         .await
         .context("读取 SSH 连接任务失败")??
         .ok_or_else(|| anyhow::anyhow!("SSH 连接不存在: {connection_id}"))?;
-        let availability = match ssh::cli_service_lifecycle::get(&connection_id, "opencode").await {
-            Ok(service) => match service.get_runtime::<OpenCodeEngine>().await {
-                Ok(engine) => engine.prewarm().await,
-                Err(error) => Err(error),
-            },
+        let availability = match remote_project_opencode_runtime_service::runtime(&workspace).await
+        {
+            Ok(engine) => engine.prewarm().await,
             Err(error) => Err(error),
         };
         let version = if availability.is_ok() {
@@ -477,12 +460,10 @@ impl CliTool for OpenCodeCli {
     async fn prewarm_engine(&self, context: &CliExecutionContext) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_opencode_runtime_service::validate_remote_opencode_workspace(
-                    &workspace,
-                )?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "opencode").await?;
-            service.get_runtime::<OpenCodeEngine>().await?.prewarm().await
+            remote_project_opencode_runtime_service::runtime(&workspace)
+                .await?
+                .prewarm()
+                .await
         } else {
             self.state.engines.prewarm("opencode").await
         }
@@ -534,12 +515,8 @@ impl CliTool for OpenCodeCli {
         let workspace = self.load_workspace(context).await?;
         Self::validate_thread(context, thread)?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_opencode_runtime_service::validate_remote_opencode_workspace(
-                    &workspace,
-                )?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "opencode").await?;
-            *self.remote_turn_use.lock().await = Some(service.get_runtime::<OpenCodeEngine>().await?);
+            *self.remote_turn_use.lock().await =
+                Some(remote_project_opencode_runtime_service::runtime(&workspace).await?);
         }
         Ok(())
     }
@@ -643,22 +620,15 @@ impl CliTool for OpenCodeCli {
         let workspace = self.load_workspace(context).await?;
         Self::validate_thread(context, thread)?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_opencode_runtime_service::validate_remote_opencode_workspace(
-                    &workspace,
-                )?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "opencode").await?;
-            let engine = service.get_runtime::<OpenCodeEngine>().await?;
-            Engine::respond_to_approval(
-                engine.as_ref(),
-                approval_id,
-                response,
-                route,
-            )
-            .await
-            .with_context(|| {
-                format!("SSH 远端 OpenCode 审批或问题回复失败: thread_id={}", thread.id)
-            })
+            let engine = remote_project_opencode_runtime_service::runtime(&workspace).await?;
+            Engine::respond_to_approval(engine.as_ref(), approval_id, response, route)
+                .await
+                .with_context(|| {
+                    format!(
+                        "SSH 远端 OpenCode 审批或问题回复失败: thread_id={}",
+                        thread.id
+                    )
+                })
         } else {
             self.state
                 .engines
@@ -684,13 +654,7 @@ impl CliTool for OpenCodeCli {
         );
         let cwd = self.thread_cwd(&workspace, thread).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_opencode_runtime_service::validate_remote_opencode_workspace(
-                    &workspace,
-                )?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "opencode").await?;
-            service
-                .get_runtime::<OpenCodeEngine>()
+            remote_project_opencode_runtime_service::runtime(&workspace)
                 .await?
                 .abort_session(&cwd, actual_engine_thread_id)
                 .await
@@ -709,13 +673,7 @@ impl CliTool for OpenCodeCli {
         Self::validate_thread(context, thread)?;
         let cwd = self.thread_cwd(&workspace, thread).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_opencode_runtime_service::validate_remote_opencode_workspace(
-                    &workspace,
-                )?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "opencode").await?;
-            service
-                .get_runtime::<OpenCodeEngine>()
+            remote_project_opencode_runtime_service::runtime(&workspace)
                 .await?
                 .set_session_archived(&cwd, engine_thread_id, true)
                 .await
@@ -737,13 +695,7 @@ impl CliTool for OpenCodeCli {
         Self::validate_thread(context, thread)?;
         let cwd = self.thread_cwd(&workspace, thread).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_opencode_runtime_service::validate_remote_opencode_workspace(
-                    &workspace,
-                )?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "opencode").await?;
-            service
-                .get_runtime::<OpenCodeEngine>()
+            remote_project_opencode_runtime_service::runtime(&workspace)
                 .await?
                 .set_session_archived(&cwd, engine_thread_id, false)
                 .await
@@ -765,13 +717,7 @@ impl CliTool for OpenCodeCli {
         Self::validate_thread(context, thread)?;
         let _active_turn_engine = self.remote_turn_use.lock().await.take();
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_opencode_runtime_service::validate_remote_opencode_workspace(
-                    &workspace,
-                )?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "opencode").await?;
-            service
-                .get_runtime::<OpenCodeEngine>()
+            remote_project_opencode_runtime_service::runtime(&workspace)
                 .await?
                 .forget_session(engine_thread_id)
                 .await;
@@ -849,13 +795,7 @@ impl CliTool for OpenCodeCli {
         let workspace = self.load_workspace(context).await?;
         let cwd = self.resolve_workspace_cwd(&workspace, Some(cwd)).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_opencode_runtime_service::validate_remote_opencode_workspace(
-                    &workspace,
-                )?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "opencode").await?;
-            service
-                .get_runtime::<OpenCodeEngine>()
+            remote_project_opencode_runtime_service::runtime(&workspace)
                 .await?
                 .runtime_catalog(&cwd)
                 .await
@@ -1066,10 +1006,7 @@ impl CliTool for OpenCodeCli {
         })
     }
 
-    async fn get_extensions(
-        &self,
-        context: &CliExecutionContext,
-    ) -> Result<Vec<ExtensionItemDto>> {
+    async fn get_extensions(&self, context: &CliExecutionContext) -> Result<Vec<ExtensionItemDto>> {
         let catalog = self.get_extension_catalog(context, None).await?;
         let mut items = catalog.items;
         for item in &mut items {

@@ -265,6 +265,9 @@ async fn sync_cli(
         return persist_sessions(db, workspace, "claude", sessions).await;
     }
 
+    /*
+    旧实现会在刷新函数末尾直接取得并释放 Tunnel 的远端服务占用。三个受支持 CLI
+    已经全部通过上面的 CLI 工厂调用返回，这段 Tunnel 直连逻辑不再执行：
     let tunnel = cli_tunnel_registry::acquire_temporary_service_use(connection_id, cli_id).await?;
     let result = match cli_id {
         "opencode" => unreachable!("OpenCode session sync already uses OpenCodeCli"),
@@ -280,6 +283,8 @@ async fn sync_cli(
             "failed release SSH CLI temporary use: connection_id={connection_id} cli_id={cli_id}"
         )),
     }
+    */
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -332,10 +337,13 @@ async fn persist_sessions(
 }
 
 pub(crate) async fn list_codex_sessions(
-    tunnel: &SshCliTunnel,
+    local_port: u16,
     cwd: &str,
 ) -> Result<Vec<RemoteSessionSnapshot>> {
-    let (mut socket, _) = connect_async(format!("ws://127.0.0.1:{}/", tunnel.local_port()))
+    // 旧接口接收完整 SshCliTunnel：
+    // pub(crate) async fn list_codex_sessions(tunnel: &SshCliTunnel, cwd: &str) ...
+    // CLI 实现现在只从远端服务生命周期取得服务入口，不再向业务函数暴露 Tunnel。
+    let (mut socket, _) = connect_async(format!("ws://127.0.0.1:{local_port}/"))
         .await
         .context("connect Codex SSH tunnel")?;
     let mut request_id = 1_u64;

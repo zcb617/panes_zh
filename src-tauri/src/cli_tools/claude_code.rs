@@ -17,10 +17,9 @@ use crate::{
     config::app_config::ClaudeCodeSessionMode,
     db,
     engines::{
-        capabilities_for_engine, claude_remote::ClaudeRemoteEngine, map_engine_capabilities,
-        map_model_info, ApprovalRequestRoute, CodexRuntimeEvent, Engine, EngineCapabilities,
-        EngineEvent, EngineSteerReceipt, EngineThread, ModelInfo, SandboxPolicy, ThreadScope,
-        ThreadSyncSnapshot, TurnInput,
+        capabilities_for_engine, map_engine_capabilities, map_model_info, ApprovalRequestRoute,
+        CodexRuntimeEvent, Engine, EngineCapabilities, EngineEvent, EngineSteerReceipt,
+        EngineThread, ModelInfo, SandboxPolicy, ThreadScope, ThreadSyncSnapshot, TurnInput,
     },
     extensions,
     models::{
@@ -273,7 +272,8 @@ impl ClaudeCodeCli {
                         read_only_reason: Some("ssh_remote_claude_extension_action".to_string()),
                         warning: None,
 
-                        ..Default::default()}
+                        ..Default::default()
+                    }
                 })
                 .collect::<Vec<_>>(),
             Err(error) => {
@@ -393,11 +393,7 @@ impl CliTool for ClaudeCodeCli {
     async fn get_engine_info(&self, context: &CliExecutionContext) -> Result<EngineInfoDto> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_claude_runtime_service::validate_remote_claude_workspace(&workspace)?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "claude").await?;
-            let models = service
-                .get_runtime::<ClaudeRemoteEngine>()
+            let models = remote_project_claude_runtime_service::runtime(&workspace)
                 .await?
                 .list_models_runtime()
                 .await?;
@@ -426,11 +422,7 @@ impl CliTool for ClaudeCodeCli {
     ) -> Result<Vec<ModelInfo>> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_claude_runtime_service::validate_remote_claude_workspace(&workspace)?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "claude").await?;
-            let models = service
-                .get_runtime::<ClaudeRemoteEngine>()
+            let models = remote_project_claude_runtime_service::runtime(&workspace)
                 .await?
                 .list_models_runtime()
                 .await?;
@@ -473,13 +465,8 @@ impl CliTool for ClaudeCodeCli {
 
         let connection = self.remote_connection(&workspace).await?;
 
-        let connection_id =
-            remote_project_claude_runtime_service::validate_remote_claude_workspace(&workspace)?;
-        let availability = match ssh::cli_service_lifecycle::get(connection_id, "claude").await {
-            Ok(service) => match service.get_runtime::<ClaudeRemoteEngine>().await {
-                Ok(engine) => engine.prewarm().await,
-                Err(error) => Err(error),
-            },
+        let availability = match remote_project_claude_runtime_service::runtime(&workspace).await {
+            Ok(engine) => engine.prewarm().await,
             Err(error) => Err(error),
         };
         let version = if availability.is_ok() {
@@ -522,10 +509,10 @@ impl CliTool for ClaudeCodeCli {
     async fn prewarm_engine(&self, context: &CliExecutionContext) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_claude_runtime_service::validate_remote_claude_workspace(&workspace)?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "claude").await?;
-            service.get_runtime::<ClaudeRemoteEngine>().await?.prewarm().await
+            remote_project_claude_runtime_service::runtime(&workspace)
+                .await?
+                .prewarm()
+                .await
         } else {
             self.state.engines.prewarm("claude").await
         }
@@ -549,14 +536,15 @@ impl CliTool for ClaudeCodeCli {
 
         let connection_id =
             remote_project_claude_runtime_service::validate_remote_claude_workspace(&workspace)?;
-        let service_use =
-            remote_project_claude_runtime_service::acquire_temporary(&workspace).await?;
+        // 旧实现通过临时 Tunnel 占用控制远端服务启停：
+        // let service_use =
+        //     remote_project_claude_runtime_service::acquire_temporary(&workspace).await?;
         let service = ssh::cli_service_lifecycle::get(connection_id, "claude").await?;
         let result = async {
             reqwest::Client::new()
                 .get(format!(
                     "http://127.0.0.1:{}/sessions",
-                    service.tunnel().local_port()
+                    service.local_port()
                 ))
                 .query(&[("cwd", workspace.root_path.as_str())])
                 .send()
@@ -569,7 +557,7 @@ impl CliTool for ClaudeCodeCli {
                 .context("解析 SSH 远端 Claude 会话失败")
         }
         .await;
-        service_use.release().await;
+        // service_use.release().await;
         let query = search_term.map(str::trim).filter(|value| !value.is_empty());
         result.map(|values| {
             values
@@ -813,10 +801,7 @@ impl CliTool for ClaudeCodeCli {
     ) -> Result<EngineSteerReceipt> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_claude_runtime_service::validate_remote_claude_workspace(&workspace)?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "claude").await?;
-            let engine = service.get_runtime::<ClaudeRemoteEngine>().await?;
+            let engine = remote_project_claude_runtime_service::runtime(&workspace).await?;
             return Engine::steer_message(
                 engine.as_ref(),
                 engine_thread_id,
@@ -842,18 +827,10 @@ impl CliTool for ClaudeCodeCli {
     ) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let connection_id =
-                remote_project_claude_runtime_service::validate_remote_claude_workspace(&workspace)?;
-            let service = ssh::cli_service_lifecycle::get(connection_id, "claude").await?;
-            let engine = service.get_runtime::<ClaudeRemoteEngine>().await?;
-            Engine::respond_to_approval(
-                engine.as_ref(),
-                approval_id,
-                response,
-                route,
-            )
-            .await
-            .with_context(|| format!("SSH 远端 Claude 审批回复失败: thread_id={}", thread.id))
+            let engine = remote_project_claude_runtime_service::runtime(&workspace).await?;
+            Engine::respond_to_approval(engine.as_ref(), approval_id, response, route)
+                .await
+                .with_context(|| format!("SSH 远端 Claude 审批回复失败: thread_id={}", thread.id))
         } else {
             self.state
                 .engines
@@ -879,10 +856,7 @@ impl CliTool for ClaudeCodeCli {
                 let Some(engine_thread_id) = thread.engine_thread_id.as_deref() else {
                     return Ok(());
                 };
-                let connection_id =
-                    remote_project_claude_runtime_service::validate_remote_claude_workspace(&workspace)?;
-                let service = ssh::cli_service_lifecycle::get(connection_id, "claude").await?;
-                let engine = service.get_runtime::<ClaudeRemoteEngine>().await?;
+                let engine = remote_project_claude_runtime_service::runtime(&workspace).await?;
                 Engine::interrupt(engine.as_ref(), engine_thread_id)
                     .await
                     .with_context(|| format!("SSH 远端 Claude 取消失败: thread_id={}", thread.id))
@@ -1055,10 +1029,7 @@ impl CliTool for ClaudeCodeCli {
         extensions::refresh::load_cached_catalog(&self.state, "claude", cwd).await
     }
 
-    async fn get_extensions(
-        &self,
-        context: &CliExecutionContext,
-    ) -> Result<Vec<ExtensionItemDto>> {
+    async fn get_extensions(&self, context: &CliExecutionContext) -> Result<Vec<ExtensionItemDto>> {
         let catalog = self.get_extension_catalog(context, None).await?;
         let mut items = catalog.items;
         for item in &mut items {

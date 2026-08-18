@@ -1,13 +1,18 @@
 use std::{
-    any::Any,
+    // 旧实现把各 CLI 的客户端 Engine 缓存在远端服务生命周期中，造成客户端层与
+    // 远端服务端生命周期层混合。客户端对象现在由各 CLI 实现自己的运行服务管理。
+    // any::Any,
     collections::HashMap,
-    sync::{Arc, LazyLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, LazyLock,
+    },
 };
 
 use anyhow::Context;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::ssh::cli_tunnel_registry::{self, RemoteCliRuntimeCache, SshCliTunnel};
+use crate::ssh::cli_tunnel_registry::{self, SshCliTunnel};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SshCliServiceEntryState {
@@ -17,20 +22,43 @@ enum SshCliServiceEntryState {
 
 /// 一台远端机器上一个 CLI 服务的生命周期入口。
 ///
-/// 服务由“SSH 连接配置 ID + CLI ID”唯一标识。外部业务只通过 `get` 取得已就绪
-/// 的服务，再读取其运行时；启动、停止和运行时缓存均由本模块管理。
+/// 服务由“SSH 连接配置 ID + CLI ID”唯一标识。各 CLI 接口实现只通过 `get` 取得
+/// 已就绪的远端服务端入口；远端服务端的启动、停止和状态由本模块管理。
 pub(crate) struct SshCliService {
     connection_id: String,
     cli_id: String,
+    generation: u64,
     tunnel: Arc<SshCliTunnel>,
     state: Mutex<SshCliServiceEntryState>,
 }
 
 impl SshCliService {
-    /// 仅供启动阶段创建 CLI 专属运行时使用。
-    pub(crate) fn tunnel(&self) -> &Arc<SshCliTunnel> {
-        &self.tunnel
+    pub(crate) fn connection_id(&self) -> &str {
+        &self.connection_id
     }
+
+    pub(crate) fn cli_id(&self) -> &str {
+        &self.cli_id
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// CLI 客户端实现只取得连接远端服务端所需的本地入口，不接触 Tunnel 的创建、
+    /// 端口分配和远端服务启停过程。
+    pub(crate) fn local_port(&self) -> u16 {
+        self.tunnel.local_port()
+    }
+
+    pub(crate) fn remote_service_secret(&self) -> Option<&str> {
+        self.tunnel.remote_service_secret()
+    }
+
+    /*
+    旧实现把 CodexEngine、OpenCodeEngine、ClaudeRemoteEngine 等客户端运行对象登记在
+    CLI 远端服务生命周期中。该职责属于各 CLI 接口实现自己的客户端运行服务，因此
+    保留旧代码作为历史说明，不再参与编译。
 
     /// 将启动阶段已经创建的 CLI 专属运行时登记到当前服务。
     pub(crate) async fn set_runtime<T>(&self, runtime: Arc<T>) -> anyhow::Result<()>
@@ -112,15 +140,18 @@ impl SshCliService {
             )
         })
     }
+    */
 }
 
 #[derive(Default)]
 pub(crate) struct SshCliServiceLifecycleRegistry {
     services: RwLock<HashMap<String, HashMap<String, Arc<SshCliService>>>>,
+    mutation_lock: Mutex<()>,
 }
 
 static SSH_CLI_SERVICES: LazyLock<SshCliServiceLifecycleRegistry> =
     LazyLock::new(SshCliServiceLifecycleRegistry::default);
+static NEXT_SERVICE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// 取得已由启动阶段登记的远端 CLI 服务；该方法不会启动或重连服务。
 pub async fn get(connection_id: &str, cli_id: &str) -> anyhow::Result<Arc<SshCliService>> {
@@ -167,6 +198,9 @@ impl SshCliServiceLifecycleRegistry {
     }
 
     async fn set(&self, connection_id: &str, cli_id: &str) -> anyhow::Result<Arc<SshCliService>> {
+        // 服务创建必须按注册表串行执行，避免并发刷新为同一个 connection_id + cli_id
+        // 重复启动远端服务端。
+        let _mutation_guard = self.mutation_lock.lock().await;
         let existing = self
             .services
             .read()
@@ -184,10 +218,16 @@ impl SshCliServiceLifecycleRegistry {
             return Ok(service);
         }
 
-        let tunnel = cli_tunnel_registry::start_remote_cli_service(connection_id, cli_id).await?;
+        let tunnel = cli_tunnel_registry::get(connection_id, cli_id)
+            .await
+            .with_context(|| {
+                format!("SSH CLI Tunnel 未建立: connection_id={connection_id} cli_id={cli_id}")
+            })?;
+        cli_tunnel_registry::start_remote_cli_service_for_tunnel(tunnel.as_ref()).await?;
         let service = Arc::new(SshCliService {
             connection_id: connection_id.to_string(),
             cli_id: cli_id.to_string(),
+            generation: NEXT_SERVICE_GENERATION.fetch_add(1, Ordering::Relaxed),
             tunnel,
             state: Mutex::new(SshCliServiceEntryState::Ready),
         });
@@ -212,13 +252,17 @@ impl SshCliServiceLifecycleRegistry {
     }
 
     async fn terminate(&self, connection_id: &str, cli_id: &str) -> anyhow::Result<bool> {
+        let _mutation_guard = self.mutation_lock.lock().await;
         let service = self.get(connection_id, cli_id).await?;
         {
             let mut state = service.state.lock().await;
             *state = SshCliServiceEntryState::Terminating;
         }
 
-        let result = cli_tunnel_registry::stop_remote_cli_service(connection_id, cli_id).await;
+        let result =
+            cli_tunnel_registry::stop_remote_cli_service_for_tunnel(service.tunnel.as_ref())
+                .await
+                .map(|_| true);
         match result {
             Ok(stopped) => {
                 let mut services = self.services.write().await;

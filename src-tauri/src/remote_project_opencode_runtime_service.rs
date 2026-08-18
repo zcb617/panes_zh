@@ -14,11 +14,16 @@ use crate::{
         Engine, ModelInfo,
     },
     models::{EngineInfoDto, OpenCodeRuntimeCatalogDto, ThreadDto, WorkspaceDto},
-    ssh::cli_tunnel_registry,
+    ssh::{
+        cli_service_lifecycle::{self, SshCliService},
+        // 旧实现由客户端运行服务直接取得 Tunnel 并控制远端服务启停。
+        // cli_tunnel_registry,
+    },
 };
 
 #[derive(Clone)]
 struct RemoteOpenCodeRuntimeEntry {
+    service_generation: u64,
     local_port: u16,
     password: String,
     engine: Arc<OpenCodeEngine>,
@@ -94,17 +99,24 @@ pub fn validate_remote_opencode_workspace(workspace: &WorkspaceDto) -> anyhow::R
         .context("远端项目未绑定 SSH 连接")
 }
 
+/// 取得 OpenCode 客户端运行对象。远端 OpenCode 服务端必须已经由
+/// `cli_service_lifecycle` 在启动刷新阶段创建并登记。
+pub async fn runtime(workspace: &WorkspaceDto) -> anyhow::Result<Arc<OpenCodeEngine>> {
+    let connection_id = validate_remote_opencode_workspace(workspace)?;
+    let service = cli_service_lifecycle::get(connection_id, "opencode").await?;
+    runtime_for_service(service.as_ref()).await
+}
+
 pub async fn acquire_turn(
     workspace: &WorkspaceDto,
     thread_id: &str,
 ) -> anyhow::Result<RemoteOpenCodeServiceUse> {
     let connection_id = validate_remote_opencode_workspace(workspace)?.to_string();
-    let tunnel =
-        cli_tunnel_registry::acquire_persistent_service_use(&connection_id, "opencode", thread_id)
-            .await
-            .with_context(|| remote_opencode_context(workspace, "启动持续对话"))?;
+    let service = cli_service_lifecycle::get(&connection_id, "opencode")
+        .await
+        .with_context(|| remote_opencode_context(workspace, "取得持续对话服务"))?;
 
-    match runtime_for_tunnel(&connection_id, tunnel.as_ref()).await {
+    match runtime_for_service(service.as_ref()).await {
         Ok(engine) => Ok(RemoteOpenCodeServiceUse {
             connection_id,
             engine,
@@ -113,15 +125,7 @@ pub async fn acquire_turn(
             },
             released: false,
         }),
-        Err(error) => {
-            let _ = cli_tunnel_registry::release_persistent_service_use(
-                &connection_id,
-                "opencode",
-                thread_id,
-            )
-            .await;
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -254,38 +258,41 @@ pub(crate) async fn acquire_temporary(
     workspace: &WorkspaceDto,
 ) -> anyhow::Result<RemoteOpenCodeServiceUse> {
     let connection_id = validate_remote_opencode_workspace(workspace)?.to_string();
-    let tunnel = cli_tunnel_registry::acquire_temporary_service_use(&connection_id, "opencode")
+    let service = cli_service_lifecycle::get(&connection_id, "opencode")
         .await
         .with_context(|| remote_opencode_context(workspace, "读取运行时"))?;
-    match runtime_for_tunnel(&connection_id, tunnel.as_ref()).await {
+    match runtime_for_service(service.as_ref()).await {
         Ok(engine) => Ok(RemoteOpenCodeServiceUse {
             connection_id,
             engine,
             kind: RemoteOpenCodeUseKind::Temporary,
             released: false,
         }),
-        Err(error) => {
-            let _ = cli_tunnel_registry::release_temporary_service_use(&connection_id, "opencode")
-                .await;
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
-async fn runtime_for_tunnel(
-    connection_id: &str,
-    tunnel: &crate::ssh::cli_tunnel_registry::SshCliTunnel,
-) -> anyhow::Result<Arc<OpenCodeEngine>> {
-    let password = tunnel
+async fn runtime_for_service(service: &SshCliService) -> anyhow::Result<Arc<OpenCodeEngine>> {
+    anyhow::ensure!(
+        service.cli_id() == "opencode",
+        "远端 CLI 服务类型不是 OpenCode"
+    );
+    let connection_id = service.connection_id();
+    let local_port = service.local_port();
+    let service_generation = service.generation();
+    let password = service
         .remote_service_secret()
         .context("OpenCode 远端服务认证信息不存在")?;
     if let Some(entry) = REMOTE_OPENCODE_RUNTIMES.read().await.get(connection_id) {
-        if entry.local_port == tunnel.local_port() && entry.password == password {
+        if entry.service_generation == service_generation
+            && entry.local_port == local_port
+            && entry.password == password
+        {
             return Ok(entry.engine.clone());
         }
     }
 
-    let base_url = format!("http://127.0.0.1:{}", tunnel.local_port());
+    let base_url = format!("http://127.0.0.1:{local_port}");
     let readiness_client = reqwest::Client::new();
     let readiness_started = Instant::now();
     let mut readiness_confirmed = false;
@@ -335,14 +342,18 @@ async fn runtime_for_tunnel(
     ));
     let mut runtimes = REMOTE_OPENCODE_RUNTIMES.write().await;
     if let Some(entry) = runtimes.get(connection_id) {
-        if entry.local_port == tunnel.local_port() && entry.password == password {
+        if entry.service_generation == service_generation
+            && entry.local_port == local_port
+            && entry.password == password
+        {
             return Ok(entry.engine.clone());
         }
     }
     runtimes.insert(
         connection_id.to_string(),
         RemoteOpenCodeRuntimeEntry {
-            local_port: tunnel.local_port(),
+            service_generation,
+            local_port,
             password: password.to_string(),
             engine: engine.clone(),
         },
@@ -355,6 +366,8 @@ async fn release_service_use(
     kind: &RemoteOpenCodeUseKind,
     engine: &Arc<OpenCodeEngine>,
 ) {
+    /*
+    旧实现：
     let result = match kind {
         RemoteOpenCodeUseKind::Temporary => {
             cli_tunnel_registry::release_temporary_service_use(connection_id, "opencode").await
@@ -385,6 +398,10 @@ async fn release_service_use(
             );
         }
     }
+    */
+    // 远端 OpenCode 服务由 cli_service_lifecycle 常驻管理，业务调用结束不再直接
+    // 释放 Tunnel 或关闭远端服务端。
+    let _ = (connection_id, kind, engine);
 }
 
 fn remote_opencode_context(workspace: &WorkspaceDto, action: &str) -> String {

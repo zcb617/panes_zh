@@ -1,5 +1,6 @@
 use std::{
-    any::Any,
+    // 客户端运行对象不再由 Tunnel 保存。
+    // any::Any,
     collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
@@ -32,13 +33,17 @@ pub struct SshCliTunnel {
     remote_service_secret: Option<String>,
     process: Mutex<Option<Child>>,
     pub(crate) service_lifecycle: Mutex<RemoteCliServiceLifecycle>,
-    pub(crate) service_runtime: Mutex<Option<RemoteCliRuntimeCache>>,
+    // 旧字段把各 CLI 的客户端 Engine 缓存在 Tunnel 对象中，职责已经移回各 CLI
+    // 客户端运行服务：
+    // pub(crate) service_runtime: Mutex<Option<RemoteCliRuntimeCache>>,
 }
 
+/*
 pub(crate) struct RemoteCliRuntimeCache {
     pub(crate) service_generation: u64,
     pub(crate) runtime: Arc<dyn Any + Send + Sync>,
 }
+*/
 
 /// 单台 SSH 远端服务器的 CLI 隧道恢复结果。
 #[derive(Debug, Clone)]
@@ -74,7 +79,7 @@ impl SshCliTunnel {
             remote_service_secret,
             process: Mutex::new(Some(process)),
             service_lifecycle: Mutex::new(RemoteCliServiceLifecycle::default()),
-            service_runtime: Mutex::new(None),
+            // service_runtime: Mutex::new(None),
         }
     }
 
@@ -110,9 +115,9 @@ impl SshCliTunnel {
         let _ = process.wait().await;
     }
 
-    async fn invalidate_service_runtime(&self) -> bool {
-        self.service_runtime.lock().await.take().is_some()
-    }
+    // async fn invalidate_service_runtime(&self) -> bool {
+    //     self.service_runtime.lock().await.take().is_some()
+    // }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -682,7 +687,8 @@ async fn ensure_remote_cli_service_running(
         Err(error) => {
             // 启动失败后，旧服务实例的运行时对象已经不再可信，必须随状态一起失效。
             // tunnel.service_runtime.lock().await.take();
-            tunnel.invalidate_service_runtime().await;
+            // 客户端运行对象由各 CLI 运行服务按服务代次自行失效。
+            // tunnel.invalidate_service_runtime().await;
             lifecycle.service_state = RemoteCliServiceState::Stopped;
             Err(error)
         }
@@ -699,13 +705,13 @@ async fn close_remote_cli_service_if_unused(
     if lifecycle.service_state == RemoteCliServiceState::Stopped {
         // 统一生命周期状态已经停止时，也要清除可能由旧释放路径遗留的运行时缓存。
         // tunnel.service_runtime.lock().await.take();
-        tunnel.invalidate_service_runtime().await;
+        // tunnel.invalidate_service_runtime().await;
         return Ok(false);
     }
     lifecycle.service_state = RemoteCliServiceState::Stopping;
     // 在关闭远端进程前先让本地运行时失效，禁止后续请求复用旧事件连接。
     // tunnel.service_runtime.lock().await.take();
-    tunnel.invalidate_service_runtime().await;
+    // tunnel.invalidate_service_runtime().await;
     match stop_remote_cli_service_for_tunnel(tunnel).await {
         Ok(()) => {
             lifecycle.service_state = RemoteCliServiceState::Stopped;
@@ -718,7 +724,11 @@ async fn close_remote_cli_service_if_unused(
     }
 }
 
-async fn start_remote_cli_service_for_tunnel(tunnel: &SshCliTunnel) -> anyhow::Result<()> {
+/// 仅供 `cli_service_lifecycle` 调用的远端服务端启动原语。业务层和各 CLI 实现
+/// 不得直接调用。
+pub(crate) async fn start_remote_cli_service_for_tunnel(
+    tunnel: &SshCliTunnel,
+) -> anyhow::Result<()> {
     if tunnel.cli_id() == "claude" {
         let prerequisite_command = wrap_remote_login_shell_command(
             "node -e 'const [major, minor] = process.versions.node.split(\".\").map(Number); const compatible = (major > 20 || (major === 20 && minor >= 5)) && typeof Symbol.dispose === \"symbol\" && typeof Symbol.asyncDispose === \"symbol\"; process.exit(compatible ? 0 : 45)' && claude_path=$(type -P claude) || exit 44; \"$claude_path\" auth status >/dev/null || exit 46",
@@ -761,7 +771,10 @@ async fn start_remote_cli_service_for_tunnel(tunnel: &SshCliTunnel) -> anyhow::R
     Ok(())
 }
 
-async fn stop_remote_cli_service_for_tunnel(tunnel: &SshCliTunnel) -> anyhow::Result<()> {
+/// 仅供 `cli_service_lifecycle` 调用的远端服务端停止原语。
+pub(crate) async fn stop_remote_cli_service_for_tunnel(
+    tunnel: &SshCliTunnel,
+) -> anyhow::Result<()> {
     let stop_command = build_remote_service_stop_command(tunnel);
     gateway::run_command(tunnel.connection(), &stop_command)
         .await
@@ -805,15 +818,21 @@ fn build_remote_service_start_command(tunnel: &SshCliTunnel) -> anyhow::Result<S
         other => anyhow::bail!("当前未实现该 SSH 远端 CLI 服务启动: {other}"),
     };
     let launch_command = wrap_remote_login_shell_command(&launch_command);
+    /*
+    旧实现遇到存活的 Codex PID 时直接退出，不核对该进程监听的端口是否等于当前
+    Tunnel 分配的远端端口：
     let existing_service_action = if matches!(tunnel.cli_id(), "opencode" | "claude") {
-        "pid=$(cat \"$pid_file\"); kill \"$pid\" 2>/dev/null || true; \
-for _ in $(seq 1 50); do \
-  if kill -0 \"$pid\" 2>/dev/null; then sleep 0.1; else break; fi; \
-done; \
-if kill -0 \"$pid\" 2>/dev/null; then kill -9 \"$pid\" 2>/dev/null || true; fi;"
+        ...
     } else {
         "exit 0;"
     };
+    这会形成“旧 Codex 监听 43100、新 Tunnel 转发到 43101”的失配。
+    */
+    let existing_service_action = "pid=$(cat \"$pid_file\"); kill \"$pid\" 2>/dev/null || true; \
+for _ in $(seq 1 50); do \
+  if kill -0 \"$pid\" 2>/dev/null; then sleep 0.1; else break; fi; \
+done; \
+if kill -0 \"$pid\" 2>/dev/null; then kill -9 \"$pid\" 2>/dev/null || true; fi;";
     Ok(format!(
         "runtime_dir=\"{runtime_dir}\"; pid_file=\"{pid_file}\"; log_file=\"{log_file}\"; \
 mkdir -p \"$runtime_dir\"; \
@@ -1079,10 +1098,11 @@ mod tests {
             remote_service_secret: (cli_id == "opencode").then(|| "secret".to_string()),
             process: Mutex::new(None),
             service_lifecycle: Mutex::new(RemoteCliServiceLifecycle::default()),
-            service_runtime: Mutex::new(None),
+            // service_runtime: Mutex::new(None),
         }
     }
 
+    /*
     #[tokio::test]
     async fn invalidating_service_runtime_removes_the_cached_instance() {
         let tunnel = tunnel("host-a", "claude", 43200);
@@ -1095,6 +1115,7 @@ mod tests {
         assert!(tunnel.service_runtime.lock().await.is_none());
         assert!(!tunnel.invalidate_service_runtime().await);
     }
+    */
 
     #[test]
     fn remote_service_pid_tracks_the_login_shell_that_execs_the_cli() {
@@ -1203,7 +1224,10 @@ mod tests {
         assert!(command.contains("codex app-server --listen ws://127.0.0.1:41001"));
         assert!(command.contains("\"${SHELL:-/bin/sh}\" -lic"));
         assert!(command.contains("exec env codex app-server"));
-        assert!(command.contains("exit 0;"));
+        // 旧断言允许复用任意存活的 Codex PID，无法保证旧服务端口与新 Tunnel 一致：
+        // assert!(command.contains("exit 0;"));
+        assert!(command.contains("pid=$(cat \"$pid_file\"); kill \"$pid\""));
+        assert!(!command.contains("exit 0;"));
     }
 
     #[test]
