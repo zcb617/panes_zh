@@ -17,7 +17,8 @@ use crate::{
     cli_tools::{factory::CliToolFactory, CliExecutionContext, CliTool},
     db::{threads, workspaces, Database},
     message_notify_helper::{
-        notify_ssh_remote_project_sessions_refreshed, SshRemoteProjectSessionsRefreshedEvent,
+        notify_app_startup_progress, notify_ssh_remote_project_sessions_refreshed,
+        SshRemoteProjectSessionsRefreshedEvent,
     },
     models::{ThreadStatusDto, WorkspaceDto},
     path_utils,
@@ -192,6 +193,12 @@ async fn sync_cli(
                 "启动并登记 SSH 远端 CLI 服务失败: connection_id={connection_id} cli_id={cli_id}"
             )
         })?;
+
+    if let Err(error) =
+        notify_app_startup_progress(app, "syncing-remote-sessions", "正在同步远端会话……")
+    {
+        log::warn!("发送启动进度失败: {error:#}");
+    }
 
     if cli_id == "codex" {
         let state = app.state::<AppState>();

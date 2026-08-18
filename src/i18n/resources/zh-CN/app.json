@@ -1,5 +1,16 @@
 {
   "title": "Panes",
+  "startup": {
+    "title": "启动中",
+    "phases": {
+      "loadingBaseData": "正在加载基础数据……",
+      "connectingSsh": "正在建立 SSH 连接……",
+      "creatingCliTunnels": "正在建立远端 CLI 隧道……",
+      "startingCliServices": "正在启动远端 CLI 服务……",
+      "syncingRemoteSessions": "正在同步远端会话……",
+      "completed": "启动完成"
+    }
+  },
   "updates": {
     "checkingTitle": "正在检查更新",
     "checkingMessage": "这只需片刻时间。",

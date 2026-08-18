@@ -1,5 +1,5 @@
 import { emit } from "@tauri-apps/api/event";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ThreeColumnLayout } from "./components/layout/ThreeColumnLayout";
 import { CommandPalette } from "./components/shared/CommandPalette";
 import { ConfirmDialog } from "./components/shared/ConfirmDialog";
@@ -12,6 +12,7 @@ import { t } from "./i18n";
 import { useUpdateStore } from "./stores/updateStore";
 import {
   ipc,
+  listenAppStartupProgress,
   listenChatApprovalRequested,
   listenCliServiceRestartRequired,
   listenComputerControlApprovalRequested,
@@ -21,6 +22,8 @@ import {
   listenMenuAction,
   listenSshRemoteProjectSessionsRefreshed,
   listenThreadUpdated,
+  type AppStartupPhase,
+  type AppStartupProgressEvent,
   type CliServiceRestartRequiredEvent,
   type CodexRemoteThreadRemovedEvent,
 } from "./lib/ipc";
@@ -183,6 +186,13 @@ export function App() {
         : computerControlApproval?.agent ?? "AI";
   const customWindowFrameState = useCustomWindowFrameState();
   const [workspaceCatalogLoaded, setWorkspaceCatalogLoaded] = useState(false);
+  const [startupProgressListenerReady, setStartupProgressListenerReady] = useState(false);
+  const [startupCompleted, setStartupCompleted] = useState(false);
+  const [startupProgress, setStartupProgress] = useState<AppStartupProgressEvent>({
+    phase: "loading-base-data",
+    message: "",
+  });
+  const startupSyncRequestedRef = useRef(false);
 
   useEffect(() => {
     document.addEventListener("contextmenu", preventNativeContextMenu);
@@ -204,11 +214,11 @@ export function App() {
   }, [loadWorkspaces, loadKeepAwake, loadTerminalNotificationSettings]);
 
   useEffect(() => {
-    if (!workspaceCatalogLoaded) {
+    if (!workspaceCatalogLoaded || !startupCompleted) {
       return;
     }
     void loadEngines(activeWorkspaceId);
-  }, [activeWorkspaceId, loadEngines, workspaceCatalogLoaded]);
+  }, [activeWorkspaceId, loadEngines, startupCompleted, workspaceCatalogLoaded]);
 
   useEffect(() => {
     const localWorkspaceIds = workspaces
@@ -298,7 +308,10 @@ export function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listenSshRemoteProjectSessionsRefreshed(async (event) => {
-      if (useWorkspaceStore.getState().activeWorkspaceId === event.workspaceId) {
+      if (
+        startupCompleted &&
+        useWorkspaceStore.getState().activeWorkspaceId === event.workspaceId
+      ) {
         void loadEngines(event.workspaceId);
       }
       try {
@@ -329,7 +342,60 @@ export function App() {
         unlisten();
       }
     };
-  }, [loadEngines, reloadThreadsFromLocalDatabase]);
+  }, [loadEngines, reloadThreadsFromLocalDatabase, startupCompleted]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenAppStartupProgress((event) => {
+      setStartupProgress(event);
+      if (event.phase === "completed") {
+        const sshWorkspaceIds = useWorkspaceStore
+          .getState()
+          .workspaces.filter((workspace) => workspace.locationKind === "ssh")
+          .map((workspace) => workspace.id);
+        void Promise.all(
+          sshWorkspaceIds.map((workspaceId) =>
+            reloadThreadsFromLocalDatabase(workspaceId).catch((error) => {
+              console.warn(
+                `Failed to reload SSH remote project sessions for workspace ${workspaceId}:`,
+                error,
+              );
+            }),
+          ),
+        ).finally(() => setStartupCompleted(true));
+      }
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+        setStartupProgressListenerReady(true);
+      }
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [reloadThreadsFromLocalDatabase]);
+
+  useEffect(() => {
+    if (
+      !workspaceCatalogLoaded ||
+      !startupProgressListenerReady ||
+      startupSyncRequestedRef.current
+    ) {
+      return;
+    }
+    startupSyncRequestedRef.current = true;
+    void emit("ssh-remote-project-session-sync-ready").catch((error) => {
+      startupSyncRequestedRef.current = false;
+      console.warn("Failed to signal SSH remote project session sync readiness:", error);
+    });
+  }, [startupProgressListenerReady, workspaceCatalogLoaded]);
 
   useEffect(() => {
     let disposed = false;
@@ -346,9 +412,6 @@ export function App() {
         fn();
       } else {
         unlisten = fn;
-        void emit("ssh-remote-project-session-sync-ready").catch((error) => {
-          console.warn("Failed to signal SSH remote project session sync readiness:", error);
-        });
       }
     });
 
@@ -927,6 +990,35 @@ export function App() {
     } finally {
       setCliServiceRestartRunning(false);
     }
+  }
+
+  const startupPhaseMessages: Record<AppStartupPhase, string> = {
+    "loading-base-data": t("app:startup.phases.loadingBaseData"),
+    "connecting-ssh": t("app:startup.phases.connectingSsh"),
+    "creating-cli-tunnels": t("app:startup.phases.creatingCliTunnels"),
+    "starting-cli-services": t("app:startup.phases.startingCliServices"),
+    "syncing-remote-sessions": t("app:startup.phases.syncingRemoteSessions"),
+    completed: t("app:startup.phases.completed"),
+  };
+  const startupReady = workspaceCatalogLoaded && startupCompleted;
+
+  if (!startupReady) {
+    return (
+      <div
+        className={`app-shell${customWindowFrame ? " app-shell-custom-frame" : ""}${
+          customWindowFrameState.isMaximized ? " app-shell-custom-frame-maximized" : ""
+        }${customWindowFrameState.isFullscreen ? " app-shell-custom-frame-fullscreen" : ""}`}
+      >
+        {customWindowFrame && <CustomWindowFrame frameState={customWindowFrameState} />}
+        <div className="app-startup-screen" role="status" aria-live="polite">
+          <div className="app-startup-spinner" aria-hidden="true" />
+          <div className="app-startup-title">{t("app:startup.title")}</div>
+          <div className="app-startup-message">
+            {startupPhaseMessages[startupProgress.phase] || startupProgress.message}
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (

@@ -1,5 +1,16 @@
 {
   "title": "Panes",
+  "startup": {
+    "title": "Iniciando",
+    "phases": {
+      "loadingBaseData": "Carregando dados básicos…",
+      "connectingSsh": "Conectando aos servidores SSH…",
+      "creatingCliTunnels": "Criando túneis de CLI remota…",
+      "startingCliServices": "Iniciando serviços de CLI remota…",
+      "syncingRemoteSessions": "Sincronizando sessões remotas…",
+      "completed": "Inicialização concluída"
+    }
+  },
   "updates": {
     "checkingTitle": "Verificando atualizações",
     "checkingMessage": "Isso deve levar apenas um instante.",

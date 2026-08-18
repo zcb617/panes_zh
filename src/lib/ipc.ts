@@ -989,6 +989,30 @@ export interface ThreadUpdatedEvent {
 export const SSH_REMOTE_PROJECT_SESSIONS_REFRESHED_EVENT =
   "ssh-remote-project-sessions-refreshed";
 
+export const APP_STARTUP_PROGRESS_EVENT = "app-startup-progress";
+
+export type AppStartupPhase =
+  | "loading-base-data"
+  | "connecting-ssh"
+  | "creating-cli-tunnels"
+  | "starting-cli-services"
+  | "syncing-remote-sessions"
+  | "completed";
+
+export interface AppStartupProgressEvent {
+  phase: AppStartupPhase;
+  message: string;
+}
+
+export async function listenAppStartupProgress(
+  onEvent: (event: AppStartupProgressEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<AppStartupProgressEvent>(
+    APP_STARTUP_PROGRESS_EVENT,
+    ({ payload }) => onEvent(payload),
+  );
+}
+
 export interface SshRemoteProjectSessionsRefreshedEvent {
   /** 收到同步通知的 SSH workspace 标识。 */
   workspaceId: string;

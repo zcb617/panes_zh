@@ -259,7 +259,20 @@ pub fn run() {
             let app_handle = ssh_startup_handle.clone();
             let db = ssh_startup_db.clone();
             tauri::async_runtime::spawn(async move {
-                match ssh::cli_tunnel_registry::init_all_ssh_remote_server(db.clone().into()).await {
+                if let Err(error) = message_notify_helper::notify_app_startup_progress(
+                    &app_handle,
+                    "connecting-ssh",
+                    "正在建立 SSH 连接……",
+                ) {
+                    log::warn!("发送启动进度失败: {error:#}");
+                }
+
+                match ssh::cli_tunnel_registry::init_all_ssh_remote_server(
+                    &app_handle,
+                    db.clone().into(),
+                )
+                .await
+                {
                     Ok(initialization) => {
                         for result in initialization {
                             if let Some(error) = result.error {
@@ -268,6 +281,13 @@ pub fn run() {
                                     result.connection_id,
                                 );
                             }
+                        }
+                        if let Err(error) = message_notify_helper::notify_app_startup_progress(
+                            &app_handle,
+                            "starting-cli-services",
+                            "正在启动远端 CLI 服务……",
+                        ) {
+                            log::warn!("发送启动进度失败: {error:#}");
                         }
                         remote_project_session_refresh_service::refresh_all_ssh_remote_project_sessions(
                             &app_handle,
@@ -278,6 +298,14 @@ pub fn run() {
                     Err(error) => {
                         log::warn!("failed to initialize SSH remote server tunnel Map: {error:#}");
                     }
+                }
+
+                if let Err(error) = message_notify_helper::notify_app_startup_progress(
+                    &app_handle,
+                    "completed",
+                    "启动完成",
+                ) {
+                    log::warn!("发送启动完成通知失败: {error:#}");
                 }
             });
         });

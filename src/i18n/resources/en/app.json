@@ -1,5 +1,16 @@
 {
   "title": "Panes",
+  "startup": {
+    "title": "Starting",
+    "phases": {
+      "loadingBaseData": "Loading core data…",
+      "connectingSsh": "Connecting to SSH servers…",
+      "creatingCliTunnels": "Creating remote CLI tunnels…",
+      "startingCliServices": "Starting remote CLI services…",
+      "syncingRemoteSessions": "Syncing remote sessions…",
+      "completed": "Startup complete"
+    }
+  },
   "updates": {
     "checkingTitle": "Checking for updates",
     "checkingMessage": "This should only take a moment.",

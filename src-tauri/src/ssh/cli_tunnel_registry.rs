@@ -12,11 +12,13 @@ use anyhow::Context;
 #[allow(unused_imports)]
 use flate2::{write::GzEncoder, Compression};
 use tar::Builder;
+use tauri::AppHandle;
 use tokio::{process::Child, sync::Mutex, sync::RwLock};
 use uuid::Uuid;
 
 use crate::{
     db::ssh_connections::SshConnectionRecord,
+    message_notify_helper::notify_app_startup_progress,
     // ssh::{gateway, runtime::quote_posix},
     ssh::{
         gateway,
@@ -194,6 +196,7 @@ pub async fn add(tunnel: SshCliTunnel) -> AddSshCliTunnelResult {
 /// 该流程只执行 SSH 连通性检测、远端 CLI 扫描和本地端口转发注册，
 /// 不启动远端 CLI 服务，也不扫描或写入任何远端会话数据。
 pub async fn init_all_ssh_remote_server(
+    app: &AppHandle,
     db: Arc<crate::db::Database>,
 ) -> anyhow::Result<Vec<SshRemoteServerInitializationResult>> {
     // SQLite 连接是同步资源，放到阻塞线程中读取，避免启动恢复阻塞异步执行器。
@@ -218,6 +221,12 @@ pub async fn init_all_ssh_remote_server(
             result.error = Some(test.error.unwrap_or_else(|| "SSH 连接检测失败".to_string()));
             results.push(result);
             continue;
+        }
+
+        if let Err(error) =
+            notify_app_startup_progress(app, "creating-cli-tunnels", "正在建立远端 CLI 隧道……")
+        {
+            log::warn!("发送启动进度失败: {error:#}");
         }
 
         // 每个 CLI 的隧道独立恢复；单个 CLI 失败只记录错误，不影响同一主机的其他 CLI。

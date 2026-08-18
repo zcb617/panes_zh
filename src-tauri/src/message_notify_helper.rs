@@ -6,6 +6,17 @@ use tauri::{AppHandle, Emitter};
 pub const SSH_REMOTE_PROJECT_SESSIONS_REFRESHED_EVENT: &str =
     "ssh-remote-project-sessions-refreshed";
 
+/// 前端启动界面用于显示后端初始化进度的事件名称。
+pub const APP_STARTUP_PROGRESS_EVENT: &str = "app-startup-progress";
+
+/// 后端初始化阶段发生变化时发送给前端的事件载荷。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppStartupProgressEvent {
+    pub phase: String,
+    pub message: String,
+}
+
 /// SSH 远端项目会话刷新完成后发送给前端的事件载荷。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +41,22 @@ pub fn notify_ssh_remote_project_sessions_refreshed(
         .context("failed to emit SSH remote project sessions refreshed event")
 }
 
+/// 向前端启动界面发送当前初始化阶段。
+pub fn notify_app_startup_progress(
+    app: &AppHandle,
+    phase: &str,
+    message: &str,
+) -> anyhow::Result<()> {
+    app.emit(
+        APP_STARTUP_PROGRESS_EVENT,
+        AppStartupProgressEvent {
+            phase: phase.to_string(),
+            message: message.to_string(),
+        },
+    )
+    .context("failed to emit app startup progress event")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +79,19 @@ mod tests {
         assert_eq!(payload["succeededCliIds"][0], "codex");
         assert_eq!(payload["failedCliIds"][0], "claude");
         assert!(payload.get("workspace_id").is_none());
+    }
+
+    #[test]
+    fn startup_progress_event_contract_has_fixed_name_and_payload() {
+        assert_eq!(APP_STARTUP_PROGRESS_EVENT, "app-startup-progress");
+
+        let payload = serde_json::to_value(AppStartupProgressEvent {
+            phase: "connecting-ssh".to_owned(),
+            message: "正在建立 SSH 连接……".to_owned(),
+        })
+        .expect("startup progress event DTO should serialize");
+
+        assert_eq!(payload["phase"], "connecting-ssh");
+        assert_eq!(payload["message"], "正在建立 SSH 连接……");
     }
 }

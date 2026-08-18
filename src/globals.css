@@ -871,6 +871,48 @@ button, input, textarea, select {
   min-height: 0;
 }
 
+.app-startup-screen {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: var(--text-1);
+  background: var(--bg-1);
+}
+
+.app-startup-spinner {
+  width: 30px;
+  height: 30px;
+  margin-bottom: 4px;
+  border: 3px solid color-mix(in srgb, var(--text-2) 24%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: app-startup-spin 0.8s linear infinite;
+}
+
+.app-startup-title {
+  font-size: 32px;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.app-startup-message {
+  min-height: 20px;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--text-2);
+}
+
+@keyframes app-startup-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .app-shell-custom-frame-maximized,
 .app-shell-custom-frame-fullscreen {
   --content-top-margin: 0px;
