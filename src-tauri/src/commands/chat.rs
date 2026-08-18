@@ -2460,43 +2460,54 @@ async fn run_turn(
     let input_for_engine = turn_input.clone();
     let engine_thread_for_engine = engine_thread_id.clone();
     let cancellation_for_engine = cancellation.clone();
+    let cli_turn = codex_cli.or(opencode_cli).or(claude_cli);
+    let cli_turn_for_join_error = cli_turn.clone();
+    let engines_for_join_error = engines.clone();
+    let thread_for_join_error = thread_for_engine.clone();
+    let engine_thread_for_join_error = engine_thread_for_engine.clone();
 
     let engine_task = tokio::spawn(async move {
-        if let Some((codex, context)) = codex_cli {
-            let cli: &dyn CliTool = codex.as_ref();
-            cli.send_message(
-                &context,
-                &thread_for_engine,
-                &engine_thread_for_engine,
-                input_for_engine,
-                event_tx,
-                cancellation_for_engine,
-            )
-            .await
-        } else if let Some((opencode, context)) = opencode_cli {
-            let cli: &dyn CliTool = opencode.as_ref();
-            cli.send_message(
-                &context,
-                &thread_for_engine,
-                &engine_thread_for_engine,
-                input_for_engine,
-                event_tx,
-                cancellation_for_engine,
-            )
-            .await
-        } else if let Some((claude, context)) = claude_cli {
-            let cli: &dyn CliTool = claude.as_ref();
-            cli.send_message(
-                &context,
-                &thread_for_engine,
-                &engine_thread_for_engine,
-                input_for_engine,
-                event_tx,
-                cancellation_for_engine,
-            )
-            .await
+        if let Some((cli, context)) = cli_turn {
+            let send_result = cli
+                .send_message(
+                    &context,
+                    &thread_for_engine,
+                    &engine_thread_for_engine,
+                    input_for_engine,
+                    event_tx,
+                    cancellation_for_engine,
+                )
+                .await;
+            if let Err(send_error) = send_result {
+                log::error!(
+                    "chat turn failed: engine_id={}, thread_id={}, engine_thread_id={}, error={send_error:#}",
+                    thread_for_engine.engine_id,
+                    thread_for_engine.id,
+                    engine_thread_for_engine,
+                );
+                return match cli
+                    .interrupt(&context, &thread_for_engine, &engine_thread_for_engine)
+                    .await
+                {
+                    Ok(()) => Err(anyhow::anyhow!(
+                        "本轮对话执行失败，远端执行已取消：{send_error:#}"
+                    )),
+                    Err(interrupt_error) => {
+                        log::error!(
+                            "failed to interrupt chat turn after execution error: engine_id={}, thread_id={}, engine_thread_id={}, error={interrupt_error:#}",
+                            thread_for_engine.engine_id,
+                            thread_for_engine.id,
+                            engine_thread_for_engine,
+                        );
+                        Err(anyhow::anyhow!(
+                            "本轮对话执行失败，并且取消远端执行失败。执行错误：{send_error:#}；取消错误：{interrupt_error:#}"
+                        ))
+                    }
+                };
+            }
+            Ok(())
         } else {
-            engines
+            let send_result = engines
                 .send_message(
                     &thread_for_engine,
                     &engine_thread_for_engine,
@@ -2504,7 +2515,32 @@ async fn run_turn(
                     event_tx,
                     cancellation_for_engine,
                 )
-                .await
+                .await;
+            if let Err(send_error) = send_result {
+                log::error!(
+                    "chat turn failed: engine_id={}, thread_id={}, engine_thread_id={}, error={send_error:#}",
+                    thread_for_engine.engine_id,
+                    thread_for_engine.id,
+                    engine_thread_for_engine,
+                );
+                return match engines.interrupt(&thread_for_engine).await {
+                    Ok(()) => Err(anyhow::anyhow!(
+                        "本轮对话执行失败，远端执行已取消：{send_error:#}"
+                    )),
+                    Err(interrupt_error) => {
+                        log::error!(
+                            "failed to interrupt chat turn after execution error: engine_id={}, thread_id={}, engine_thread_id={}, error={interrupt_error:#}",
+                            thread_for_engine.engine_id,
+                            thread_for_engine.id,
+                            engine_thread_for_engine,
+                        );
+                        Err(anyhow::anyhow!(
+                            "本轮对话执行失败，并且取消远端执行失败。执行错误：{send_error:#}；取消错误：{interrupt_error:#}"
+                        ))
+                    }
+                };
+            }
+            Ok(())
         }
     });
 
@@ -2894,6 +2930,32 @@ async fn run_turn(
         }
         Err(error) => {
             engine_failed = true;
+            let interrupt_result = if let Some((cli, context)) = cli_turn_for_join_error {
+                cli.interrupt(
+                    &context,
+                    &thread_for_join_error,
+                    &engine_thread_for_join_error,
+                )
+                .await
+            } else {
+                engines_for_join_error
+                    .interrupt(&thread_for_join_error)
+                    .await
+            };
+            let error_message = match interrupt_result {
+                Ok(()) => format!("Engine task join error，远端执行已取消: {error}"),
+                Err(interrupt_error) => {
+                    log::error!(
+                        "failed to interrupt chat turn after join error: engine_id={}, thread_id={}, engine_thread_id={}, error={interrupt_error:#}",
+                        thread_for_join_error.engine_id,
+                        thread_for_join_error.id,
+                        engine_thread_for_join_error,
+                    );
+                    format!(
+                        "Engine task join error，并且取消远端执行失败: {error}；取消错误：{interrupt_error:#}"
+                    )
+                }
+            };
             crate::engines::codex::append_codex_transport_log(&serde_json::json!({
                 "at": chrono::Utc::now().to_rfc3339(),
                 "event": "engine_task_complete",
@@ -2904,7 +2966,7 @@ async fn run_turn(
             }))
             .await;
             blocks.push(ContentBlock::Error {
-                message: format!("Engine task join error: {error}"),
+                message: error_message.clone(),
             });
             blocks_dirty = true;
             if message_status != MessageStatusDto::Error {
@@ -2915,6 +2977,13 @@ async fn run_turn(
                 thread_status = ThreadStatusDto::Error;
                 thread_status_dirty = true;
             }
+            let _ = app.emit(
+                &stream_event_topic,
+                EngineEvent::Error {
+                    message: error_message,
+                    recoverable: false,
+                },
+            );
         }
     }
 
