@@ -2742,6 +2742,11 @@ async fn run_turn(
                 if engine_task_finished {
                     break 'turn_loop TurnOutcome::Completed;
                 }
+                if matches!(message_status, MessageStatusDto::Streaming) {
+                    break 'turn_loop TurnOutcome::Failed(anyhow::anyhow!(
+                        "本轮对话尚未完成，但事件接收通道已经关闭"
+                    ));
+                }
                 continue;
             }
             TurnWait::FlushPending => {
