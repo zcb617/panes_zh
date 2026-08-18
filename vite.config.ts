@@ -8,10 +8,10 @@ export default defineConfig({
     minify: false,
   },
   server: {
-    port: 1420,
+    port: 42514,
     strictPort: true,
     hmr: {
-      port: 1421
+      port: 42515
     }
   },
   clearScreen: false,

@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm run dev",
     "beforeBuildCommand": "node scripts/build-desktop.mjs",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:42514",
     "frontendDist": "../dist"
   },
   "app": {

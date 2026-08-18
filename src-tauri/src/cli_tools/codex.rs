@@ -13,7 +13,9 @@ use super::{
 use crate::{
     db,
     engines::{
-        capabilities_for_engine, codex::CodexReviewStarted, map_provider_usage,
+        capabilities_for_engine,
+        codex::{CodexEngine, CodexReviewStarted},
+        map_engine_capabilities, map_model_info, map_provider_usage,
         ApprovalRequestRoute, CodexRuntimeEvent, Engine, EngineCapabilities, EngineEvent,
         EngineSteerReceipt, EngineThread, ModelInfo, SandboxPolicy, ThreadScope,
         ThreadSyncSnapshot, TurnInput,
@@ -36,8 +38,7 @@ use crate::{
 #[derive(Clone)]
 pub struct CodexCli {
     state: AppState,
-    remote_turn_use:
-        Arc<Mutex<Option<remote_project_codex_runtime_service::RemoteCodexServiceUse>>>,
+    remote_turn_use: Arc<Mutex<Option<Arc<CodexEngine>>>>,
 }
 
 impl CodexCli {
@@ -253,12 +254,17 @@ impl CliTool for CodexCli {
     async fn get_engine_info(&self, context: &CliExecutionContext) -> Result<EngineInfoDto> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let remote_turn_use = self.remote_turn_use.lock().await;
-            return remote_project_codex_runtime_service::engine_info(
-                &workspace,
-                remote_turn_use.as_ref(),
-            )
-            .await;
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            let engine = service.get_runtime::<CodexEngine>().await?;
+            let models = engine.list_models_runtime().await;
+            return Ok(EngineInfoDto {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                models: models.into_iter().map(map_model_info).collect(),
+                capabilities: map_engine_capabilities(capabilities_for_engine("codex")),
+            });
         }
 
         self.state
@@ -277,12 +283,10 @@ impl CliTool for CodexCli {
     ) -> Result<Vec<ModelInfo>> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let remote_turn_use = self.remote_turn_use.lock().await;
-            return remote_project_codex_runtime_service::model_infos(
-                &workspace,
-                remote_turn_use.as_ref(),
-            )
-            .await;
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            return Ok(service.get_runtime::<CodexEngine>().await?.list_models_runtime().await);
         }
 
         self.state
@@ -297,10 +301,14 @@ impl CliTool for CodexCli {
     ) -> Result<Option<ChatProviderUsageDto>> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let service_use =
-                remote_project_codex_runtime_service::acquire_temporary(&workspace).await?;
-            let result = service_use.engine().usage_limits_snapshot().await;
-            service_use.release().await;
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            let result = service
+                .get_runtime::<CodexEngine>()
+                .await?
+                .usage_limits_snapshot()
+                .await;
             return Ok(Some(map_provider_usage("codex", "Codex", result)));
         }
 
@@ -331,19 +339,20 @@ impl CliTool for CodexCli {
         .context("读取 SSH 连接任务失败")??
         .ok_or_else(|| anyhow::anyhow!("SSH 连接不存在: {connection_id}"))?;
 
-        let service_use = remote_project_codex_runtime_service::acquire_temporary(&workspace).await;
         let mut protocol_diagnostics = None;
-        let availability = match service_use {
-            Ok(service_use) => {
-                let models = service_use.engine().list_models_runtime().await;
-                protocol_diagnostics = service_use.engine().protocol_diagnostics_snapshot().await;
-                service_use.release().await;
-                if models.is_empty() {
-                    Err(anyhow::anyhow!("远端 Codex 模型目录为空"))
-                } else {
-                    Ok(())
+        let availability = match ssh::cli_service_lifecycle::get(&connection_id, "codex").await {
+            Ok(service) => match service.get_runtime::<CodexEngine>().await {
+                Ok(engine) => {
+                    let models = engine.list_models_runtime().await;
+                    protocol_diagnostics = engine.protocol_diagnostics_snapshot().await;
+                    if models.is_empty() {
+                        Err(anyhow::anyhow!("远端 Codex 模型目录为空"))
+                    } else {
+                        Ok(())
+                    }
                 }
-            }
+                Err(error) => Err(error),
+            },
             Err(error) => Err(error),
         };
 
@@ -385,9 +394,11 @@ impl CliTool for CodexCli {
     async fn prewarm_engine(&self, context: &CliExecutionContext) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            remote_project_codex_runtime_service::engine_info(&workspace, None)
-                .await
-                .map(|_| ())
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            let _ = service.get_runtime::<CodexEngine>().await?.list_models_runtime().await;
+            Ok(())
         } else {
             self.state.engines.prewarm("codex").await
         }
@@ -417,11 +428,9 @@ impl CliTool for CodexCli {
                 remote_project_codex_runtime_service::acquire_temporary(&workspace).await?;
             let connection_id =
                 remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
-            let tunnel = ssh::cli_tunnel_registry::get(connection_id, "codex")
-                .await
-                .context("当前 SSH 远端 Codex tunnel 不存在")?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
             let result = remote_project_session_refresh_service::list_codex_sessions(
-                tunnel.as_ref(),
+                service.tunnel().as_ref(),
                 &workspace.root_path,
             )
             .await;
@@ -448,14 +457,14 @@ impl CliTool for CodexCli {
             });
         }
         let summaries = if context.location_kind == CliLocationKind::Ssh {
-            let service_use =
-                remote_project_codex_runtime_service::acquire_temporary(&workspace).await?;
-            let result = service_use
-                .engine()
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            service
+                .get_runtime::<CodexEngine>()
+                .await?
                 .list_threads(search_term, archived)
-                .await;
-            service_use.release().await;
-            result?
+                .await?
         } else {
             self.state
                 .engines
@@ -478,14 +487,14 @@ impl CliTool for CodexCli {
     ) -> Result<CliSessionSnapshot> {
         let workspace = self.load_workspace(context).await?;
         let summary = if context.location_kind == CliLocationKind::Ssh {
-            let service_use =
-                remote_project_codex_runtime_service::acquire_temporary(&workspace).await?;
-            let result = service_use
-                .engine()
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            service
+                .get_runtime::<CodexEngine>()
+                .await?
                 .read_remote_thread(engine_thread_id)
-                .await;
-            service_use.release().await;
-            result?
+                .await?
         } else {
             self.state
                 .engines
@@ -505,9 +514,10 @@ impl CliTool for CodexCli {
     async fn acquire_turn(&self, context: &CliExecutionContext, thread: &ThreadDto) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let service_use =
-                remote_project_codex_runtime_service::acquire_turn(&workspace, &thread.id).await?;
-            *self.remote_turn_use.lock().await = Some(service_use);
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            *self.remote_turn_use.lock().await = Some(service.get_runtime::<CodexEngine>().await?);
         }
         Ok(())
     }
@@ -524,11 +534,11 @@ impl CliTool for CodexCli {
         self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
             let remote_turn_use = self.remote_turn_use.lock().await;
-            let service_use = remote_turn_use
+            let engine = remote_turn_use
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("当前 SSH 远端 Codex 会话尚未建立持续使用关系"))?;
             return Engine::start_thread(
-                service_use.engine().as_ref(),
+                engine.as_ref(),
                 scope,
                 resume_engine_thread_id,
                 model,
@@ -557,19 +567,18 @@ impl CliTool for CodexCli {
     ) -> Result<()> {
         self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let service_use =
+            let engine =
                 self.remote_turn_use.lock().await.take().ok_or_else(|| {
                     anyhow::anyhow!("当前 SSH 远端 Codex 会话尚未建立持续使用关系")
                 })?;
             let result = Engine::send_message(
-                service_use.engine().as_ref(),
+                engine.as_ref(),
                 engine_thread_id,
                 input,
                 event_tx,
                 cancellation,
             )
             .await;
-            service_use.release().await;
             return result;
         }
 
@@ -591,9 +600,12 @@ impl CliTool for CodexCli {
     ) -> Result<EngineSteerReceipt> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            remote_project_codex_runtime_service::steer_message(
-                &workspace,
-                thread,
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            let engine = service.get_runtime::<CodexEngine>().await?;
+            Engine::steer_message(
+                engine.as_ref(),
                 engine_thread_id,
                 client_steer_id,
                 content,
@@ -619,14 +631,18 @@ impl CliTool for CodexCli {
     ) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            remote_project_codex_runtime_service::respond_to_approval(
-                &workspace,
-                thread,
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            let engine = service.get_runtime::<CodexEngine>().await?;
+            Engine::respond_to_approval(
+                engine.as_ref(),
                 approval_id,
                 response,
                 route,
             )
             .await
+            .with_context(|| format!("SSH 远端 Codex 审批回复失败: thread_id={}", thread.id))
         } else {
             self.state
                 .engines
@@ -643,7 +659,16 @@ impl CliTool for CodexCli {
     ) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            remote_project_codex_runtime_service::interrupt(&workspace, thread).await
+            let Some(engine_thread_id) = thread.engine_thread_id.as_deref() else {
+                return Ok(());
+            };
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            let engine = service.get_runtime::<CodexEngine>().await?;
+            Engine::interrupt(engine.as_ref(), engine_thread_id)
+                .await
+                .with_context(|| format!("SSH 远端 Codex 取消失败: thread_id={}", thread.id))
         } else {
             self.state.engines.interrupt(thread).await
         }
@@ -657,12 +682,11 @@ impl CliTool for CodexCli {
     ) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            remote_project_codex_runtime_service::set_thread_archived(
-                &workspace,
-                engine_thread_id,
-                true,
-            )
-            .await
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            let engine = service.get_runtime::<CodexEngine>().await?;
+            Engine::archive_thread(engine.as_ref(), engine_thread_id).await
         } else {
             match self.state.engines.archive_thread(thread).await {
                 Ok(()) => Ok(()),
@@ -710,12 +734,11 @@ impl CliTool for CodexCli {
     ) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            remote_project_codex_runtime_service::set_thread_archived(
-                &workspace,
-                engine_thread_id,
-                false,
-            )
-            .await
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            let engine = service.get_runtime::<CodexEngine>().await?;
+            Engine::unarchive_thread(engine.as_ref(), engine_thread_id).await
         } else {
             self.state.engines.unarchive_thread(thread).await
         }
@@ -739,13 +762,14 @@ impl CliTool for CodexCli {
     ) -> Result<Option<String>> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let service_use =
-                remote_project_codex_runtime_service::acquire_temporary(&workspace).await?;
-            let preview = service_use
-                .engine()
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            let preview = service
+                .get_runtime::<CodexEngine>()
+                .await?
                 .read_thread_preview(engine_thread_id)
                 .await;
-            service_use.release().await;
             Ok(preview)
         } else {
             Ok(self
@@ -764,12 +788,15 @@ impl CliTool for CodexCli {
     ) -> Result<Option<ThreadSyncSnapshot>> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            return remote_project_codex_runtime_service::read_thread_sync_snapshot(
-                &workspace,
-                engine_thread_id,
-            )
-            .await
-            .map(Some);
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            return service
+                .get_runtime::<CodexEngine>()
+                .await?
+                .read_thread_sync_snapshot(engine_thread_id)
+                .await
+                .map(Some);
         }
 
         self.state.engines.read_thread_sync_snapshot(thread).await
@@ -784,14 +811,14 @@ impl CliTool for CodexCli {
     ) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let service_use =
-                remote_project_codex_runtime_service::acquire_temporary(&workspace).await?;
-            let result = service_use
-                .engine()
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            service
+                .get_runtime::<CodexEngine>()
+                .await?
                 .set_thread_name(engine_thread_id, name)
-                .await;
-            service_use.release().await;
-            result
+                .await
         } else {
             self.state
                 .engines
@@ -807,16 +834,14 @@ impl CliTool for CodexCli {
     ) -> Result<Vec<CodexSkillDto>> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let remote_turn_use = self.remote_turn_use.lock().await;
-            if let Some(service_use) = remote_turn_use.as_ref() {
-                return service_use.engine().list_skills(&workspace.root_path).await;
-            }
-            drop(remote_turn_use);
-            let service_use =
-                remote_project_codex_runtime_service::acquire_temporary(&workspace).await?;
-            let result = service_use.engine().list_skills(&workspace.root_path).await;
-            service_use.release().await;
-            return result;
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            return service
+                .get_runtime::<CodexEngine>()
+                .await?
+                .list_skills(&workspace.root_path)
+                .await;
         }
         self.state.engines.list_codex_skills(cwd).await
     }
@@ -824,16 +849,10 @@ impl CliTool for CodexCli {
     async fn list_codex_apps(&self, context: &CliExecutionContext) -> Result<Vec<CodexAppDto>> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let remote_turn_use = self.remote_turn_use.lock().await;
-            if let Some(service_use) = remote_turn_use.as_ref() {
-                return service_use.engine().list_apps().await;
-            }
-            drop(remote_turn_use);
-            let service_use =
-                remote_project_codex_runtime_service::acquire_temporary(&workspace).await?;
-            let result = service_use.engine().list_apps().await;
-            service_use.release().await;
-            return result;
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            return service.get_runtime::<CodexEngine>().await?.list_apps().await;
         }
         self.state.engines.list_codex_apps().await
     }
@@ -845,22 +864,14 @@ impl CliTool for CodexCli {
     ) -> Result<Vec<CodexPluginDto>> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
-            let remote_turn_use = self.remote_turn_use.lock().await;
-            if let Some(service_use) = remote_turn_use.as_ref() {
-                return service_use
-                    .engine()
-                    .list_plugins(&workspace.root_path)
-                    .await;
-            }
-            drop(remote_turn_use);
-            let service_use =
-                remote_project_codex_runtime_service::acquire_temporary(&workspace).await?;
-            let result = service_use
-                .engine()
+            let connection_id =
+                remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+            let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+            return service
+                .get_runtime::<CodexEngine>()
+                .await?
                 .list_plugins(&workspace.root_path)
                 .await;
-            service_use.release().await;
-            return result;
         }
         self.state.engines.list_codex_plugins(cwd).await
     }
@@ -924,15 +935,15 @@ impl CliTool for CodexCli {
             .await;
         }
 
-        let service_use =
-            remote_project_codex_runtime_service::acquire_temporary(&workspace).await?;
-        let skills_result = service_use.engine().list_skills(&workspace.root_path).await;
-        let plugins_result = service_use
-            .engine()
+        let connection_id =
+            remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)?;
+        let service = ssh::cli_service_lifecycle::get(connection_id, "codex").await?;
+        let engine = service.get_runtime::<CodexEngine>().await?;
+        let skills_result = engine.list_skills(&workspace.root_path).await;
+        let plugins_result = engine
             .list_plugins(&workspace.root_path)
             .await;
-        let diagnostics = service_use.engine().protocol_diagnostics_snapshot().await;
-        service_use.release().await;
+        let diagnostics = engine.protocol_diagnostics_snapshot().await;
         let skills = skills_result?;
         let plugins = plugins_result?;
         let mcp_servers = diagnostics
