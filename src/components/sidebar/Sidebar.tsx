@@ -24,6 +24,7 @@ import {
   Boxes,
   CalendarClock,
   Globe2,
+  Loader2,
 } from "lucide-react";
 import { useChatStore } from "../../stores/chatStore";
 import { useThreadStore } from "../../stores/threadStore";
@@ -96,6 +97,7 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
     workspaces,
     archivedWorkspaces,
     activeWorkspaceId,
+    sshSessionSyncingWorkspaceIds,
     setActiveWorkspace,
     setActiveRepo,
     openWorkspace,
@@ -336,6 +338,9 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
 
   function renderProject(project: ProjectGroup, isPinned: boolean) {
     const isActiveProject = project.workspace.id === activeWorkspaceId;
+    const isSshSessionSyncing =
+      project.workspace.locationKind === "ssh" &&
+      sshSessionSyncingWorkspaceIds[project.workspace.id] === true;
     const isCollapsed = collapsed[project.workspace.id] ?? false;
     const projectName = getWorkspaceLabel(project.workspace);
     const isShowingAll = showAll[project.workspace.id] ?? false;
@@ -390,6 +395,23 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
             />
           )}
           <span className="sb-project-name">{projectName}</span>
+
+          {isSshSessionSyncing && (
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                color: "var(--text-3)",
+                fontSize: 10,
+                whiteSpace: "nowrap",
+              }}
+              title={t("app:startup.phases.syncingRemoteSessions")}
+            >
+              <Loader2 size={11} className="animate-spin" aria-hidden="true" />
+              {t("app:startup.phases.syncingRemoteSessions")}
+            </span>
+          )}
 
           <span className="sb-project-trailing">
             {project.threads.length > 0 && (

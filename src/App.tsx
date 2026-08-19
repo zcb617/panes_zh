@@ -142,6 +142,7 @@ export function App() {
   const loadWorkspaces = useWorkspaceStore((s) => s.loadWorkspaces);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const completeSshSessionSync = useWorkspaceStore((s) => s.completeSshSessionSync);
   const loadEngines = useEngineStore((s) => s.load);
   const engines = useEngineStore((s) => s.engines);
   const applyEngineRuntimeUpdate = useEngineStore((s) => s.applyRuntimeUpdate);
@@ -214,11 +215,21 @@ export function App() {
   }, [loadWorkspaces, loadKeepAwake, loadTerminalNotificationSettings]);
 
   useEffect(() => {
-    if (!workspaceCatalogLoaded || !startupCompleted) {
+    if (
+      !workspaceCatalogLoaded ||
+      !startupCompleted ||
+      !activeWorkspaceId ||
+      useWorkspaceStore.getState().sshSessionSyncingWorkspaceIds[activeWorkspaceId]
+    ) {
       return;
     }
     void loadEngines(activeWorkspaceId);
-  }, [activeWorkspaceId, loadEngines, startupCompleted, workspaceCatalogLoaded]);
+  }, [
+    activeWorkspaceId,
+    loadEngines,
+    startupCompleted,
+    workspaceCatalogLoaded,
+  ]);
 
   useEffect(() => {
     const localWorkspaceIds = workspaces
@@ -308,23 +319,24 @@ export function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listenSshRemoteProjectSessionsRefreshed(async (event) => {
-      /*
-      旧实现收到会话同步完成通知后还会刷新 CLI 列表。该通知只负责通知前端重新读取
-      已提交的会话数据；CLI 工具、模型和健康状态在界面实际使用时实时调用后端接口：
-      if (
-        startupCompleted &&
-        useWorkspaceStore.getState().activeWorkspaceId === event.workspaceId
-      ) {
-        void loadEngines(event.workspaceId);
-      }
-      */
       try {
-        await reloadThreadsFromLocalDatabase(event.workspaceId);
-      } catch (error) {
-        console.warn(
-          `Failed to reload SSH remote project sessions for workspace ${event.workspaceId}:`,
-          error,
-        );
+        try {
+          await reloadThreadsFromLocalDatabase(event.workspaceId);
+        } catch (error) {
+          console.warn(
+            `Failed to reload SSH remote project sessions for workspace ${event.workspaceId}:`,
+            error,
+          );
+        }
+
+        if (
+          startupCompleted &&
+          useWorkspaceStore.getState().activeWorkspaceId === event.workspaceId
+        ) {
+          await loadEngines(event.workspaceId);
+        }
+      } finally {
+        completeSshSessionSync(event.workspaceId);
       }
 
       if (event.failedCliIds.length > 0) {
@@ -346,7 +358,7 @@ export function App() {
         unlisten();
       }
     };
-  }, [reloadThreadsFromLocalDatabase]);
+  }, [completeSshSessionSync, loadEngines, reloadThreadsFromLocalDatabase, startupCompleted]);
 
   useEffect(() => {
     let disposed = false;

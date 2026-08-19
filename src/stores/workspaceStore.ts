@@ -12,6 +12,12 @@ interface WorkspaceState {
   workspaces: Workspace[];
   archivedWorkspaces: Workspace[];
   activeWorkspaceId: string | null;
+  /** 正在后台同步远端项目历史会话的 SSH workspace 集合。 */
+  sshSessionSyncingWorkspaceIds: Record<string, boolean>;
+  /** 正在等待后端返回新 SSH workspace 的创建请求数量。 */
+  sshWorkspaceCreationInFlight: number;
+  /** 后端完成通知先于 workspace 前端登记时暂存的 workspace 集合。 */
+  sshSessionSyncCompletedBeforeRegistration: Record<string, boolean>;
   repos: Repo[];
   activeRepoId: string | null;
   reposLoading: boolean;
@@ -26,6 +32,8 @@ interface WorkspaceState {
     rootPath: string,
     scanDepth?: number,
   ) => Promise<Workspace | null>;
+  /** 清除远端项目历史会话同步状态，并保留已有会话数据。 */
+  completeSshSessionSync: (workspaceId: string) => void;
   removeWorkspace: (workspaceId: string) => Promise<boolean>;
   restoreWorkspace: (workspaceId: string) => Promise<void>;
   loadRepos: (workspaceId: string) => Promise<void>;
@@ -148,6 +156,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaces: [],
   archivedWorkspaces: [],
   activeWorkspaceId: null,
+  sshSessionSyncingWorkspaceIds: {},
+  sshWorkspaceCreationInFlight: 0,
+  sshSessionSyncCompletedBeforeRegistration: {},
   repos: [],
   activeRepoId: null,
   reposLoading: false,
@@ -203,27 +214,69 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }
   },
   createSshWorkspace: async (connectionId, name, rootPath, scanDepth) => {
-    set({ loading: true, error: undefined });
+    set((state) => ({
+      loading: true,
+      error: undefined,
+      sshWorkspaceCreationInFlight: state.sshWorkspaceCreationInFlight + 1,
+    }));
     try {
       const workspace = await ipc.createSshWorkspace(connectionId, name, rootPath, scanDepth);
       localStorage.setItem(LAST_WORKSPACE_KEY, workspace.id);
-      set((state) => ({
-        workspaces: [workspace, ...state.workspaces.filter((item) => item.id !== workspace.id)],
-        archivedWorkspaces: state.archivedWorkspaces.filter((item) => item.id !== workspace.id),
-        activeWorkspaceId: workspace.id,
-        repos: [],
-        activeRepoId: null,
-        reposLoading: false,
-        loading: false,
-      }));
+      set((state) => {
+        const completedBeforeRegistration =
+          state.sshSessionSyncCompletedBeforeRegistration[workspace.id] === true;
+        const nextCompletedBeforeRegistration = {
+          ...state.sshSessionSyncCompletedBeforeRegistration,
+        };
+        delete nextCompletedBeforeRegistration[workspace.id];
+        return {
+          sshSessionSyncingWorkspaceIds: completedBeforeRegistration
+            ? state.sshSessionSyncingWorkspaceIds
+            : {
+                ...state.sshSessionSyncingWorkspaceIds,
+                [workspace.id]: true,
+              },
+          sshSessionSyncCompletedBeforeRegistration: nextCompletedBeforeRegistration,
+          workspaces: [workspace, ...state.workspaces.filter((item) => item.id !== workspace.id)],
+          archivedWorkspaces: state.archivedWorkspaces.filter((item) => item.id !== workspace.id),
+          activeWorkspaceId: workspace.id,
+          repos: [],
+          activeRepoId: null,
+          reposLoading: false,
+          loading: false,
+          sshWorkspaceCreationInFlight: Math.max(0, state.sshWorkspaceCreationInFlight - 1),
+        };
+      });
       await useTerminalStore.getState().prepareWorkspaceActivation(workspace.id);
       useGitStore.getState().loadDraftsForWorkspace(workspace.id);
       await get().loadRepos(workspace.id);
       return workspace;
     } catch (error) {
-      set({ loading: false, error: String(error) });
+      set((state) => ({
+        loading: false,
+        error: String(error),
+        sshWorkspaceCreationInFlight: Math.max(0, state.sshWorkspaceCreationInFlight - 1),
+      }));
       return null;
     }
+  },
+  completeSshSessionSync: (workspaceId) => {
+    set((state) => {
+      if (!state.sshSessionSyncingWorkspaceIds[workspaceId]) {
+        if (state.sshWorkspaceCreationInFlight === 0) {
+          return state;
+        }
+        return {
+          sshSessionSyncCompletedBeforeRegistration: {
+            ...state.sshSessionSyncCompletedBeforeRegistration,
+            [workspaceId]: true,
+          },
+        };
+      }
+      const next = { ...state.sshSessionSyncingWorkspaceIds };
+      delete next[workspaceId];
+      return { sshSessionSyncingWorkspaceIds: next };
+    });
   },
   removeWorkspace: async (workspaceId) => {
     set({ loading: true, error: undefined });
@@ -253,6 +306,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         */
         archivedWorkspaces: state.archivedWorkspaces.filter((workspace) => workspace.id !== workspaceId),
         activeWorkspaceId: nextActive,
+        sshSessionSyncingWorkspaceIds: Object.fromEntries(
+          Object.entries(state.sshSessionSyncingWorkspaceIds).filter(
+            ([id]) => id !== workspaceId,
+          ),
+        ),
+        sshSessionSyncCompletedBeforeRegistration: Object.fromEntries(
+          Object.entries(state.sshSessionSyncCompletedBeforeRegistration).filter(
+            ([id]) => id !== workspaceId,
+          ),
+        ),
         loading: false,
       }));
 
