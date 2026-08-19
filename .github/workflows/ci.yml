@@ -293,8 +293,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build desktop assets
-        run: pnpm run build:desktop
+      - name: Build frontend assets
+        # This job only shares dist with platform release jobs.
+        # run: pnpm run build:desktop
+        run: pnpm run build
 
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
@@ -316,7 +318,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [macos-15, ubuntu-22.04, windows-latest]
+        include:
+          - platform: macos-15
+            sidecar_target_dir: src-tauri/target/universal-apple-darwin/release/sidecar-dist
+          - platform: ubuntu-22.04
+            sidecar_target_dir: src-tauri/target/release/sidecar-dist
+          - platform: windows-latest
+            sidecar_target_dir: src-tauri/target/release/sidecar-dist
 
     steps:
       - name: Checkout released tag
@@ -366,6 +374,24 @@ jobs:
           cache: "pnpm"
           cache-dependency-path: pnpm-lock.yaml
 
+      - name: Check Claude sidecar content version
+        id: claude_sidecar_version
+        shell: bash
+        run: |
+          current_version="$(node scripts/build-claude-sidecar.mjs --print-version)"
+          version_file="${{ matrix.sidecar_target_dir }}/claude-remote-runtime-version.txt"
+          existing_version=""
+          if [ -f "$version_file" ]; then
+            existing_version="$(tr -d '\r\n' < "$version_file")"
+          fi
+          if [ -n "$existing_version" ] && [ "$current_version" = "$existing_version" ]; then
+            echo "needs_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Current Claude sidecar version: $current_version"
+          echo "Existing Claude sidecar version: ${existing_version:-missing}"
+
       - name: Install dependencies
         if: matrix.platform != 'macos-15'
         run: pnpm install --frozen-lockfile
@@ -381,7 +407,15 @@ jobs:
           pnpm install --frozen-lockfile
           git checkout -- package.json
 
+      - name: Reuse existing Claude sidecar assets
+        if: steps.claude_sidecar_version.outputs.needs_build == 'false'
+        shell: bash
+        run: |
+          mkdir -p src-tauri/sidecar-dist
+          cp -R "${{ matrix.sidecar_target_dir }}/." src-tauri/sidecar-dist/
+
       - name: Build platform Claude sidecar assets
+        if: steps.claude_sidecar_version.outputs.needs_build == 'true'
         run: pnpm run build:claude-sidecar
 
       - name: Build universal macOS bundles

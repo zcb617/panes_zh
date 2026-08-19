@@ -92,7 +92,19 @@ async function removeGeneratedSidecarPath(targetPath, options) {
   await rm(targetPath, options);
 }
 
-async function stageRemoteLinuxRuntime(sdkPackageDir) {
+async function calculateRemoteRuntimeVersion() {
+  const versionHash = createHash("sha256");
+  for (const source of [
+    entryPoint,
+    remoteSessionEntryPoint,
+    path.join(repoRoot, "pnpm-lock.yaml"),
+  ]) {
+    versionHash.update(await readFile(source));
+  }
+  return versionHash.digest("hex").slice(0, 16);
+}
+
+async function stageRemoteLinuxRuntime(sdkPackageDir, contentVersion) {
   const stagingDir = path.join(outDir, ".claude-remote-linux-x64");
   const stagingNodeModulesDir = path.join(stagingDir, "node_modules");
   const stagingSdkPackageDir = path.join(
@@ -100,11 +112,6 @@ async function stageRemoteLinuxRuntime(sdkPackageDir) {
     "@anthropic-ai",
     "claude-agent-sdk",
   );
-  const versionHash = createHash("sha256");
-  for (const source of [entryPoint, remoteSessionEntryPoint, path.join(repoRoot, "pnpm-lock.yaml")]) {
-    versionHash.update(await readFile(source));
-  }
-  const contentVersion = versionHash.digest("hex").slice(0, 16);
 
   await removeGeneratedSidecarPath(stagingDir, { recursive: true, force: true });
   await removeGeneratedSidecarPath(remoteLinuxRuntimeArchiveFile, { force: true });
@@ -153,6 +160,11 @@ async function archiveLinuxSdkNodeModules() {
   console.log("Archived Claude SDK node_modules for Linux runtime staging.");
 }
 
+if (process.argv.includes("--print-version")) {
+  console.log(await calculateRemoteRuntimeVersion());
+  process.exit(0);
+}
+
 const { sdkPackageDir } = await ensureClaudeSdkPnpmLayout(repoRoot);
 
 await removeGeneratedSidecarPath(sdkDistNodeModulesDir, {
@@ -182,7 +194,8 @@ await stageClaudeSdkPlatformAssets({
   targetArch: process.env.PANES_CLAUDE_SDK_ARCH ?? process.arch,
   targetLibc: process.env.PANES_CLAUDE_SDK_LIBC ?? "glibc",
 });
-await stageRemoteLinuxRuntime(sdkPackageDir);
+const contentVersion = await calculateRemoteRuntimeVersion();
+await stageRemoteLinuxRuntime(sdkPackageDir, contentVersion);
 await archiveLinuxSdkNodeModules();
 
 const output = await readFile(outFile, "utf8");
