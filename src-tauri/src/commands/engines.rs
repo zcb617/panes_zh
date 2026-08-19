@@ -93,8 +93,32 @@ pub async fn get_execution_target(
 #[tauri::command]
 pub async fn list_actived_clis(
     state: State<'_, AppState>,
-    workspace_id: Option<String>,
+    connection_id: Option<String>,
 ) -> Result<Vec<EngineInfoDto>, String> {
+    if let Some(connection_id) = connection_id {
+        let services = crate::ssh::cli_service_lifecycle::list_ready(&connection_id).await;
+        if services.is_empty() {
+            return Err("SSH 远端机器没有已激活的 Codex、OpenCode 或 Claude CLI 工具".to_string());
+        }
+
+        let factory = CliToolFactory::new(state.inner().clone());
+        let mut engines = Vec::new();
+        for service in services {
+            let cli_id = service.cli_id();
+            let cli = factory.create(cli_id).map_err(err_to_string)?;
+            engines.push(EngineInfoDto {
+                id: cli_id.to_string(),
+                name: cli.name().to_string(),
+                models: Vec::new(),
+                capabilities: map_engine_capabilities(capabilities_for_engine(cli_id)),
+            });
+        }
+        return Ok(engines);
+    }
+
+    /*
+    旧实现接收 workspaceId，先查询项目，再从远端项目取得 connectionId。CLI 列表属于
+    本地电脑或指定的远端电脑，不属于项目目录，因此不再执行这段项目查询和分流逻辑：
     if let Some(workspace_id) = workspace_id {
         let db = state.db.clone();
         let lookup_workspace_id = workspace_id.clone();
@@ -222,6 +246,7 @@ pub async fn list_actived_clis(
             return Ok(engines);
         }
     }
+    */
     /*
     旧实现直接返回 EngineManager 固定提供的 Codex、Claude、OpenCode 三项，没有根据
     本机实际安装结果过滤：

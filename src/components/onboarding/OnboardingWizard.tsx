@@ -947,7 +947,7 @@ export function OnboardingWizard() {
   const handleFinish = useCallback(async () => {
     if (!selectedWorkspaceId || !preferredWorkflow || busy) return;
     if (selectedWorkspaceId !== activeWorkspaceId) await setActiveWorkspace(selectedWorkspaceId);
-    if (preferredWorkflow === "chat") await loadEngines();
+    if (preferredWorkflow === "chat") await loadEngines(selectedWorkspaceId);
     completeOnboarding();
     setActiveView(preferredWorkflow === "cli" ? "harnesses" : "chat");
   }, [selectedWorkspaceId, preferredWorkflow, busy, activeWorkspaceId, setActiveWorkspace, loadEngines, completeOnboarding, setActiveView]);

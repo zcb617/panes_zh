@@ -715,9 +715,15 @@ export const useEngineStore = create<EngineState>((set, get) => ({
       set({ target });
       const targetRequestGeneration = requestGenerations[target.targetKey] ?? 0;
 
-      const engines = normalizedWorkspaceId
-        ? await ipc.listActivedClis(normalizedWorkspaceId)
-        : await ipc.listActivedClis();
+      let engines: EngineInfo[];
+      if (target.kind === "ssh") {
+        if (!target.connectionId) {
+          throw new Error("远端项目未绑定 SSH 连接");
+        }
+        engines = await ipc.listActivedClis(target.connectionId);
+      } else {
+        engines = await ipc.listActivedClis();
+      }
       if (
         sequence !== engineLoadSequence ||
         !isCurrentTarget(

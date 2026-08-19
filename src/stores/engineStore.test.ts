@@ -95,6 +95,14 @@ describe("engineStore", () => {
     expect(useEngineStore.getState().engines).toHaveLength(1);
   });
 
+  it("does not pass a connection ID when loading a local workspace", async () => {
+    mockIpc.listActivedClis.mockResolvedValue([]);
+
+    await useEngineStore.getState().load("workspace-local");
+
+    expect(mockIpc.listActivedClis.mock.calls[0]).toEqual([]);
+  });
+
   it("reads the active CLI list from the backend on every load", async () => {
     mockIpc.listActivedClis.mockResolvedValue([
       {
@@ -111,7 +119,7 @@ describe("engineStore", () => {
     expect(mockIpc.listActivedClis).toHaveBeenCalledTimes(2);
   });
 
-  it("loads an SSH workspace engine catalog with workspace context", async () => {
+  it("loads an SSH workspace CLI list with its connection ID", async () => {
     mockIpc.listActivedClis.mockResolvedValue([
       {
         id: "codex",
@@ -127,7 +135,7 @@ describe("engineStore", () => {
 
     await useEngineStore.getState().load("workspace-ssh");
 
-    expect(mockIpc.listActivedClis).toHaveBeenCalledWith("workspace-ssh");
+    expect(mockIpc.listActivedClis).toHaveBeenCalledWith("connection-a");
     expect(useEngineStore.getState().activeWorkspaceId).toBe("workspace-ssh");
     expect(useEngineStore.getState().engines[0]?.models[0]?.id).toBe("remote-model");
   });
