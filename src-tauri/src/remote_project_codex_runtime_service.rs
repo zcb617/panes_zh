@@ -128,23 +128,28 @@ pub async fn acquire_turn(
 }
 
 pub async fn model_infos(
-    workspace: &WorkspaceDto,
+    connection_id: &str,
     active_use: Option<&RemoteCodexServiceUse>,
 ) -> anyhow::Result<Vec<ModelInfo>> {
     if let Some(service_use) = active_use {
+        anyhow::ensure!(
+            service_use.connection_id == connection_id,
+            "SSH 远端 Codex 模型请求与当前连接不一致"
+        );
         return Ok(service_use.engine().list_models_runtime().await);
     }
-    let service_use = acquire_temporary(workspace).await?;
-    let models = service_use.engine().list_models_runtime().await;
-    service_use.release().await;
-    Ok(models)
+    let service = cli_service_lifecycle::get(connection_id, "codex").await?;
+    Ok(runtime_for_service(service.as_ref())
+        .await?
+        .list_models_runtime()
+        .await)
 }
 
 pub async fn engine_info(
-    workspace: &WorkspaceDto,
+    connection_id: &str,
     active_use: Option<&RemoteCodexServiceUse>,
 ) -> anyhow::Result<EngineInfoDto> {
-    let models = model_infos(workspace, active_use).await?;
+    let models = model_infos(connection_id, active_use).await?;
     Ok(EngineInfoDto {
         id: "codex".to_string(),
         name: "Codex".to_string(),

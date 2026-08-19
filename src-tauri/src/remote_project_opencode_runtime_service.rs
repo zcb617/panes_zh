@@ -130,32 +130,31 @@ pub async fn acquire_turn(
 }
 
 pub async fn model_infos(
-    workspace: &WorkspaceDto,
+    connection_id: &str,
     active_use: Option<&RemoteOpenCodeServiceUse>,
 ) -> anyhow::Result<Vec<ModelInfo>> {
     let models = if let Some(service_use) = active_use {
-        service_use
-            .engine()
-            .list_models_runtime_for_cwd(&workspace.root_path)
-            .await
+        anyhow::ensure!(
+            service_use.connection_id == connection_id,
+            "SSH 远端 OpenCode 模型请求与当前连接不一致"
+        );
+        service_use.engine().list_models_runtime().await
     } else {
-        let service_use = acquire_temporary(workspace).await?;
-        let models = service_use
-            .engine()
-            .list_models_runtime_for_cwd(&workspace.root_path)
-            .await;
-        service_use.release().await;
-        models
+        let service = cli_service_lifecycle::get(connection_id, "opencode").await?;
+        runtime_for_service(service.as_ref())
+            .await?
+            .list_models_runtime()
+            .await
     };
     anyhow::ensure!(!models.is_empty(), "SSH 远端 OpenCode 未返回可用模型");
     Ok(models)
 }
 
 pub async fn engine_info(
-    workspace: &WorkspaceDto,
+    connection_id: &str,
     active_use: Option<&RemoteOpenCodeServiceUse>,
 ) -> anyhow::Result<EngineInfoDto> {
-    let models = model_infos(workspace, active_use).await?;
+    let models = model_infos(connection_id, active_use).await?;
     Ok(EngineInfoDto {
         id: "opencode".to_string(),
         name: "OpenCode".to_string(),

@@ -255,10 +255,27 @@ impl CliTool for CodexCli {
     }
 
     async fn get_engine_info(&self, context: &CliExecutionContext) -> Result<EngineInfoDto> {
+        /*
+        旧实现先通过 workspace 构造远端运行对象，再读取模型。模型目录属于机器，不再执行：
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
             let engine = remote_project_codex_runtime_service::runtime(&workspace).await?;
             let models = engine.list_models_runtime().await;
+            return Ok(EngineInfoDto {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                models: models.into_iter().map(map_model_info).collect(),
+                capabilities: map_engine_capabilities(capabilities_for_engine("codex")),
+            });
+        }
+        */
+        if context.location_kind == CliLocationKind::Ssh {
+            let connection_id = context
+                .ssh_connection_id
+                .as_deref()
+                .context("SSH 远端 Codex 未绑定连接")?;
+            let models =
+                remote_project_codex_runtime_service::model_infos(connection_id, None).await?;
             return Ok(EngineInfoDto {
                 id: "codex".to_string(),
                 name: "Codex".to_string(),
@@ -281,12 +298,22 @@ impl CliTool for CodexCli {
         context: &CliExecutionContext,
         requested_model_id: &str,
     ) -> Result<Vec<ModelInfo>> {
+        /*
+        旧实现通过 workspace 取得远端模型目录，不再执行：
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
             return Ok(remote_project_codex_runtime_service::runtime(&workspace)
                 .await?
                 .list_models_runtime()
                 .await);
+        }
+        */
+        if context.location_kind == CliLocationKind::Ssh {
+            let connection_id = context
+                .ssh_connection_id
+                .as_deref()
+                .context("SSH 远端 Codex 未绑定连接")?;
+            return remote_project_codex_runtime_service::model_infos(connection_id, None).await;
         }
 
         self.state

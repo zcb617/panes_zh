@@ -1130,7 +1130,7 @@ impl OpenCodeEngine {
                 pump_cancel: None,
                 callback_cancel: None,
                 run_dir: None,
-                include_directory_header: true,
+                include_directory_header: !cwd.is_empty(),
             },
         });
         let existing = {
@@ -1269,9 +1269,6 @@ impl OpenCodeEngine {
     }
 
     pub async fn list_models_runtime(&self) -> Vec<ModelInfo> {
-        if self.is_remote_target() {
-            return self.runtime_model_fallback().await;
-        }
         self.list_models_runtime_for_cwd("").await
     }
 
@@ -3629,6 +3626,15 @@ mod tests {
             Some("/var/work/project-a")
         );
         assert!(request.headers().contains_key(AUTHORIZATION));
+
+        let machine_server = engine.ensure_server("").await.unwrap();
+        let machine_model_request = engine
+            .request(machine_server.as_ref(), reqwest::Method::GET, "/provider")
+            .build()
+            .unwrap();
+        assert!(!machine_model_request
+            .headers()
+            .contains_key("X-OpenCode-Directory"));
 
         let read_request = engine
             .http

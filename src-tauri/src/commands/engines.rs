@@ -106,12 +106,40 @@ pub async fn list_actived_clis(
         for service in services {
             let cli_id = service.cli_id();
             let cli = factory.create(cli_id).map_err(err_to_string)?;
-            engines.push(EngineInfoDto {
-                id: cli_id.to_string(),
-                name: cli.name().to_string(),
-                models: Vec::new(),
-                capabilities: map_engine_capabilities(capabilities_for_engine(cli_id)),
-            });
+            let discovered = match cli_id {
+                "codex" => {
+                    crate::remote_project_codex_runtime_service::engine_info(&connection_id, None)
+                        .await
+                }
+                "opencode" => {
+                    crate::remote_project_opencode_runtime_service::engine_info(
+                        &connection_id,
+                        None,
+                    )
+                    .await
+                }
+                "claude" => {
+                    crate::remote_project_claude_runtime_service::engine_info(&connection_id, None)
+                        .await
+                }
+                _ => unreachable!(),
+            };
+            match discovered {
+                Ok(engine) => engines.push(engine),
+                Err(error) => {
+                    log::warn!(
+                        "读取 SSH 远端引擎目录失败，保留其他引擎: connection_id={} cli_id={} error={error:#}",
+                        connection_id,
+                        cli_id,
+                    );
+                    engines.push(EngineInfoDto {
+                        id: cli_id.to_string(),
+                        name: cli.name().to_string(),
+                        models: Vec::new(),
+                        capabilities: map_engine_capabilities(capabilities_for_engine(cli_id)),
+                    });
+                }
+            }
         }
         return Ok(engines);
     }
@@ -715,7 +743,9 @@ pub async fn prewarm_engine(
         if workspace.location_kind == "ssh" {
             return match engine_id.as_str() {
                 "codex" => {
-                    crate::remote_project_codex_runtime_service::engine_info(&workspace, None)
+                    let connection_id = crate::remote_project_codex_runtime_service::validate_remote_codex_workspace(&workspace)
+                        .map_err(err_to_string)?;
+                    crate::remote_project_codex_runtime_service::engine_info(connection_id, None)
                         .await
                         .map(|_| ())
                         .map_err(err_to_string)

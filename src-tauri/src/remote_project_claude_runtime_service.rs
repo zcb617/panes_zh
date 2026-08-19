@@ -134,27 +134,33 @@ pub async fn acquire_turn(
 }
 
 pub async fn model_infos(
-    workspace: &WorkspaceDto,
+    connection_id: &str,
     active_use: Option<&RemoteClaudeServiceUse>,
 ) -> anyhow::Result<Vec<ModelInfo>> {
     let result = if let Some(service_use) = active_use {
+        anyhow::ensure!(
+            service_use.connection_id == connection_id,
+            "SSH 远端 Claude 模型请求与当前连接不一致"
+        );
         service_use.engine().list_models_runtime().await
     } else {
-        let service_use = acquire_temporary(workspace).await?;
-        let result = service_use.engine().list_models_runtime().await;
-        service_use.release().await;
-        result
+        let service = cli_service_lifecycle::get(connection_id, "claude").await?;
+        runtime_for_service(service.as_ref())
+            .await?
+            .list_models_runtime()
+            .await
     };
-    let models = result.with_context(|| remote_claude_context(workspace, "读取模型"))?;
+    let models = result
+        .with_context(|| format!("SSH 远端 Claude 读取模型失败: connection_id={connection_id}"))?;
     anyhow::ensure!(!models.is_empty(), "SSH 远端 Claude 未返回可用模型");
     Ok(models)
 }
 
 pub async fn engine_info(
-    workspace: &WorkspaceDto,
+    connection_id: &str,
     active_use: Option<&RemoteClaudeServiceUse>,
 ) -> anyhow::Result<EngineInfoDto> {
-    let models = model_infos(workspace, active_use).await?;
+    let models = model_infos(connection_id, active_use).await?;
     Ok(EngineInfoDto {
         id: "claude".to_string(),
         name: "Claude".to_string(),

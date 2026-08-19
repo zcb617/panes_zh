@@ -396,6 +396,8 @@ impl CliTool for ClaudeCodeCli {
     }
 
     async fn get_engine_info(&self, context: &CliExecutionContext) -> Result<EngineInfoDto> {
+        /*
+        旧实现先通过 workspace 构造远端运行对象，再读取模型。模型目录属于机器，不再执行：
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
             let models = remote_project_claude_runtime_service::runtime(&workspace)
@@ -403,6 +405,21 @@ impl CliTool for ClaudeCodeCli {
                 .list_models_runtime()
                 .await?;
             anyhow::ensure!(!models.is_empty(), "SSH 远端 Claude 未返回可用模型");
+            return Ok(EngineInfoDto {
+                id: "claude".to_string(),
+                name: "Claude".to_string(),
+                models: models.into_iter().map(map_model_info).collect(),
+                capabilities: map_engine_capabilities(capabilities_for_engine("claude")),
+            });
+        }
+        */
+        if context.location_kind == CliLocationKind::Ssh {
+            let connection_id = context
+                .ssh_connection_id
+                .as_deref()
+                .context("SSH 远端 Claude 未绑定连接")?;
+            let models =
+                remote_project_claude_runtime_service::model_infos(connection_id, None).await?;
             return Ok(EngineInfoDto {
                 id: "claude".to_string(),
                 name: "Claude".to_string(),
@@ -425,6 +442,8 @@ impl CliTool for ClaudeCodeCli {
         context: &CliExecutionContext,
         requested_model_id: &str,
     ) -> Result<Vec<ModelInfo>> {
+        /*
+        旧实现通过 workspace 取得远端模型目录，不再执行：
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
             let models = remote_project_claude_runtime_service::runtime(&workspace)
@@ -433,6 +452,14 @@ impl CliTool for ClaudeCodeCli {
                 .await?;
             anyhow::ensure!(!models.is_empty(), "SSH 远端 Claude 未返回可用模型");
             return Ok(models);
+        }
+        */
+        if context.location_kind == CliLocationKind::Ssh {
+            let connection_id = context
+                .ssh_connection_id
+                .as_deref()
+                .context("SSH 远端 Claude 未绑定连接")?;
+            return remote_project_claude_runtime_service::model_infos(connection_id, None).await;
         }
         self.state
             .engines

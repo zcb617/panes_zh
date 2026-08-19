@@ -345,6 +345,9 @@ impl CliTool for OpenCodeCli {
     }
 
     async fn get_engine_info(&self, context: &CliExecutionContext) -> Result<EngineInfoDto> {
+        /*
+        旧实现通过 workspace.root_path 读取远端模型，导致机器级模型目录携带项目路径，
+        不再执行：
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
             let models = remote_project_opencode_runtime_service::runtime(&workspace)
@@ -352,6 +355,21 @@ impl CliTool for OpenCodeCli {
                 .list_models_runtime_for_cwd(&workspace.root_path)
                 .await;
             anyhow::ensure!(!models.is_empty(), "SSH OpenCode 未返回可用模型");
+            return Ok(EngineInfoDto {
+                id: "opencode".to_string(),
+                name: "OpenCode".to_string(),
+                models: models.into_iter().map(map_model_info).collect(),
+                capabilities: map_engine_capabilities(capabilities_for_engine("opencode")),
+            });
+        }
+        */
+        if context.location_kind == CliLocationKind::Ssh {
+            let connection_id = context
+                .ssh_connection_id
+                .as_deref()
+                .context("SSH 远端 OpenCode 未绑定连接")?;
+            let models =
+                remote_project_opencode_runtime_service::model_infos(connection_id, None).await?;
             return Ok(EngineInfoDto {
                 id: "opencode".to_string(),
                 name: "OpenCode".to_string(),
@@ -378,6 +396,8 @@ impl CliTool for OpenCodeCli {
         context: &CliExecutionContext,
         requested_model_id: &str,
     ) -> Result<Vec<ModelInfo>> {
+        /*
+        旧实现通过 workspace.root_path 读取远端模型，不再执行：
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
             let models = remote_project_opencode_runtime_service::runtime(&workspace)
@@ -386,6 +406,14 @@ impl CliTool for OpenCodeCli {
                 .await;
             anyhow::ensure!(!models.is_empty(), "SSH OpenCode 未返回可用模型");
             return Ok(models);
+        }
+        */
+        if context.location_kind == CliLocationKind::Ssh {
+            let connection_id = context
+                .ssh_connection_id
+                .as_deref()
+                .context("SSH 远端 OpenCode 未绑定连接")?;
+            return remote_project_opencode_runtime_service::model_infos(connection_id, None).await;
         }
         self.state
             .engines
