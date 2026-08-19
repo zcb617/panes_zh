@@ -363,7 +363,8 @@ export function ModelPicker({
   const wasOpenRef = useRef(false);
   const [pos, setPos] = useState({ bottom: 0, left: 0 });
   const ensureEngineHealth = useEngineStore((state) => state.ensureHealth);
-  const refreshEngineCatalog = useEngineStore((state) => state.refreshEngineCatalog);
+  // 旧逻辑在打开选择器时额外刷新模型目录；当前只调用 list_actived_clis。
+  // const refreshEngineCatalog = useEngineStore((state) => state.refreshEngineCatalog);
   const healthLoading = useEngineStore((state) => state.healthLoading);
   const engineCatalogLoading = useEngineStore((state) => state.engineCatalogLoading);
   const selectedRuntimeLoading =
@@ -390,41 +391,36 @@ export function ModelPicker({
     }
     wasOpenRef.current = true;
 
-    // 每次打开 CLI 工具选择器都实时读取后端统一生命周期，不复用上次打开的列表。
+    // 每次打开都携带当前 workspaceId 调用后端 list_actived_clis，不使用前端缓存。
     void onRetry?.();
-
-    const inspectedEngineIds = new Set<string>();
-    for (const engine of engines) {
-      inspectedEngineIds.add(engine.id);
-      const engineHealth = health[engine.id];
-      if (engine.models.length === 0 && engineHealth?.available) {
-        void refreshEngineCatalog(engine.id);
-        continue;
-      }
-      if (!engineHealth) {
-        void ensureEngineHealth(engine.id);
-        continue;
-      }
-      if (engineHealth.available === false) {
-        void ensureEngineHealth(engine.id, { force: true });
-      }
-    }
-    if (!inspectedEngineIds.has(selectedEngineId)) {
-      void ensureEngineHealth(selectedEngineId, { force: true }).then((result) => {
-        if (result?.available) {
-          void refreshEngineCatalog(selectedEngineId);
-        }
-      });
-    }
-  }, [
-    engines,
-    ensureEngineHealth,
-    health,
-    onRetry,
-    open,
-    refreshEngineCatalog,
-    selectedEngineId,
-  ]);
+    /*
+     * 旧逻辑还会遍历全部 CLI，执行健康检查并刷新模型目录：
+     *
+     * const inspectedEngineIds = new Set<string>();
+     * for (const engine of engines) {
+     *   inspectedEngineIds.add(engine.id);
+     *   const engineHealth = health[engine.id];
+     *   if (engine.models.length === 0 && engineHealth?.available) {
+     *     void refreshEngineCatalog(engine.id);
+     *     continue;
+     *   }
+     *   if (!engineHealth) {
+     *     void ensureEngineHealth(engine.id);
+     *     continue;
+     *   }
+     *   if (engineHealth.available === false) {
+     *     void ensureEngineHealth(engine.id, { force: true });
+     *   }
+     * }
+     * if (!inspectedEngineIds.has(selectedEngineId)) {
+     *   void ensureEngineHealth(selectedEngineId, { force: true }).then((result) => {
+     *     if (result?.available) {
+     *       void refreshEngineCatalog(selectedEngineId);
+     *     }
+     *   });
+     * }
+     */
+  }, [onRetry, open]);
 
   useLayoutEffect(() => {
     if (!open || !triggerRef.current) return;

@@ -1922,7 +1922,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const enginesLoading = useEngineStore((s) => s.loading);
   const engineLoadError = useEngineStore((s) => s.error);
   const loadEngines = useEngineStore((s) => s.load);
-  const ensureEngineHealth = useEngineStore((s) => s.ensureHealth);
+  // 旧逻辑仅用于线程变化时额外检查 CLI；当前业务只调用后端 CLI 列表接口。
+  // const ensureEngineHealth = useEngineStore((s) => s.ensureHealth);
   const engineWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const onboardingOpen = useOnboardingStore((s) => s.open);
   const onboardingSelectedChatEngines = useOnboardingStore((s) => s.selectedChatEngines);
@@ -3465,65 +3466,70 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }, [selectedModel, selectedModelId]);
 
   useEffect(() => {
-    if (!activeWorkspaceId || !activeThread) {
+    if (!activeWorkspaceId) {
       return;
     }
     void loadEngines(activeWorkspaceId);
   }, [activeThread?.id, activeWorkspaceId, loadEngines]);
 
-  useEffect(() => {
-    if (!activeWorkspaceId || engines.length === 0) {
-      return;
-    }
-
-    const engineIds = new Set<string>();
-    if (selectedEngineId) {
-      engineIds.add(selectedEngineId);
-    }
-    if (activeThread?.engineId) {
-      engineIds.add(activeThread.engineId);
-    }
-
-    for (const engineId of engineIds) {
-      if (!engines.some((engine) => engine.id === engineId) || health[engineId]) {
-        continue;
-      }
-      void ensureEngineHealth(engineId);
-    }
-  }, [
-    activeWorkspaceId,
-    activeThread?.engineId,
-    engines,
-    ensureEngineHealth,
-    health,
-    selectedEngineId,
-  ]);
-
-  useEffect(() => {
-    if (!activeWorkspaceId || engines.length === 0) {
-      return;
-    }
-
-    const engineIds = new Set<string>();
-    if (selectedEngineId) {
-      engineIds.add(selectedEngineId);
-    }
-    if (activeThread?.engineId) {
-      engineIds.add(activeThread.engineId);
-    }
-
-    const cancelers = Array.from(engineIds)
-      .filter((engineId) => engines.some((engine) => engine.id === engineId))
-      .map((engineId) =>
-        scheduleIdleTask(() => {
-          void prewarmEngineTransport(engineId, activeWorkspaceId);
-        }),
-      );
-
-    return () => {
-      cancelers.forEach((cancel) => cancel());
-    };
-  }, [activeWorkspaceId, activeThread?.engineId, engines, selectedEngineId]);
+  /*
+   * 旧逻辑在线程变化时额外执行健康检查和预热。当前业务只需要携带 workspaceId
+   * 调用后端 list_actived_clis；后端从 CLI 生命周期返回已经 Ready 的 CLI。
+   *
+   * useEffect(() => {
+   *   if (!activeWorkspaceId || engines.length === 0) {
+   *     return;
+   *   }
+   *
+   *   const engineIds = new Set<string>();
+   *   if (selectedEngineId) {
+   *     engineIds.add(selectedEngineId);
+   *   }
+   *   if (activeThread?.engineId) {
+   *     engineIds.add(activeThread.engineId);
+   *   }
+   *
+   *   for (const engineId of engineIds) {
+   *     if (!engines.some((engine) => engine.id === engineId) || health[engineId]) {
+   *       continue;
+   *     }
+   *     void ensureEngineHealth(engineId);
+   *   }
+   * }, [
+   *   activeWorkspaceId,
+   *   activeThread?.engineId,
+   *   engines,
+   *   ensureEngineHealth,
+   *   health,
+   *   selectedEngineId,
+   * ]);
+   *
+   * useEffect(() => {
+   *   if (!activeWorkspaceId || engines.length === 0) {
+   *     return;
+   *   }
+   *
+   *   const engineIds = new Set<string>();
+   *   if (selectedEngineId) {
+   *     engineIds.add(selectedEngineId);
+   *   }
+   *   if (activeThread?.engineId) {
+   *     engineIds.add(activeThread.engineId);
+   *   }
+   *
+   *   const cancelers = Array.from(engineIds)
+   *     .filter((engineId) => engines.some((engine) => engine.id === engineId))
+   *     .map((engineId) =>
+   *       scheduleIdleTask(() => {
+   *         void prewarmEngineTransport(engineId, activeWorkspaceId);
+   *       }),
+   *     );
+   *
+   *   return () => {
+   *     cancelers.forEach((cancel) => cancel());
+   *   };
+   * }, [activeWorkspaceId, activeThread?.engineId, engines, selectedEngineId]);
+   */
 
   useEffect(() => {
     // 旧逻辑跳过 SSH 项目的扩展目录，导致 Claude Code 等远端 CLI 没有自己的
