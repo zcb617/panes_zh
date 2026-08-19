@@ -3,7 +3,10 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use crate::{
-    cli_tools::{factory::CliToolFactory, CliExecutionContext, CliSessionSnapshot, CliTool},
+    cli_tools::{
+        factory::CliToolFactory, CliExecutionContext, CliSessionNotFoundError, CliSessionSnapshot,
+        CliTool,
+    },
     config::app_config::AppConfig,
     db,
     engines::validate_engine_sandbox_mode,
@@ -1827,6 +1830,38 @@ pub async fn restore_thread(
         }
     })
     .await?;
+
+    // 统一恢复编排：先确认 CLI 会话仍存在，再执行 CLI 解归档，最后只更新 Panes 数据库。
+    // Claude SSH 的 unarchive_thread 只做本地业务确认，不向远端发送归档或恢复请求。
+    if matches!(thread.engine_id.as_str(), "codex" | "opencode" | "claude") {
+        if let Some(engine_thread_id) = thread.engine_thread_id.as_deref() {
+            let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let cli = CliToolFactory::new(state.inner().clone())
+                .create(&thread.engine_id)
+                .map_err(err_to_string)?;
+            if let Err(error) = cli.read_session(&context, engine_thread_id).await {
+                if error.downcast_ref::<CliSessionNotFoundError>().is_some() {
+                    return Err(
+                        if context.location_kind == crate::cli_tools::CliLocationKind::Ssh {
+                            "该会话在远端已不存在，无法恢复。".to_string()
+                        } else {
+                            "该会话在本机 CLI 中已不存在，无法恢复。".to_string()
+                        },
+                    );
+                }
+                return Err(format!("恢复前读取 CLI 会话失败: {}", err_to_string(error)));
+            }
+            cli.unarchive_thread(&context, &thread, engine_thread_id)
+                .await
+                .map_err(err_to_string)?;
+        }
+
+        return run_db(db, move |db| db::threads::restore_thread(db, &thread_id)).await;
+    }
+
+    /*
+    // 旧实现按具体 CLI 分支直接执行 unarchive_thread，未先确认会话存在。
+    // 完整保留在此处作为迁移留痕；统一流程已在上方接管恢复顺序。
     if thread.engine_id == "codex" {
         if let Some(engine_thread_id) = thread.engine_thread_id.as_deref() {
             let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
@@ -1866,6 +1901,7 @@ pub async fn restore_thread(
         }
         return run_db(db, move |db| db::threads::restore_thread(db, &thread_id)).await;
     }
+    */
     state
         .engines
         .unarchive_thread(&thread)

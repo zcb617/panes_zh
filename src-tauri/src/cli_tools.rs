@@ -97,6 +97,40 @@ pub struct CliSessionSnapshot {
     pub metadata: Value,
 }
 
+/// CLI 明确报告会话不存在时使用的公共错误类型。
+///
+/// 网络失败、服务未就绪、解析失败和 workspace 不匹配都不得转换为该错误，
+/// 这样恢复编排才能区分“会话已删除”和“当前 CLI 暂时不可用”。
+#[derive(Debug, Clone)]
+pub struct CliSessionNotFoundError {
+    /// 报告不存在的 CLI 标识。
+    pub engine_id: String,
+    /// 报告不存在的 CLI 会话标识。
+    pub engine_thread_id: String,
+}
+
+impl CliSessionNotFoundError {
+    /// 创建带有 CLI 和会话标识的公共 NotFound 错误。
+    pub fn new(engine_id: impl Into<String>, engine_thread_id: impl Into<String>) -> Self {
+        Self {
+            engine_id: engine_id.into(),
+            engine_thread_id: engine_thread_id.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for CliSessionNotFoundError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "CLI session not found: engine_id={} engine_thread_id={}",
+            self.engine_id, self.engine_thread_id
+        )
+    }
+}
+
+impl std::error::Error for CliSessionNotFoundError {}
+
 /// 用户从现有会话创建分支后得到的新会话。
 #[derive(Debug, Clone)]
 pub struct CliForkedThread {

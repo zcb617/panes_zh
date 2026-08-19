@@ -19,7 +19,7 @@ use crate::{process_utils, runtime_env};
 
 use super::codex_protocol::{
     notification_payload, parse_incoming, request_payload, response_error_payload,
-    response_success_payload, IncomingMessage, RpcResponse,
+    response_success_payload, IncomingMessage, RpcError, RpcResponse,
 };
 use super::trim_action_output_delta_content;
 
@@ -568,7 +568,11 @@ impl CodexTransport {
                 "elapsed_ms": request_started_at.elapsed().as_millis(),
             }))
             .await;
-            anyhow::bail!("{}", error);
+            // 迁移留痕：旧逻辑会丢失 RpcError 的 code/data，禁止恢复执行。
+            // anyhow::bail!("{}", error);
+            // 保留结构化 RPC 错误，调用方才能依据真实 code/message/data 区分
+            // “会话不存在”和连接、服务、协议等其他失败。
+            return Err(anyhow::Error::new(error));
         }
 
         crate::engines::codex::append_codex_transport_log(&serde_json::json!({
@@ -1067,5 +1071,57 @@ mod tests {
             parsed.get("error").and_then(Value::as_str),
             Some("bad json")
         );
+    }
+
+    #[tokio::test]
+    async fn websocket_transport_preserves_structured_rpc_error_source() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("websocket handshake");
+            let request = socket
+                .next()
+                .await
+                .expect("request frame")
+                .expect("request payload");
+            let Message::Text(request) = request else {
+                panic!("request must be text");
+            };
+            let request: Value = serde_json::from_str(request.as_str()).expect("request json");
+            socket
+                .send(
+                    serde_json::json!({
+                        "id": request.get("id").cloned().expect("request id"),
+                        "error": {
+                            "code": -32600,
+                            "message": "thread not loaded: missing-thread"
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                )
+                .await
+                .expect("response");
+        });
+
+        let transport = CodexTransport::connect_websocket(&format!("ws://{address}"))
+            .await
+            .expect("connect websocket transport");
+        let error = transport
+            .request("thread/read", serde_json::json!({}), Duration::from_secs(2))
+            .await
+            .expect_err("RPC error should be returned");
+        let rpc_error = error
+            .downcast_ref::<RpcError>()
+            .expect("structured RpcError source should be preserved");
+        assert_eq!(rpc_error.code, Some(-32600));
+        assert_eq!(rpc_error.message, "thread not loaded: missing-thread");
+        assert!(rpc_error.data.is_none());
+        server.await.expect("server task");
     }
 }

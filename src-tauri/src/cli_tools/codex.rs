@@ -7,14 +7,14 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CliExecutionContext, CliForkedThread, CliLocationKind, CliReviewStarted, CliSessionSnapshot,
-    CliTool,
+    CliExecutionContext, CliForkedThread, CliLocationKind, CliReviewStarted,
+    CliSessionNotFoundError, CliSessionSnapshot, CliTool,
 };
 use crate::{
     db,
     engines::{
         capabilities_for_engine,
-        codex::{CodexEngine, CodexReviewStarted},
+        codex::{CodexEngine, CodexReviewStarted, CodexThreadNotFoundError},
         map_engine_capabilities, map_model_info, map_provider_usage, ApprovalRequestRoute,
         CodexRuntimeEvent, Engine, EngineCapabilities, EngineEvent, EngineSteerReceipt,
         EngineThread, ModelInfo, SandboxPolicy, ThreadScope, ThreadSyncSnapshot, TurnInput,
@@ -472,16 +472,39 @@ impl CliTool for CodexCli {
         engine_thread_id: &str,
     ) -> Result<CliSessionSnapshot> {
         let workspace = self.load_workspace(context).await?;
-        let summary = if context.location_kind == CliLocationKind::Ssh {
+        // 迁移留痕：旧逻辑直接用 `?` 返回全部错误，无法映射明确的 Codex NotFound；禁止恢复执行。
+        // let summary = if context.location_kind == CliLocationKind::Ssh {
+        //     remote_project_codex_runtime_service::runtime(&workspace)
+        //         .await?
+        //         .read_remote_thread(engine_thread_id)
+        //         .await?
+        // } else {
+        //     self.state
+        //         .engines
+        //         .read_codex_remote_thread(engine_thread_id)
+        //         .await?
+        // };
+        let summary_result = if context.location_kind == CliLocationKind::Ssh {
             remote_project_codex_runtime_service::runtime(&workspace)
                 .await?
                 .read_remote_thread(engine_thread_id)
-                .await?
+                .await
         } else {
             self.state
                 .engines
                 .read_codex_remote_thread(engine_thread_id)
-                .await?
+                .await
+        };
+        let summary = match summary_result {
+            Ok(summary) => summary,
+            Err(error) => {
+                // 只有 Codex app-server 实测的 -32600/thread not loaded
+                // 才转换为公共 NotFound；服务、连接和协议错误原样上抛。
+                if error.downcast_ref::<CodexThreadNotFoundError>().is_some() {
+                    return Err(CliSessionNotFoundError::new("codex", engine_thread_id).into());
+                }
+                return Err(error);
+            }
         };
         anyhow::ensure!(
             path_utils::is_path_within_root(&summary.cwd, &workspace.root_path),

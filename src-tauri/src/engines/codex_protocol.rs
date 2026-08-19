@@ -607,4 +607,33 @@ mod tests {
         assert!(diff.starts_with("... [output truncated; showing tail]\n"));
         assert_eq!(params["threadId"], json!("thread-1"));
     }
+
+    #[test]
+    fn preserves_thread_not_loaded_rpc_error_fields() {
+        let message = parse_incoming(
+            r#"{"id":"read-1","error":{"code":-32600,"message":"thread not loaded: missing-thread"}}"#,
+        )
+        .expect("thread/read error should parse");
+        let IncomingMessage::Response(response) = message else {
+            panic!("expected RPC response");
+        };
+        let error = response.error.expect("RPC error should be present");
+        assert_eq!(error.code, Some(-32600));
+        assert_eq!(error.message, "thread not loaded: missing-thread");
+        assert!(error.data.is_none());
+    }
+
+    #[test]
+    fn preserves_other_rpc_error_without_not_found_shape() {
+        let message = parse_incoming(
+            r#"{"id":"read-2","error":{"code":-32600,"message":"thread not loaded: missing-thread","data":{"retry":true}}}"#,
+        )
+        .expect("RPC error should parse");
+        let IncomingMessage::Response(response) = message else {
+            panic!("expected RPC response");
+        };
+        let error = response.error.expect("RPC error should be present");
+        assert_eq!(error.code, Some(-32600));
+        assert!(error.data.is_some());
+    }
 }

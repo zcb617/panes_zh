@@ -10,16 +10,17 @@ use super::{
     claude_code_session_lifecycle::{
         shared_claude_code_session_handles, ClaudeCodeSessionHandleRegistry,
     },
-    CliExecutionContext, CliForkedThread, CliLocationKind, CliReviewStarted, CliSessionSnapshot,
-    CliTool,
+    CliExecutionContext, CliForkedThread, CliLocationKind, CliReviewStarted,
+    CliSessionNotFoundError, CliSessionSnapshot, CliTool,
 };
 use crate::{
     config::app_config::ClaudeCodeSessionMode,
     db,
     engines::{
-        capabilities_for_engine, map_engine_capabilities, map_model_info, ApprovalRequestRoute,
-        CodexRuntimeEvent, Engine, EngineCapabilities, EngineEvent, EngineSteerReceipt,
-        EngineThread, ModelInfo, SandboxPolicy, ThreadScope, ThreadSyncSnapshot, TurnInput,
+        capabilities_for_engine, claude_remote::RemoteClaudeSessionNotFoundError,
+        map_engine_capabilities, map_model_info, ApprovalRequestRoute, CodexRuntimeEvent, Engine,
+        EngineCapabilities, EngineEvent, EngineSteerReceipt, EngineThread, ModelInfo,
+        SandboxPolicy, ThreadScope, ThreadSyncSnapshot, TurnInput,
     },
     extensions,
     models::{
@@ -642,15 +643,24 @@ impl CliTool for ClaudeCodeCli {
         // 本机行为保持原状；SSH 远端只能使用 Claude 自己的按 ID 协议请求，
         // 不能在远端失败后回退本机或旧的列表查询。
         if context.location_kind == CliLocationKind::Local {
+            // 迁移留痕：旧实现通过列表查询后自行构造普通 anyhow 错误，完整保留但禁止恢复执行。
+            // return self
+            //     .list_sessions(context, None, Some(false))
+            //     .await?
+            //     .into_iter()
+            //     .find(|session| session.engine_thread_id == engine_thread_id)
+            //     .ok_or_else(|| {
+            //         anyhow::anyhow!(
+            //             "Claude Code 会话不存在或目录不匹配: session_id={engine_thread_id}"
+            //         )
+            //     });
             return self
                 .list_sessions(context, None, Some(false))
                 .await?
                 .into_iter()
                 .find(|session| session.engine_thread_id == engine_thread_id)
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Claude Code 会话不存在或目录不匹配: session_id={engine_thread_id}"
-                    )
+                    anyhow::Error::new(CliSessionNotFoundError::new("claude", engine_thread_id))
                 });
         }
 
@@ -658,7 +668,17 @@ impl CliTool for ClaudeCodeCli {
         let session = remote_project_claude_runtime_service::runtime(&workspace)
             .await?
             .read_remote_session(engine_thread_id)
-            .await?;
+            .await
+            .map_err(|error| {
+                if error
+                    .downcast_ref::<RemoteClaudeSessionNotFoundError>()
+                    .is_some()
+                {
+                    anyhow::Error::new(CliSessionNotFoundError::new("claude", engine_thread_id))
+                } else {
+                    error
+                }
+            })?;
         anyhow::ensure!(
             session.id == engine_thread_id && session.session_id == engine_thread_id,
             "SSH 远端 Claude 返回的会话 ID 与请求不一致: requested={engine_thread_id} id={} sessionId={}",

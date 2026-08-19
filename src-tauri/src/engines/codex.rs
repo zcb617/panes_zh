@@ -37,7 +37,7 @@ use crate::{process_utils, runtime_env};
 
 use super::{
     codex_event_mapper::TurnEventMapper,
-    codex_protocol::{raw_value_to_value, IncomingMessage},
+    codex_protocol::{raw_value_to_value, IncomingMessage, RpcError},
     codex_transport::{CodexTransport, CodexTransportMessage},
     ApprovalRequestRoute, CodexRemoteThreadSummary, Engine, EngineEvent, EngineSteerReceipt,
     EngineThread, ImportedThreadMessage, ModelAvailabilityNux, ModelInfo, ModelUpgradeInfo,
@@ -206,6 +206,21 @@ async fn log_codex_incoming_queue_receive(
     log::debug!("codex incoming queue receive: {record}");
     append_codex_transport_log(&record).await;
 }
+
+/// `thread/read` 明确报告线程未加载时的内部标记，供统一 CLI 层映射公共 NotFound。
+#[derive(Debug)]
+pub struct CodexThreadNotFoundError {
+    /// app-server 返回错误时对应的 Codex 线程标识。
+    pub engine_thread_id: String,
+}
+
+impl std::fmt::Display for CodexThreadNotFoundError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "codex thread not found: {}", self.engine_thread_id)
+    }
+}
+
+impl std::error::Error for CodexThreadNotFoundError {}
 
 pub struct CodexEngine {
     state: Arc<Mutex<CodexState>>,
@@ -2471,14 +2486,37 @@ impl CodexEngine {
           "includeTurns": false,
         });
 
-        let response = request_with_fallback(
-            transport.as_ref(),
-            THREAD_READ_METHODS,
-            params,
-            DEFAULT_TIMEOUT,
-        )
-        .await
-        .context("failed to read codex thread")?;
+        // 迁移留痕：旧逻辑统一调用 request_with_fallback，无法保留结构化 RpcError；禁止恢复执行。
+        // let response = request_with_fallback(
+        //     transport.as_ref(),
+        //     THREAD_READ_METHODS,
+        //     params,
+        //     DEFAULT_TIMEOUT,
+        // )
+        // .await
+        // .context("failed to read codex thread")?;
+        let response = match transport
+            .request(THREAD_READ_METHODS[0], params, DEFAULT_TIMEOUT)
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                // Codex app-server 实测不存在 threadId 时返回 -32600、
+                // `thread not loaded: <id>` 且 data 缺失；仅此精确组合
+                // 转为内部 NotFound 标记，其他错误保留完整错误链。
+                if let Some(rpc_error) = error.downcast_ref::<RpcError>() {
+                    if rpc_error.code == Some(-32600)
+                        && rpc_error.message == format!("thread not loaded: {engine_thread_id}")
+                        && rpc_error.data.is_none()
+                    {
+                        return Err(anyhow::Error::new(CodexThreadNotFoundError {
+                            engine_thread_id: engine_thread_id.to_string(),
+                        }));
+                    }
+                }
+                return Err(error.context("failed to read codex thread"));
+            }
+        };
 
         extract_codex_remote_thread_summary(&response, false)
             .ok_or_else(|| anyhow::anyhow!("codex thread response missing remote thread summary"))

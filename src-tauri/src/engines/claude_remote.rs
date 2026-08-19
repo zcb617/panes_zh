@@ -714,6 +714,11 @@ impl ClaudeRemoteEngine {
             .await
             .context("读取 SSH 远端 Claude 会话失败")?;
         let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(anyhow::Error::new(RemoteClaudeSessionNotFoundError {
+                session_id: session_id.to_string(),
+            }));
+        }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             anyhow::bail!(
@@ -779,6 +784,28 @@ impl ClaudeRemoteEngine {
         }
     }
 }
+
+/// Claude 远端按 ID 接口明确返回 HTTP 404 时使用的底层错误。
+///
+/// 调用方可以安全地将其转换为
+/// 公共 `CliSessionNotFoundError`；其他 HTTP 状态必须保留原始服务错误。
+#[derive(Debug, Clone)]
+pub struct RemoteClaudeSessionNotFoundError {
+    /// 远端报告不存在的 Claude 会话标识。
+    pub session_id: String,
+}
+
+impl std::fmt::Display for RemoteClaudeSessionNotFoundError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "SSH 远端 Claude 会话不存在: session_id={}",
+            self.session_id
+        )
+    }
+}
+
+impl std::error::Error for RemoteClaudeSessionNotFoundError {}
 
 /// Claude 远端按 ID 接口返回的单个会话摘要。
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1230,9 +1257,11 @@ mod tests {
 
     #[tokio::test]
     async fn read_remote_session_preserves_http_status_and_body() {
+        // 迁移留痕：404 旧测试曾与普通 HTTP 错误共用此循环，生产代码现已将其转换为
+        // RemoteClaudeSessionNotFoundError，禁止恢复该 tuple。
+        // (404, "Not Found", "session not found"),
         for (status, reason, detail) in [
             (400, "Bad Request", "invalid session id"),
-            (404, "Not Found", "session not found"),
             (409, "Conflict", "multiple session files"),
             (500, "Internal Server Error", "session summary unavailable"),
         ] {
@@ -1262,5 +1291,32 @@ mod tests {
             assert!(error.contains(detail));
             server.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn read_remote_session_404_maps_to_not_found_error() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let session_id = "22222222-2222-4222-8222-222222222222";
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = r#"{"error":"session not found"}"#;
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let engine = ClaudeRemoteEngine::new(format!("http://{address}"));
+        let error = engine.read_remote_session(session_id).await.unwrap_err();
+        let not_found = error
+            .downcast_ref::<RemoteClaudeSessionNotFoundError>()
+            .expect("HTTP 404 should map to RemoteClaudeSessionNotFoundError");
+        assert_eq!(not_found.session_id, session_id);
+        server.await.unwrap();
     }
 }

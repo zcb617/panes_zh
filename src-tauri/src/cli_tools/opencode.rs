@@ -7,8 +7,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CliExecutionContext, CliForkedThread, CliLocationKind, CliReviewStarted, CliSessionSnapshot,
-    CliTool,
+    CliExecutionContext, CliForkedThread, CliLocationKind, CliReviewStarted,
+    CliSessionNotFoundError, CliSessionSnapshot, CliTool,
 };
 use crate::{
     db,
@@ -547,13 +547,36 @@ impl CliTool for OpenCodeCli {
                     }
                 }
             }
-            anyhow::bail!("OpenCode 会话不属于当前 workspace 或已不存在: {engine_thread_id}");
+            // 所有候选目录均确认返回 404，交给公共恢复编排识别为会话不存在。
+            // 迁移留痕：旧实现把“未找到”作为普通业务错误返回，恢复编排无法区分 404：
+            // anyhow::bail!("OpenCode 会话不属于当前 workspace 或已不存在: {engine_thread_id}");
+            return Err(CliSessionNotFoundError::new("opencode", engine_thread_id).into());
         }
 
-        let summary = remote_project_opencode_runtime_service::runtime(&workspace)
+        // 迁移留痕：旧实现直接使用 `.await?`，会把 SSH 404 原样暴露给公共恢复编排：
+        // let summary = remote_project_opencode_runtime_service::runtime(&workspace)
+        //     .await?
+        //     .read_session(&workspace.root_path, engine_thread_id)
+        //     .await?;
+        let summary = match remote_project_opencode_runtime_service::runtime(&workspace)
             .await?
             .read_session(&workspace.root_path, engine_thread_id)
-            .await?;
+            .await
+        {
+            Ok(summary) => summary,
+            Err(error) => {
+                // SSH 只允许这一次按 ID 请求；仅确认 HTTP 404 时映射公共 NotFound，
+                // 连接、解析和其他 HTTP 错误必须原样返回，不能回退到本机或列表查询。
+                let is_not_found = error
+                    .downcast_ref::<reqwest::Error>()
+                    .and_then(|cause| cause.status())
+                    .is_some_and(|status| status == reqwest::StatusCode::NOT_FOUND);
+                if is_not_found {
+                    return Err(CliSessionNotFoundError::new("opencode", engine_thread_id).into());
+                }
+                return Err(error);
+            }
+        };
         anyhow::ensure!(
             summary.engine_thread_id == engine_thread_id,
             "OpenCode 返回了错误的会话 ID: expected={} actual={}",

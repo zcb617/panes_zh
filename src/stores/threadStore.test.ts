@@ -4,6 +4,7 @@ import type { EngineInfo, Thread } from "../types";
 const mockIpc = vi.hoisted(() => ({
   attachCodexRemoteThread: vi.fn(),
   archiveThread: vi.fn(),
+  restoreThread: vi.fn(),
   listCodexRemoteThreads: vi.fn(),
   listThreads: vi.fn(),
 }));
@@ -204,6 +205,30 @@ describe("threadStore remote Codex discovery", () => {
 
     await expect(useThreadStore.getState().removeThread(thread.id)).rejects.toBe(error);
     expect(useThreadStore.getState().threads).toEqual([thread]);
+    expect(useThreadStore.getState().error).toBe(String(error));
+  });
+
+  it("keeps archived thread state when restore is rejected", async () => {
+    const archivedThread = makeThread("archived");
+    const error = new Error("restore rejected");
+    mockIpc.restoreThread.mockRejectedValueOnce(error);
+    useThreadStore.setState({
+      threads: [],
+      threadsByWorkspace: { "workspace-1": [] },
+      archivedThreadsByWorkspace: { "workspace-1": [archivedThread] },
+      activeThreadId: null,
+      loading: false,
+      error: undefined,
+    });
+
+    await expect(useThreadStore.getState().restoreThread(archivedThread.id)).rejects.toBe(error);
+
+    expect(mockIpc.restoreThread).toHaveBeenCalledWith(archivedThread.id);
+    expect(useThreadStore.getState().archivedThreadsByWorkspace).toEqual({
+      "workspace-1": [archivedThread],
+    });
+    expect(useThreadStore.getState().threads).toEqual([]);
+    expect(useThreadStore.getState().loading).toBe(false);
     expect(useThreadStore.getState().error).toBe(String(error));
   });
 });

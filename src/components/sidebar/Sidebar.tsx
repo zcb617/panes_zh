@@ -318,7 +318,12 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
   }
 
   async function onRestoreThread(thread: Thread) {
-    await restoreThread(thread.id);
+    try {
+      await restoreThread(thread.id);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      toast.error(errorMessage || t("app:sidebar.restoreThreadFailed"));
+    }
   }
 
   function getWorkspaceLabel(workspace: Workspace) {

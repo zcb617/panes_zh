@@ -577,6 +577,8 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       });
     } catch (error) {
       set({ loading: false, error: String(error) });
+      // 继续把后端业务提示交给侧边栏展示，失败时归档列表保持不变。
+      throw error;
     }
   },
   forkCodexThread: async (threadId) => {

@@ -107,6 +107,7 @@
     "codexRemoteThreadDeletedMessage": "O Codex excluiu a thread \"{{name}}\". Arquivar sua cópia local deste projeto?",
     "codexRemoteThreadArchivedMessage": "O Codex arquivou a thread \"{{name}}\". Arquivar sua cópia local deste projeto?",
     "keepLocalThread": "Manter no projeto",
+    "restoreThreadFailed": "Não foi possível restaurar a thread.",
     "archiveThreadFailed": "Não foi possível arquivar a thread.",
     "codexThreadArchiveActiveWriter": "Falha ao arquivar a thread do Codex: ela está sendo usada pelo Codex App. Feche a thread correspondente no Codex App e tente novamente.",
     "codexRemoteThreadArchiveFailed": "Não foi possível arquivar a cópia local desta conversa.",

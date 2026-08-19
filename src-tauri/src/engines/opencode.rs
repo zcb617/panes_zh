@@ -3644,6 +3644,104 @@ mod tests {
         assert!(!read_request.headers().contains_key("X-OpenCode-Directory"));
     }
 
+    #[tokio::test]
+    async fn read_session_requests_only_id_path_with_basic_auth() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request_bytes = vec![0_u8; 4096];
+            let mut length = 0;
+            while !request_bytes[..length]
+                .windows(4)
+                .any(|window| window == b"\r\n\r\n")
+            {
+                let read = stream.read(&mut request_bytes[length..]).await.unwrap();
+                assert!(read > 0, "mock client closed before sending HTTP headers");
+                length += read;
+            }
+            let request = String::from_utf8_lossy(&request_bytes[..length]).to_ascii_lowercase();
+
+            // 恢复接口只能按 ID 请求，不能把本机目录作为 query 或目录请求头发送。
+            assert!(request.starts_with("get /session/ses_test http/1.1"));
+            assert!(!request.contains("?directory="));
+            assert!(!request.contains("x-opencode-directory:"));
+            assert!(request.contains("authorization: basic "));
+
+            let body = r#"{"id":"ses_test","title":"Restored","directory":"/var/work/project-a","permission":null,"time":{"created":1,"updated":2,"archived":0}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let (event_bus, _) = broadcast::channel::<OpenCodeBusItem>(OPENCODE_EVENT_BUFFER_CAPACITY);
+        // 直接组装远端 endpoint，避免测试额外启动 SSE pump 抢占 mock listener；
+        // 被测 read_session 仍然走 OpenCodeEngine 的真实 HTTP 请求实现。
+        let engine = OpenCodeEngine {
+            state: Arc::new(Mutex::new(OpenCodeState::default())),
+            http: reqwest::Client::new(),
+            computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            target: OpenCodeTransportTarget::Remote(Arc::new(RemoteOpenCodeEndpoint {
+                base_url: format!("http://{address}"),
+                password: "runtime-secret".to_string(),
+                event_bus,
+                pump_cancel: CancellationToken::new(),
+            })),
+        };
+        let summary = engine
+            .read_session("/var/work/project-a", "ses_test")
+            .await
+            .unwrap();
+        assert_eq!(summary.engine_thread_id, "ses_test");
+        assert_eq!(summary.cwd, "/var/work/project-a");
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_session_preserves_http_404_for_cli_mapping() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let response =
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let (event_bus, _) = broadcast::channel::<OpenCodeBusItem>(OPENCODE_EVENT_BUFFER_CAPACITY);
+        // 与成功请求测试一致，不启动 SSE pump，确保本测试只验证 read_session 的 404 传播。
+        let engine = OpenCodeEngine {
+            state: Arc::new(Mutex::new(OpenCodeState::default())),
+            http: reqwest::Client::new(),
+            computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            target: OpenCodeTransportTarget::Remote(Arc::new(RemoteOpenCodeEndpoint {
+                base_url: format!("http://{address}"),
+                password: "runtime-secret".to_string(),
+                event_bus,
+                pump_cancel: CancellationToken::new(),
+            })),
+        };
+
+        let error = engine
+            .read_session("/var/work/project-a", "ses_missing")
+            .await
+            .expect_err("HTTP 404 must be returned to the CLI mapping layer");
+        let request_error = error
+            .downcast_ref::<reqwest::Error>()
+            .expect("anyhow context must preserve the reqwest source error");
+        assert_eq!(request_error.status(), Some(reqwest::StatusCode::NOT_FOUND));
+        server_task.await.unwrap();
+    }
+
     #[test]
     fn parse_model_slug_splits_on_first_slash() {
         let parsed = parse_model_slug("openrouter/anthropic/claude-sonnet-4.5").unwrap();
