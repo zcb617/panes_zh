@@ -4,6 +4,8 @@ use anyhow::Context;
 use tauri::State;
 use tokio::process::Command;
 
+use super::harness::LocalCliServiceLifecycle;
+
 #[cfg(not(target_os = "windows"))]
 use crate::runtime_env;
 use crate::{
@@ -220,7 +222,30 @@ pub async fn list_actived_clis(
             return Ok(engines);
         }
     }
+    /*
+    旧实现直接返回 EngineManager 固定提供的 Codex、Claude、OpenCode 三项，没有根据
+    本机实际安装结果过滤：
     state.engines.list_actived_clis().await.map_err(err_to_string)
+    */
+    let local_harnesses = LocalCliServiceLifecycle::list().await?;
+    let engines = state
+        .engines
+        .list_actived_clis()
+        .await
+        .map_err(err_to_string)?;
+    Ok(engines
+        .into_iter()
+        .filter(|engine| {
+            let harness_id = match engine.id.as_str() {
+                "claude" => "claude-code",
+                other => other,
+            };
+            local_harnesses
+                .harnesses
+                .iter()
+                .any(|harness| harness.id == harness_id && harness.found)
+        })
+        .collect())
 }
 
 #[tauri::command]

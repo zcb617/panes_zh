@@ -140,33 +140,44 @@ const HARNESSES: &[HarnessDef] = &[
 // check_harnesses
 // ---------------------------------------------------------------------------
 
+/// 本机 CLI 服务统一查询入口。
+///
+/// 管理页和本机聊天工具列表都通过这里读取同一份安装检测结果。
+pub(crate) struct LocalCliServiceLifecycle;
+
+impl LocalCliServiceLifecycle {
+    pub(crate) async fn list() -> Result<HarnessReport, String> {
+        let mut harnesses = Vec::new();
+
+        for def in HARNESSES {
+            let status = detect_harness(def).await;
+            harnesses.push(status);
+        }
+
+        let npm_available = runtime_env::resolve_executable("npm").is_some()
+            || detect_via_login_shell("npm", "--version").await.is_some();
+
+        let mise_preferred =
+            runtime_env::is_flatpak() && runtime_env::resolve_executable("mise").is_some();
+        let preferred_install_method = if mise_preferred {
+            Some("mise".to_string())
+        } else if npm_available {
+            Some("npm".to_string())
+        } else {
+            None
+        };
+
+        Ok(HarnessReport {
+            harnesses,
+            npm_available,
+            preferred_install_method,
+        })
+    }
+}
+
 #[tauri::command]
 pub async fn check_harnesses() -> Result<HarnessReport, String> {
-    let mut harnesses = Vec::new();
-
-    for def in HARNESSES {
-        let status = detect_harness(def).await;
-        harnesses.push(status);
-    }
-
-    let npm_available = runtime_env::resolve_executable("npm").is_some()
-        || detect_via_login_shell("npm", "--version").await.is_some();
-
-    let mise_preferred =
-        runtime_env::is_flatpak() && runtime_env::resolve_executable("mise").is_some();
-    let preferred_install_method = if mise_preferred {
-        Some("mise".to_string())
-    } else if npm_available {
-        Some("npm".to_string())
-    } else {
-        None
-    };
-
-    Ok(HarnessReport {
-        harnesses,
-        npm_available,
-        preferred_install_method,
-    })
+    LocalCliServiceLifecycle::list().await
 }
 
 // ---------------------------------------------------------------------------
