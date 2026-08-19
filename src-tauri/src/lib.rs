@@ -481,7 +481,7 @@ pub fn run() {
             commands::files::set_default_file_open_target,
             commands::git::watch_git_repo,
             commands::engines::get_execution_target,
-            commands::engines::list_engines,
+            commands::engines::list_actived_clis,
             commands::engines::get_engine_info,
             commands::engines::get_chat_provider_usage,
             commands::engines::codex_uses_external_sandbox,

@@ -390,6 +390,9 @@ export function ModelPicker({
     }
     wasOpenRef.current = true;
 
+    // 每次打开 CLI 工具选择器都实时读取后端统一生命周期，不复用上次打开的列表。
+    void onRetry?.();
+
     const inspectedEngineIds = new Set<string>();
     for (const engine of engines) {
       inspectedEngineIds.add(engine.id);
@@ -417,6 +420,7 @@ export function ModelPicker({
     engines,
     ensureEngineHealth,
     health,
+    onRetry,
     open,
     refreshEngineCatalog,
     selectedEngineId,

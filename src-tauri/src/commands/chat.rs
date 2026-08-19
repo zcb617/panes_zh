@@ -763,7 +763,7 @@ pub(crate) async fn send_message_inner(
                 .ok()
                 .map(|engine| vec![engine])
         } else {
-            state.engines.list_engines().await.ok()
+            state.engines.list_actived_clis().await.ok()
         }
     } else {
         None
@@ -803,7 +803,7 @@ pub(crate) async fn send_message_inner(
             .await
             .map_err(err_to_string)?])
     } else {
-        Some(state.engines.list_engines().await.map_err(err_to_string)?)
+        Some(state.engines.list_actived_clis().await.map_err(err_to_string)?)
     };
     validate_attachments_for_engine_model(
         &attachments,
@@ -7764,7 +7764,7 @@ fn resolve_turn_model_id(
 }
 
 async fn model_supports_personality(state: &AppState, engine_id: &str, model_id: &str) -> bool {
-    let Ok(engines) = state.engines.list_engines().await else {
+    let Ok(engines) = state.engines.list_actived_clis().await else {
         return false;
     };
 

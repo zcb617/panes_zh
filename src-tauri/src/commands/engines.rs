@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Context;
 use tauri::State;
@@ -89,7 +89,7 @@ pub async fn get_execution_target(
 }
 
 #[tauri::command]
-pub async fn list_engines(
+pub async fn list_actived_clis(
     state: State<'_, AppState>,
     workspace_id: Option<String>,
 ) -> Result<Vec<EngineInfoDto>, String> {
@@ -115,6 +115,9 @@ pub async fn list_engines(
                 .as_deref()
                 .ok_or_else(|| "远端项目未绑定 SSH 连接".to_string())?
                 .to_string();
+            /*
+            旧实现用 Tunnel Registry 判断 CLI 工具是否可用，并等待隧道数量稳定。隧道存在
+            不代表统一 CLI 生命周期中的服务句柄已经 Ready，因此不再执行：
             let mut observed_tunnel_count = 0;
             let mut stable_checks = 0;
             for _ in 0..150 {
@@ -136,7 +139,8 @@ pub async fn list_engines(
             let tunnels = crate::ssh::cli_tunnel_registry::list_by_host(&connection_id).await;
             if tunnels.is_empty() {
                 return Err(
-                    "SSH 远端机器没有可用的 Codex、OpenCode 或 Claude 对话运行时".to_string(),
+                    "SSH 远端机器没有可用的 Codex、OpenCode 或 Claude 对话运行时"
+                        .to_string(),
                 );
             }
 
@@ -179,6 +183,23 @@ pub async fn list_engines(
                     }
                     _ => unreachable!(),
                 };
+                let _ = (engine_name, discovered);
+            }
+            */
+            let services = crate::ssh::cli_service_lifecycle::list_ready(&connection_id).await;
+            if services.is_empty() {
+                return Err(
+                    "SSH 远端机器没有已激活的 Codex、OpenCode 或 Claude CLI 工具".to_string(),
+                );
+            }
+
+            let mut engines = Vec::new();
+            let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+            let factory = CliToolFactory::new(state.inner().clone());
+            for service in services {
+                let cli_id = service.cli_id();
+                let cli = factory.create(cli_id).map_err(err_to_string)?;
+                let discovered = cli.get_engine_info(&context).await;
                 match discovered {
                     Ok(engine) => engines.push(engine),
                     Err(error) => {
@@ -189,7 +210,7 @@ pub async fn list_engines(
                         );
                         engines.push(EngineInfoDto {
                             id: cli_id.to_string(),
-                            name: engine_name.to_string(),
+                            name: cli.name().to_string(),
                             models: Vec::new(),
                             capabilities: map_engine_capabilities(capabilities_for_engine(cli_id)),
                         });
@@ -199,7 +220,7 @@ pub async fn list_engines(
             return Ok(engines);
         }
     }
-    state.engines.list_engines().await.map_err(err_to_string)
+    state.engines.list_actived_clis().await.map_err(err_to_string)
 }
 
 #[tauri::command]
@@ -272,7 +293,7 @@ pub async fn get_engine_info(
 
     state
         .engines
-        .list_engines()
+        .list_actived_clis()
         .await
         .map_err(err_to_string)?
         .into_iter()

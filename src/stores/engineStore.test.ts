@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockIpc = vi.hoisted(() => ({
   getExecutionTarget: vi.fn(),
-  listEngines: vi.fn(),
+  listActivedClis: vi.fn(),
   getEngineInfo: vi.fn(),
   getChatProviderUsage: vi.fn(),
   engineHealth: vi.fn(),
@@ -55,18 +55,18 @@ describe("engineStore", () => {
         displayName: "本机",
       },
       engines: [],
-      enginesByTarget: {},
+      // 旧实现：enginesByTarget: {},
       health: {},
-      healthByTarget: {},
+      // 旧实现：healthByTarget: {},
       usage: {},
-      usageByTarget: {},
+      // 旧实现：usageByTarget: {},
       healthLoading: {},
-      healthLoadingByTarget: {},
+      // 旧实现：healthLoadingByTarget: {},
       engineCatalogLoading: {},
-      engineCatalogLoadingByTarget: {},
+      // 旧实现：engineCatalogLoadingByTarget: {},
       usageLoading: {},
-      usageLoadingByTarget: {},
-      targetGenerations: {},
+      // 旧实现：usageLoadingByTarget: {},
+      // 旧实现：targetGenerations: {},
       loading: false,
       loadedOnce: false,
       activeWorkspaceId: null,
@@ -75,7 +75,7 @@ describe("engineStore", () => {
   });
 
   it("loads engines without eagerly probing health", async () => {
-    mockIpc.listEngines.mockResolvedValue([
+    mockIpc.listActivedClis.mockResolvedValue([
       {
         id: "codex",
         name: "Codex",
@@ -90,13 +90,29 @@ describe("engineStore", () => {
 
     await useEngineStore.getState().load();
 
-    expect(mockIpc.listEngines).toHaveBeenCalledTimes(1);
+    expect(mockIpc.listActivedClis).toHaveBeenCalledTimes(1);
     expect(mockIpc.engineHealth).not.toHaveBeenCalled();
     expect(useEngineStore.getState().engines).toHaveLength(1);
   });
 
+  it("reads the active CLI list from the backend on every load", async () => {
+    mockIpc.listActivedClis.mockResolvedValue([
+      {
+        id: "codex",
+        name: "Codex",
+        models: [{ id: "gpt-live" }],
+        capabilities: { permissionModes: [], sandboxModes: [], approvalDecisions: [] },
+      },
+    ]);
+
+    await useEngineStore.getState().load(null);
+    await useEngineStore.getState().load(null);
+
+    expect(mockIpc.listActivedClis).toHaveBeenCalledTimes(2);
+  });
+
   it("loads an SSH workspace engine catalog with workspace context", async () => {
-    mockIpc.listEngines.mockResolvedValue([
+    mockIpc.listActivedClis.mockResolvedValue([
       {
         id: "codex",
         name: "Codex",
@@ -111,12 +127,12 @@ describe("engineStore", () => {
 
     await useEngineStore.getState().load("workspace-ssh");
 
-    expect(mockIpc.listEngines).toHaveBeenCalledWith("workspace-ssh");
+    expect(mockIpc.listActivedClis).toHaveBeenCalledWith("workspace-ssh");
     expect(useEngineStore.getState().activeWorkspaceId).toBe("workspace-ssh");
     expect(useEngineStore.getState().engines[0]?.models[0]?.id).toBe("remote-model");
   });
 
-  it("archives late engine results under their original target", async () => {
+  it("discards late CLI results after switching targets", async () => {
     const firstCatalog = deferred<Array<{ id: string; name: string; models: Array<{ id: string }>; capabilities: { permissionModes: never[]; sandboxModes: never[]; approvalDecisions: never[] } }>>();
     mockIpc.getExecutionTarget.mockImplementation((workspaceId?: string | null) =>
       Promise.resolve({
@@ -127,7 +143,7 @@ describe("engineStore", () => {
         connectionStatus: "ok",
       }),
     );
-    mockIpc.listEngines.mockImplementation((workspaceId?: string | null) => {
+    mockIpc.listActivedClis.mockImplementation((workspaceId?: string | null) => {
       if (workspaceId === "workspace-a") {
         return firstCatalog.promise;
       }
@@ -156,9 +172,7 @@ describe("engineStore", () => {
 
     expect(useEngineStore.getState().target?.targetKey).toBe("ssh:workspace-b");
     expect(useEngineStore.getState().engines[0]?.models[0]?.id).toBe("model-b");
-    expect(
-      useEngineStore.getState().enginesByTarget["ssh:workspace-a"]?.[0]?.models[0]?.id,
-    ).toBe("model-a");
+    // 旧实现会把迟到结果归档到 enginesByTarget；前端不再保存其他目标的 CLI 状态。
   });
 
   it("does not restore invalidated target data from an older request", async () => {
@@ -176,7 +190,7 @@ describe("engineStore", () => {
         displayName: "开发机 A",
         connectionId: "connection-a",
       },
-      enginesByTarget: { "ssh:connection-a": [] },
+      engines: [],
     });
     mockIpc.getEngineInfo.mockReturnValueOnce(request.promise);
 
@@ -190,7 +204,7 @@ describe("engineStore", () => {
     });
     await refresh;
 
-    expect(useEngineStore.getState().enginesByTarget["ssh:connection-a"]).toBeUndefined();
+    // 旧实现还会断言 enginesByTarget 已删除；该缓存结构现已不存在。
     expect(useEngineStore.getState().engines).toEqual([]);
   });
 
@@ -209,6 +223,22 @@ describe("engineStore", () => {
     expect(mockIpc.engineHealth).toHaveBeenCalledWith("codex");
     expect(health?.available).toBe(true);
     expect(useEngineStore.getState().health.codex?.details).toBe("ready");
+  });
+
+  it("reads successful CLI health from the backend on every request", async () => {
+    mockIpc.engineHealth.mockResolvedValue({
+      id: "codex",
+      available: true,
+      details: "ready",
+      warnings: [],
+      checks: [],
+      fixes: [],
+    });
+
+    await useEngineStore.getState().ensureHealth("codex");
+    await useEngineStore.getState().ensureHealth("codex");
+
+    expect(mockIpc.engineHealth).toHaveBeenCalledTimes(2);
   });
 
   it("consumes a successful health result by restoring an empty model catalog", async () => {
@@ -232,20 +262,12 @@ describe("engineStore", () => {
           },
         },
       ],
+      /*
+      旧实现还要同步设置 enginesByTarget：
       enginesByTarget: {
-        "ssh:connection-a": [
-          {
-            id: "claude",
-            name: "Claude",
-            models: [],
-            capabilities: {
-              permissionModes: [],
-              sandboxModes: [],
-              approvalDecisions: [],
-            },
-          },
-        ],
+        "ssh:connection-a": [],
       },
+      */
     });
     mockIpc.engineHealth.mockResolvedValue({
       id: "claude",
@@ -325,18 +347,7 @@ describe("engineStore", () => {
           fixes: [],
         },
       },
-      healthByTarget: {
-        local: {
-          codex: {
-            id: "codex",
-            available: false,
-            details: "Engine discovery failed: codex missing",
-            warnings: [],
-            checks: ["codex --version"],
-            fixes: [],
-          },
-        },
-      },
+      /* 旧实现还要把同一状态复制到 healthByTarget.local。 */
     });
 
     useEngineStore.getState().applyRuntimeUpdate({

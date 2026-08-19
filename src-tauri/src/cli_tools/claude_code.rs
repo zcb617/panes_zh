@@ -413,7 +413,7 @@ impl CliTool for ClaudeCodeCli {
 
         self.state
             .engines
-            .list_engines()
+            .list_actived_clis()
             .await?
             .into_iter()
             .find(|engine| engine.id == "claude")

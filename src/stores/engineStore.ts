@@ -8,6 +8,11 @@ import type {
 } from "../types";
 import { ipc } from "../lib/ipc";
 
+/*
+旧实现按执行目标缓存 CLI、模型、健康状态和用量，并在命中缓存后跳过后端接口。
+统一 CLI 生命周期已经由后端负责，前端不能再保存第二套 CLI 状态来源。
+旧实现完整保留在本注释中，下面的新实现只保存当前页面最近一次实时请求的结果。
+
 interface EngineState {
   target: ExecutionTarget | null;
   engines: EngineInfo[];
@@ -126,8 +131,8 @@ export const useEngineStore = create<EngineState>((set, get) => ({
       }
 
       const engines = normalizedWorkspaceId
-        ? await ipc.listEngines(normalizedWorkspaceId)
-        : await ipc.listEngines();
+        ? await ipc.listActivedClis(normalizedWorkspaceId)
+        : await ipc.listActivedClis();
       set((state) => {
         if ((state.targetGenerations[target.targetKey] ?? 0) !== targetGeneration) {
           return state;
@@ -616,6 +621,389 @@ export const useEngineStore = create<EngineState>((set, get) => ({
         },
         health: localActive ? nextLocalHealth : state.health,
         healthLoading: localActive ? rest : state.healthLoading,
+      };
+    }),
+}));
+*/
+
+interface EngineState {
+  target: ExecutionTarget | null;
+  engines: EngineInfo[];
+  health: Record<string, EngineHealth>;
+  usage: Record<string, ChatProviderUsage>;
+  healthLoading: Record<string, boolean>;
+  engineCatalogLoading: Record<string, boolean>;
+  usageLoading: Record<string, boolean>;
+  loading: boolean;
+  loadedOnce: boolean;
+  activeWorkspaceId: string | null;
+  error?: string;
+  load: (workspaceId?: string | null) => Promise<void>;
+  refreshEngineCatalog: (engineId: string) => Promise<EngineInfo | null>;
+  ensureHealth: (
+    engineId: string,
+    options?: { force?: boolean },
+  ) => Promise<EngineHealth | null>;
+  ensureUsage: (
+    engineId: string,
+    options?: { force?: boolean },
+  ) => Promise<ChatProviderUsage | null>;
+  invalidateConnection: (connectionId: string) => void;
+  mergeHealth: (reports: EngineHealth[]) => void;
+  applyRuntimeUpdate: (event: EngineRuntimeUpdatedEvent) => void;
+}
+
+let pendingHealthRequests: Partial<Record<string, Promise<EngineHealth | null>>> = {};
+let pendingEngineCatalogRequests: Partial<Record<string, Promise<EngineInfo | null>>> = {};
+let pendingUsageRequests: Partial<Record<string, Promise<ChatProviderUsage | null>>> = {};
+let engineLoadSequence = 0;
+const requestGenerations: Record<string, number> = {};
+
+function targetRequestKey(targetKey: string, engineId: string): string {
+  return `${targetKey}:${engineId}`;
+}
+
+function isCurrentTarget(
+  state: EngineState,
+  workspaceId: string | null,
+  targetKey: string,
+  requestGeneration: number,
+): boolean {
+  return (
+    state.activeWorkspaceId === workspaceId &&
+    state.target?.targetKey === targetKey &&
+    (requestGenerations[targetKey] ?? 0) === requestGeneration
+  );
+}
+
+export const useEngineStore = create<EngineState>((set, get) => ({
+  target: null,
+  engines: [],
+  health: {},
+  usage: {},
+  healthLoading: {},
+  engineCatalogLoading: {},
+  usageLoading: {},
+  loading: false,
+  loadedOnce: false,
+  activeWorkspaceId: null,
+
+  load: async (workspaceId = null) => {
+    const normalizedWorkspaceId = workspaceId ?? null;
+    const sequence = ++engineLoadSequence;
+    set({
+      target: null,
+      engines: [],
+      health: {},
+      usage: {},
+      healthLoading: {},
+      engineCatalogLoading: {},
+      usageLoading: {},
+      loading: true,
+      activeWorkspaceId: normalizedWorkspaceId,
+      error: undefined,
+    });
+
+    try {
+      const target = await ipc.getExecutionTarget(normalizedWorkspaceId);
+      if (
+        sequence !== engineLoadSequence ||
+        get().activeWorkspaceId !== normalizedWorkspaceId
+      ) {
+        return;
+      }
+      set({ target });
+      const targetRequestGeneration = requestGenerations[target.targetKey] ?? 0;
+
+      const engines = normalizedWorkspaceId
+        ? await ipc.listActivedClis(normalizedWorkspaceId)
+        : await ipc.listActivedClis();
+      if (
+        sequence !== engineLoadSequence ||
+        !isCurrentTarget(
+          get(),
+          normalizedWorkspaceId,
+          target.targetKey,
+          targetRequestGeneration,
+        )
+      ) {
+        return;
+      }
+      set({
+        engines,
+        loading: false,
+        loadedOnce: true,
+        error: undefined,
+      });
+    } catch (error) {
+      if (
+        sequence !== engineLoadSequence ||
+        get().activeWorkspaceId !== normalizedWorkspaceId
+      ) {
+        return;
+      }
+      set({
+        loading: false,
+        loadedOnce: true,
+        error: String(error),
+      });
+    }
+  },
+
+  refreshEngineCatalog: async (engineId) => {
+    const workspaceId = get().activeWorkspaceId;
+    const targetKey = get().target?.targetKey ?? "local";
+    const requestGeneration = requestGenerations[targetKey] ?? 0;
+    const requestKey = targetRequestKey(targetKey, engineId);
+    const pendingRequest = pendingEngineCatalogRequests[requestKey];
+    if (pendingRequest) {
+      return pendingRequest;
+    }
+
+    set((state) => ({
+      engineCatalogLoading: {
+        ...state.engineCatalogLoading,
+        [engineId]: true,
+      },
+    }));
+
+    const request = (async () => {
+      try {
+        const engine = workspaceId
+          ? await ipc.getEngineInfo(engineId, workspaceId)
+          : await ipc.getEngineInfo(engineId);
+        if (!isCurrentTarget(get(), workspaceId, targetKey, requestGeneration)) {
+          return engine;
+        }
+        set((state) => ({
+          engines: state.engines.some((item) => item.id === engine.id)
+            ? state.engines.map((item) => (item.id === engine.id ? engine : item))
+            : [...state.engines, engine],
+          health: {
+            ...state.health,
+            [engine.id]: {
+              id: engine.id,
+              available: true,
+              details: state.health[engine.id]?.details,
+              warnings: state.health[engine.id]?.warnings ?? [],
+              checks: state.health[engine.id]?.checks ?? [],
+              fixes: state.health[engine.id]?.fixes ?? [],
+              protocolDiagnostics: state.health[engine.id]?.protocolDiagnostics,
+            },
+          },
+          error: state.error?.startsWith(`${engineId}:`) ? undefined : state.error,
+        }));
+        return engine;
+      } catch (error) {
+        const message = String(error);
+        if (isCurrentTarget(get(), workspaceId, targetKey, requestGeneration)) {
+          set((state) => ({
+            health: {
+              ...state.health,
+              [engineId]: {
+                id: engineId,
+                available: false,
+                details: message,
+                warnings: [],
+                checks: [],
+                fixes: [],
+              },
+            },
+            error: `${engineId}: ${message}`,
+          }));
+        }
+        return null;
+      } finally {
+        if ((requestGenerations[targetKey] ?? 0) === requestGeneration) {
+          delete pendingEngineCatalogRequests[requestKey];
+        }
+        if (isCurrentTarget(get(), workspaceId, targetKey, requestGeneration)) {
+          set((state) => {
+            const { [engineId]: _ignored, ...rest } = state.engineCatalogLoading;
+            return { engineCatalogLoading: rest };
+          });
+        }
+      }
+    })();
+
+    pendingEngineCatalogRequests[requestKey] = request;
+    return request;
+  },
+
+  ensureHealth: async (engineId, _options) => {
+    const workspaceId = get().activeWorkspaceId;
+    const targetKey = get().target?.targetKey ?? "local";
+    const requestGeneration = requestGenerations[targetKey] ?? 0;
+    const requestKey = targetRequestKey(targetKey, engineId);
+    const pendingRequest = pendingHealthRequests[requestKey];
+    if (pendingRequest) {
+      return pendingRequest;
+    }
+
+    set((state) => ({
+      healthLoading: {
+        ...state.healthLoading,
+        [engineId]: true,
+      },
+    }));
+
+    const request = (async () => {
+      try {
+        const health = workspaceId
+          ? await ipc.engineHealth(engineId, workspaceId)
+          : await ipc.engineHealth(engineId);
+        if (!isCurrentTarget(get(), workspaceId, targetKey, requestGeneration)) {
+          return health;
+        }
+        set((state) => {
+          const { [engineId]: _ignored, ...rest } = state.healthLoading;
+          return {
+            health: { ...state.health, [health.id]: health },
+            healthLoading: rest,
+          };
+        });
+
+        const engine = get().engines.find((item) => item.id === engineId);
+        if (health.available && engine && engine.models.length === 0) {
+          await get().refreshEngineCatalog(engineId);
+        }
+        return health;
+      } catch (error) {
+        if (isCurrentTarget(get(), workspaceId, targetKey, requestGeneration)) {
+          set((state) => {
+            const { [engineId]: _ignored, ...rest } = state.healthLoading;
+            return {
+              healthLoading: rest,
+              error: `${engineId}: ${String(error)}`,
+            };
+          });
+        }
+        return null;
+      } finally {
+        if ((requestGenerations[targetKey] ?? 0) === requestGeneration) {
+          delete pendingHealthRequests[requestKey];
+        }
+      }
+    })();
+
+    pendingHealthRequests[requestKey] = request;
+    return request;
+  },
+
+  ensureUsage: async (engineId, _options) => {
+    const workspaceId = get().activeWorkspaceId;
+    const targetKey = get().target?.targetKey ?? "local";
+    const requestGeneration = requestGenerations[targetKey] ?? 0;
+    const requestKey = targetRequestKey(targetKey, engineId);
+    const pendingRequest = pendingUsageRequests[requestKey];
+    if (pendingRequest) {
+      return pendingRequest;
+    }
+
+    set((state) => ({
+      usageLoading: {
+        ...state.usageLoading,
+        [engineId]: true,
+      },
+    }));
+
+    const request = (async () => {
+      try {
+        const providers = await ipc.getChatProviderUsage(workspaceId, engineId);
+        const provider = providers.find((item) => item.engineId === engineId) ?? null;
+        if (
+          provider &&
+          isCurrentTarget(get(), workspaceId, targetKey, requestGeneration)
+        ) {
+          set((state) => ({
+            usage: { ...state.usage, [engineId]: provider },
+          }));
+        }
+        return provider;
+      } catch (error) {
+        if (isCurrentTarget(get(), workspaceId, targetKey, requestGeneration)) {
+          set({ error: `${engineId}: ${String(error)}` });
+        }
+        return null;
+      } finally {
+        if ((requestGenerations[targetKey] ?? 0) === requestGeneration) {
+          delete pendingUsageRequests[requestKey];
+        }
+        if (isCurrentTarget(get(), workspaceId, targetKey, requestGeneration)) {
+          set((state) => {
+            const { [engineId]: _ignored, ...rest } = state.usageLoading;
+            return { usageLoading: rest };
+          });
+        }
+      }
+    })();
+
+    pendingUsageRequests[requestKey] = request;
+    return request;
+  },
+
+  invalidateConnection: (connectionId) => {
+    const targetKey = `ssh:${connectionId}`;
+    requestGenerations[targetKey] = (requestGenerations[targetKey] ?? 0) + 1;
+    for (const requestKey of Object.keys(pendingHealthRequests)) {
+      if (requestKey.startsWith(`${targetKey}:`)) delete pendingHealthRequests[requestKey];
+    }
+    for (const requestKey of Object.keys(pendingEngineCatalogRequests)) {
+      if (requestKey.startsWith(`${targetKey}:`)) delete pendingEngineCatalogRequests[requestKey];
+    }
+    for (const requestKey of Object.keys(pendingUsageRequests)) {
+      if (requestKey.startsWith(`${targetKey}:`)) delete pendingUsageRequests[requestKey];
+    }
+    set((state) =>
+      state.target?.connectionId === connectionId
+        ? {
+            engines: [],
+            health: {},
+            usage: {},
+            healthLoading: {},
+            engineCatalogLoading: {},
+            usageLoading: {},
+            error: undefined,
+          }
+        : state,
+    );
+  },
+
+  mergeHealth: (reports) =>
+    set((state) => {
+      if (reports.length === 0) return state;
+      const nextHealth = { ...state.health };
+      const nextHealthLoading = { ...state.healthLoading };
+      for (const report of reports) {
+        nextHealth[report.id] = report;
+        delete nextHealthLoading[report.id];
+      }
+      return { health: nextHealth, healthLoading: nextHealthLoading };
+    }),
+
+  applyRuntimeUpdate: ({ engineId, protocolDiagnostics }) =>
+    set((state) => {
+      if (state.target?.targetKey !== "local") return state;
+      const current = state.health[engineId];
+      const nextHealth: EngineHealth = current
+        ? {
+            ...current,
+            available: true,
+            details: current.available ? current.details : undefined,
+            protocolDiagnostics: protocolDiagnostics ?? current.protocolDiagnostics,
+          }
+        : {
+            id: engineId,
+            available: true,
+            warnings: [],
+            checks: [],
+            fixes: [],
+            protocolDiagnostics,
+          };
+      const { [engineId]: _ignored, ...rest } = state.healthLoading;
+      return {
+        health: { ...state.health, [engineId]: nextHealth },
+        healthLoading: rest,
       };
     }),
 }));

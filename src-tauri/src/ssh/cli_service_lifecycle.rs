@@ -158,6 +158,11 @@ pub async fn get(connection_id: &str, cli_id: &str) -> anyhow::Result<Arc<SshCli
     SSH_CLI_SERVICES.get(connection_id, cli_id).await
 }
 
+/// 列出指定 SSH 连接中已经完成登记并处于 Ready 状态的 CLI 服务。
+pub async fn list_ready(connection_id: &str) -> Vec<Arc<SshCliService>> {
+    SSH_CLI_SERVICES.list_ready(connection_id).await
+}
+
 /// 启动并登记一个远端 CLI 服务。相同“连接配置 ID + CLI ID”重复调用时复用已有服务。
 pub async fn set(connection_id: &str, cli_id: &str) -> anyhow::Result<Arc<SshCliService>> {
     SSH_CLI_SERVICES.set(connection_id, cli_id).await
@@ -174,6 +179,25 @@ pub async fn terminate_all() -> anyhow::Result<()> {
 }
 
 impl SshCliServiceLifecycleRegistry {
+    async fn list_ready(&self, connection_id: &str) -> Vec<Arc<SshCliService>> {
+        let mut services = self
+            .services
+            .read()
+            .await
+            .get(connection_id)
+            .map(|host_services| host_services.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        services.sort_by(|left, right| left.cli_id().cmp(right.cli_id()));
+
+        let mut ready = Vec::with_capacity(services.len());
+        for service in services {
+            if *service.state.lock().await == SshCliServiceEntryState::Ready {
+                ready.push(service);
+            }
+        }
+        ready
+    }
+
     async fn get(&self, connection_id: &str, cli_id: &str) -> anyhow::Result<Arc<SshCliService>> {
         let service = self
             .services

@@ -1330,7 +1330,7 @@ impl RemoteTunnelManager {
                                             "version": app.package_info().version.to_string(),
                                             "online": true,
                                         })),
-                                        "engine.list" => state.engines.list_engines()
+                                        "engine.list" => state.engines.list_actived_clis()
                                             .await
                                             .map_err(|error| error.to_string())
                                             .and_then(|items| serde_json::to_value(items).map_err(|error| error.to_string())),

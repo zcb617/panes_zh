@@ -308,12 +308,16 @@ export function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listenSshRemoteProjectSessionsRefreshed(async (event) => {
+      /*
+      旧实现收到会话同步完成通知后还会刷新 CLI 列表。该通知只负责通知前端重新读取
+      已提交的会话数据；CLI 工具、模型和健康状态在界面实际使用时实时调用后端接口：
       if (
         startupCompleted &&
         useWorkspaceStore.getState().activeWorkspaceId === event.workspaceId
       ) {
         void loadEngines(event.workspaceId);
       }
+      */
       try {
         await reloadThreadsFromLocalDatabase(event.workspaceId);
       } catch (error) {
@@ -342,7 +346,7 @@ export function App() {
         unlisten();
       }
     };
-  }, [loadEngines, reloadThreadsFromLocalDatabase, startupCompleted]);
+  }, [reloadThreadsFromLocalDatabase]);
 
   useEffect(() => {
     let disposed = false;

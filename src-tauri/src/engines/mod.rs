@@ -571,7 +571,7 @@ impl EngineManager {
         })
     }
 
-    pub async fn list_engines(&self) -> anyhow::Result<Vec<EngineInfoDto>> {
+    pub async fn list_actived_clis(&self) -> anyhow::Result<Vec<EngineInfoDto>> {
         let (codex_models, claude_models, opencode_models) = tokio::join!(
             self.load_codex_models(),
             self.load_claude_models(),

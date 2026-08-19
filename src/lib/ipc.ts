@@ -462,8 +462,8 @@ export const ipc = {
     invoke<ExecutionTarget>("get_execution_target", {
       workspaceId: workspaceId ?? null,
     }),
-  listEngines: (workspaceId?: string | null) =>
-    invoke<EngineInfo[]>("list_engines", { workspaceId: workspaceId ?? null }),
+  listActivedClis: (workspaceId?: string | null) =>
+    invoke<EngineInfo[]>("list_actived_clis", { workspaceId: workspaceId ?? null }),
   getEngineInfo: (engineId: string, workspaceId?: string | null) =>
     invoke<EngineInfo>("get_engine_info", {
       engineId,

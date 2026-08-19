@@ -3465,6 +3465,13 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }, [selectedModel, selectedModelId]);
 
   useEffect(() => {
+    if (!activeWorkspaceId || !activeThread) {
+      return;
+    }
+    void loadEngines(activeWorkspaceId);
+  }, [activeThread?.id, activeWorkspaceId, loadEngines]);
+
+  useEffect(() => {
     if (!activeWorkspaceId || engines.length === 0) {
       return;
     }
