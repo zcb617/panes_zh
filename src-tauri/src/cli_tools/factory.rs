@@ -62,8 +62,13 @@ mod tests {
                 crate::extensions::refresh::ExtensionCatalogRefreshManager::default(),
             ),
             scheduled_tasks: Arc::new(ScheduledTaskManager::new()),
+            /*
             computer_control_approvals: Arc::new(
                 crate::commands::computer_control::ComputerControlApprovalManager::default(),
+            ),
+            */
+            computer_control_service: Arc::new(
+                crate::computer_control_service::ComputerControlService::default(),
             ),
             remote_access: Arc::new(crate::remote::RemoteTunnelManager::default()),
             ssh_monitor: Arc::new(crate::ssh::monitor::SshConnectionMonitor::default()),
@@ -82,5 +87,37 @@ mod tests {
             let cli = factory.create(cli_id).expect("factory should resolve CLI");
             assert_eq!(cli.id(), expected_id);
         }
+    }
+
+    #[tokio::test]
+    async fn execution_context_does_not_create_workspace_without_valid_id() {
+        let state = test_app_state();
+        let db = state.db.clone();
+        let factory = CliToolFactory::new(state);
+
+        for cli_id in ["codex", "opencode", "claude"] {
+            let cli = factory.create(cli_id).expect("factory should resolve CLI");
+
+            let missing_id_error = cli
+                .execution_context(None)
+                .await
+                .expect_err("missing workspace id should be rejected");
+            assert!(missing_id_error.to_string().contains("请先选择项目"));
+
+            let unknown_id_error = cli
+                .execution_context(Some("missing-workspace"))
+                .await
+                .expect_err("unknown workspace id should be rejected");
+            assert!(unknown_id_error
+                .to_string()
+                .contains("项目不存在或已被移除，请重新选择项目"));
+        }
+
+        assert!(
+            crate::db::workspaces::list_workspaces(&db)
+                .expect("failed to list workspaces")
+                .is_empty(),
+            "CLI execution context lookup must not create a workspace",
+        );
     }
 }

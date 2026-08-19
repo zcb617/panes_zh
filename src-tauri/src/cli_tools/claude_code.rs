@@ -65,12 +65,24 @@ impl ClaudeCodeCli {
         &self,
         workspace_id: Option<&str>,
     ) -> Result<CliExecutionContext> {
+        let workspace_id = workspace_id
+            .map(str::trim)
+            .filter(|workspace_id| !workspace_id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("请先选择项目"))?
+            .to_string();
         let db = self.state.db.clone();
+        /*
         let workspace_id = workspace_id.map(str::to_string);
         let workspace = tokio::task::spawn_blocking(move || match workspace_id {
             Some(workspace_id) => db::workspaces::find_workspace_by_id(&db, &workspace_id)?
                 .ok_or_else(|| anyhow::anyhow!("workspace 不存在: {workspace_id}")),
             None => db::workspaces::ensure_default_workspace(&db),
+        })
+        */
+        let workspace = tokio::task::spawn_blocking(move || {
+            db::workspaces::find_workspace_by_id(&db, &workspace_id)?.ok_or_else(|| {
+                anyhow::anyhow!("项目不存在或已被移除，请重新选择项目: {workspace_id}")
+            })
         })
         .await
         .context("读取 Claude Code workspace 任务失败")??;
