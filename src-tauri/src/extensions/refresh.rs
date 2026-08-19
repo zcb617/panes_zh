@@ -291,15 +291,24 @@ pub fn spawn_catalog_refresh_scheduler(app: AppHandle, state: AppState) {
 }
 
 async fn schedule_startup_refreshes(state: &AppState) {
-    let workspace = match crate::db::workspaces::ensure_default_workspace(&state.db) {
-        Ok(workspace) => workspace,
+    let workspaces = match crate::db::workspaces::list_workspaces(&state.db) {
+        Ok(workspaces) => workspaces,
         Err(error) => {
-            log::warn!("failed to resolve default workspace for extension refresh: {error}");
+            log::warn!("failed to list workspaces for startup extension refresh: {error}");
             return;
         }
     };
-    if let Err(error) = schedule_workspace_catalog_refresh(state, &workspace.id).await {
-        log::warn!("failed to schedule startup extension refresh: {error}");
+
+    for workspace in workspaces {
+        if workspace.location_kind != "local" {
+            continue;
+        }
+        if let Err(error) = schedule_workspace_catalog_refresh(state, &workspace.id).await {
+            log::warn!(
+                "failed to schedule startup extension refresh for workspace {}: {error}",
+                workspace.id
+            );
+        }
     }
 }
 
@@ -580,6 +589,20 @@ mod tests {
             remote_access: Arc::new(crate::remote::RemoteTunnelManager::default()),
             ssh_monitor: Arc::new(crate::ssh::monitor::SshConnectionMonitor::default()),
         }
+    }
+
+    #[tokio::test]
+    async fn startup_refresh_keeps_an_empty_workspace_list_empty() {
+        let state = test_app_state();
+
+        schedule_startup_refreshes(&state).await;
+
+        assert!(
+            crate::db::workspaces::list_workspaces(&state.db)
+                .expect("failed to list workspaces")
+                .is_empty(),
+            "startup extension refresh must not create a workspace",
+        );
     }
 
     #[test]

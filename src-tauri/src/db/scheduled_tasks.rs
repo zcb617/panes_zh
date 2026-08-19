@@ -557,10 +557,18 @@ mod tests {
         Database::open(path).expect("failed to create test database")
     }
 
+    fn test_workspace(db: &Database) -> crate::models::WorkspaceDto {
+        let root =
+            std::env::temp_dir().join(format!("panes-scheduled-task-workspace-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("failed to create test workspace root");
+        db::workspaces::upsert_workspace(db, root.to_string_lossy().as_ref(), None)
+            .expect("failed to create test workspace")
+    }
+
     #[test]
     fn create_and_list_task_with_latest_run() {
         let db = test_db();
-        let workspace = db::workspaces::ensure_default_workspace(&db).unwrap();
+        let workspace = test_workspace(&db);
         let task = create_task(
             &db,
             &ScheduledTaskWrite {
@@ -619,7 +627,7 @@ mod tests {
     #[test]
     fn claim_is_idempotent_for_same_scheduled_time() {
         let db = test_db();
-        let workspace = db::workspaces::ensure_default_workspace(&db).unwrap();
+        let workspace = test_workspace(&db);
         let task = create_task(
             &db,
             &ScheduledTaskWrite {

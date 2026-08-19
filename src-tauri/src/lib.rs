@@ -131,9 +131,6 @@ pub fn run() {
         }
     }
 
-    let _ =
-        db::workspaces::ensure_default_workspace(&db).expect("failed to ensure default workspace");
-
     let computer_control_sdk = Arc::new(computer_control_sdk::CuaDriverSdk::new());
     let computer_control_service = Arc::new(computer_control_service::ComputerControlService::new(
         computer_control_sdk.clone(),
