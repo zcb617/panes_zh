@@ -26,9 +26,15 @@ async function bootstrap() {
     useDisplayScaleStore.getState().load(),
   ]);
 
-  await initializeI18n(locale);
+ await initializeI18n(locale);
 
-  createRoot(document.getElementById("root")!).render(
+  const splash = document.getElementById("app-splash");
+  if (splash) {
+    splash.classList.add("fade-out");
+    splash.addEventListener("transitionend", () => splash.classList.add("hidden"), { once: true });
+  }
+
+ createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
       <AppErrorBoundary>
         <App />

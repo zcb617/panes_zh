@@ -11,6 +11,7 @@ mod git;
 #[cfg(any(target_os = "linux", test))]
 mod linux_appimage;
 mod linux_webkit;
+mod local_cli_service_lifecycle;
 mod locale;
 pub(crate) mod message_notify_helper;
 mod models;

@@ -22,7 +22,7 @@ const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 // Harness definitions
 // ---------------------------------------------------------------------------
 
-struct HarnessDef {
+pub(crate) struct HarnessDef {
     id: &'static str,
     name: &'static str,
     description: &'static str,
@@ -37,7 +37,7 @@ struct HarnessDef {
     native: bool,
 }
 
-const HARNESSES: &[HarnessDef] = &[
+pub(crate) const HARNESSES: &[HarnessDef] = &[
     HarnessDef {
         id: "codex",
         name: "Codex CLI",
@@ -140,6 +140,7 @@ const HARNESSES: &[HarnessDef] = &[
 // check_harnesses
 // ---------------------------------------------------------------------------
 
+/*
 /// 本机 CLI 服务统一查询入口。
 ///
 /// 管理页和本机聊天工具列表都通过这里读取同一份安装检测结果。
@@ -174,10 +175,11 @@ impl LocalCliServiceLifecycle {
         })
     }
 }
+*/
 
 #[tauri::command]
 pub async fn check_harnesses() -> Result<HarnessReport, String> {
-    LocalCliServiceLifecycle::list().await
+    crate::local_cli_service_lifecycle::LocalCliServiceLifecycle::list_ready().await
 }
 
 // ---------------------------------------------------------------------------
@@ -353,7 +355,7 @@ pub async fn set_harness_launch_args(
 // Detection
 // ---------------------------------------------------------------------------
 
-async fn detect_harness(def: &HarnessDef) -> HarnessInfo {
+pub(crate) async fn detect_harness(def: &HarnessDef) -> HarnessInfo {
     if let Some(path) = runtime_env::resolve_executable(def.command) {
         if let Some(version) = get_command_version(&path, &[def.version_flag]).await {
             return HarnessInfo {
@@ -649,7 +651,10 @@ async fn get_command_version(path: &Path, args: &[&str]) -> Option<String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-async fn detect_via_login_shell(command: &str, version_flag: &str) -> Option<(String, String)> {
+pub(crate) async fn detect_via_login_shell(
+    command: &str,
+    version_flag: &str,
+) -> Option<(String, String)> {
     for shell in runtime_env::login_probe_shells() {
         let probe_cmd = format!("command -v {command} && {command} {version_flag}");
         let output = match timeout(
@@ -682,7 +687,10 @@ async fn detect_via_login_shell(command: &str, version_flag: &str) -> Option<(St
 }
 
 #[cfg(target_os = "windows")]
-async fn detect_via_login_shell(command: &str, version_flag: &str) -> Option<(String, String)> {
+pub(crate) async fn detect_via_login_shell(
+    command: &str,
+    version_flag: &str,
+) -> Option<(String, String)> {
     let probe_script = format!(
         "$p = (Get-Command {cmd} -ErrorAction SilentlyContinue | Select-Object -First 1).Source; \
          if ($p) {{ Write-Output $p; & $p {flag} }}",
