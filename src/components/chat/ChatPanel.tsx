@@ -3465,12 +3465,18 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     }
   }, [selectedModel, selectedModelId]);
 
-  useEffect(() => {
-    if (!activeWorkspaceId) {
-      return;
-    }
-    void loadEngines(activeWorkspaceId);
-  }, [activeThread?.id, activeWorkspaceId, loadEngines]);
+  /*
+   * 旧逻辑在切换或新建会话时重新加载当前电脑的 CLI 工具列表：
+   * useEffect(() => {
+   *   if (!activeWorkspaceId) {
+   *     return;
+   *   }
+   *   void loadEngines(activeWorkspaceId);
+   * }, [activeThread?.id, activeWorkspaceId, loadEngines]);
+   *
+   * CLI 工具列表属于本机或 SSH 连接，不属于具体会话。切换会话时由下方同步逻辑
+   * 从 activeThread 恢复该会话固定的 engineId 和 modelId，不再重复加载 CLI 列表。
+   */
 
   /*
    * 旧逻辑在线程变化时额外执行健康检查和预热。当前业务只需要携带 workspaceId
