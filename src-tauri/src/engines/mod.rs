@@ -573,6 +573,12 @@ impl EngineManager {
         })
     }
 
+    /*
+    本机与远端 CLI 目录统一改由 CLI 生命周期 + CliTool 提供（本机走
+    commands::engines::list_local_engine_infos，远端走 ssh::cli_service_lifecycle）。
+    该方法使用 EngineManager 自有的引擎实例，这些实例未在启动阶段预热，本机首次
+    读取模型目录时会冷启动新的 codex app-server，导致页面转圈。保留注释备查，
+    不再参与编译：
     pub async fn list_actived_clis(&self) -> anyhow::Result<Vec<EngineInfoDto>> {
         let (codex_models, claude_models, opencode_models) = tokio::join!(
             self.load_codex_models(),
@@ -601,6 +607,7 @@ impl EngineManager {
             },
         ])
     }
+    */
 
     pub async fn chat_provider_usage(&self) -> Vec<crate::models::ChatProviderUsageDto> {
         let (codex, claude) = tokio::join!(

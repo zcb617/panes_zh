@@ -9,7 +9,7 @@ use crate::local_cli_service_lifecycle::LocalCliServiceLifecycle;
 #[cfg(not(target_os = "windows"))]
 use crate::runtime_env;
 use crate::{
-    cli_tools::{factory::CliToolFactory, CliExecutionContext, CliTool},
+    cli_tools::{factory::CliToolFactory, CliExecutionContext, CliLocationKind, CliTool},
     engines::{capabilities_for_engine, map_engine_capabilities},
     models::{
         ChatProviderUsageDto, CodexAppDto, CodexPluginDto, CodexSkillDto, EngineCheckResultDto,
@@ -18,6 +18,41 @@ use crate::{
     process_utils,
     state::AppState,
 };
+
+/// 本机 CLI 目录统一从本地 CLI 生命周期取数：逐个 Ready 服务调用对应 CliTool 的
+/// get_engine_info，保证模型列表来自启动阶段已预热的引擎实例，而不是临时冷启动的实例。
+/// 本机取数不依赖具体项目，因此使用仅标记 location_kind 的本机上下文。
+pub(crate) async fn list_local_engine_infos(state: &AppState) -> Result<Vec<EngineInfoDto>, String> {
+    let services = LocalCliServiceLifecycle::list_ready().await;
+    let factory = CliToolFactory::new(state.clone());
+    let mut engines = Vec::new();
+    for service in services {
+        let cli_id = service.cli_id();
+        let cli = factory.create(cli_id).map_err(err_to_string)?;
+        let context = CliExecutionContext {
+            workspace_id: String::new(),
+            root_path: String::new(),
+            location_kind: CliLocationKind::Local,
+            ssh_connection_id: None,
+        };
+        match cli.get_engine_info(&context).await {
+            Ok(engine) => engines.push(engine),
+            Err(error) => {
+                log::warn!(
+                    "读取本地引擎目录失败，保留其他引擎: cli_id={} error={error:#}",
+                    cli_id,
+                );
+                engines.push(EngineInfoDto {
+                    id: cli_id.to_string(),
+                    name: cli.name().to_string(),
+                    models: Vec::new(),
+                    capabilities: map_engine_capabilities(capabilities_for_engine(cli_id)),
+                });
+            }
+        }
+    }
+    Ok(engines)
+}
 
 #[tauri::command]
 pub async fn get_execution_target(
@@ -276,10 +311,9 @@ pub async fn list_actived_clis(
     }
     */
     /*
-    旧实现直接返回 EngineManager 固定提供的 Codex、Claude、OpenCode 三项，没有根据
-    本机实际安装结果过滤：
-    state.engines.list_actived_clis().await.map_err(err_to_string)
-    */
+    旧实现先由 EngineManager 自有的未预热引擎实例取模型目录，再拿
+    LocalCliServiceLifecycle::list_ready() 过滤；本机首次读取会冷启动新的
+    codex app-server，导致页面转圈。现在直接由本地 CLI 生命周期取数，不再执行：
     let local_services = LocalCliServiceLifecycle::list_ready().await;
     let engines = state
         .engines
@@ -294,6 +328,8 @@ pub async fn list_actived_clis(
                 .any(|service| service.cli_id() == engine.id.as_str())
         })
         .collect())
+    */
+    list_local_engine_infos(state.inner()).await
 }
 
 #[tauri::command]
@@ -302,6 +338,17 @@ pub async fn get_engine_info(
     engine_id: String,
     workspace_id: Option<String>,
 ) -> Result<EngineInfoDto, String> {
+    if engine_id == "codex" {
+        let codex = CliToolFactory::new(state.inner().clone())
+            .create("codex")
+            .expect("Codex CLI factory mapping must exist");
+        let context = codex
+            .execution_context(workspace_id.as_deref())
+            .await
+            .map_err(err_to_string)?;
+        let cli: &dyn CliTool = codex.as_ref();
+        return cli.get_engine_info(&context).await.map_err(err_to_string);
+    }
     if engine_id == "opencode" {
         let opencode = CliToolFactory::new(state.inner().clone())
             .create("opencode")
@@ -364,6 +411,10 @@ pub async fn get_engine_info(
         }
     }
 
+    /*
+    旧实现回落到 EngineManager 的 list_actived_clis；该方法使用的引擎实例未在启动
+    阶段预热，已整体停用。codex、opencode、claude 都在上方分支返回，走到这里的是
+    不支持的引擎 id，不再执行：
     state
         .engines
         .list_actived_clis()
@@ -372,6 +423,8 @@ pub async fn get_engine_info(
         .into_iter()
         .find(|engine| engine.id == engine_id)
         .ok_or_else(|| format!("engine not found: {engine_id}"))
+    */
+    Err(format!("engine not found: {engine_id}"))
 }
 
 #[tauri::command]
