@@ -280,7 +280,7 @@ pub async fn list_actived_clis(
     本机实际安装结果过滤：
     state.engines.list_actived_clis().await.map_err(err_to_string)
     */
-    let local_harnesses = LocalCliServiceLifecycle::list_ready().await?;
+    let local_services = LocalCliServiceLifecycle::list_ready().await;
     let engines = state
         .engines
         .list_actived_clis()
@@ -289,14 +289,9 @@ pub async fn list_actived_clis(
     Ok(engines
         .into_iter()
         .filter(|engine| {
-            let harness_id = match engine.id.as_str() {
-                "claude" => "claude-code",
-                other => other,
-            };
-            local_harnesses
-                .harnesses
+            local_services
                 .iter()
-                .any(|harness| harness.id == harness_id && harness.found)
+                .any(|service| service.cli_id() == engine.id.as_str())
         })
         .collect())
 }

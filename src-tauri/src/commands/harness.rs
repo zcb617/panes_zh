@@ -140,46 +140,58 @@ pub(crate) const HARNESSES: &[HarnessDef] = &[
 // check_harnesses
 // ---------------------------------------------------------------------------
 
-/*
 /// 本机 CLI 服务统一查询入口。
 ///
 /// 管理页和本机聊天工具列表都通过这里读取同一份安装检测结果。
-pub(crate) struct LocalCliInstallationDetector;
+async fn detect_harnesses() -> Result<HarnessReport, String> {
+    let mut harnesses = Vec::new();
 
-impl LocalCliInstallationDetector {
-    pub(crate) async fn list() -> Result<HarnessReport, String> {
-        let mut harnesses = Vec::new();
-
-        for def in HARNESSES {
-            let status = detect_harness(def).await;
-            harnesses.push(status);
-        }
-
-        let npm_available = runtime_env::resolve_executable("npm").is_some()
-            || detect_via_login_shell("npm", "--version").await.is_some();
-
-        let mise_preferred =
-            runtime_env::is_flatpak() && runtime_env::resolve_executable("mise").is_some();
-        let preferred_install_method = if mise_preferred {
-            Some("mise".to_string())
-        } else if npm_available {
-            Some("npm".to_string())
-        } else {
-            None
-        };
-
-        Ok(HarnessReport {
-            harnesses,
-            npm_available,
-            preferred_install_method,
-        })
+    for def in HARNESSES {
+        let status = detect_harness(def).await;
+        harnesses.push(status);
     }
+
+    let npm_available = runtime_env::resolve_executable("npm").is_some()
+        || detect_via_login_shell("npm", "--version").await.is_some();
+
+    let mise_preferred =
+        runtime_env::is_flatpak() && runtime_env::resolve_executable("mise").is_some();
+    let preferred_install_method = if mise_preferred {
+        Some("mise".to_string())
+    } else if npm_available {
+        Some("npm".to_string())
+    } else {
+        None
+    };
+
+    Ok(HarnessReport {
+        harnesses,
+        npm_available,
+        preferred_install_method,
+    })
 }
-*/
 
 #[tauri::command]
 pub async fn check_harnesses() -> Result<HarnessReport, String> {
-    crate::local_cli_service_lifecycle::LocalCliServiceLifecycle::list_ready().await
+    let mut report = detect_harnesses().await?;
+    let local_services =
+        crate::local_cli_service_lifecycle::LocalCliServiceLifecycle::list_ready().await;
+
+    for harness in &mut report.harnesses {
+        let lifecycle_cli_id = match harness.id.as_str() {
+            "codex" => Some("codex"),
+            "opencode" => Some("opencode"),
+            "claude-code" => Some("claude"),
+            _ => None,
+        };
+        if let Some(cli_id) = lifecycle_cli_id {
+            harness.found = local_services
+                .iter()
+                .any(|service| service.cli_id() == cli_id);
+        }
+    }
+
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------------

@@ -1,38 +1,3 @@
-/*
-use crate::{
-    commands::harness::{detect_harness, detect_via_login_shell, HARNESSES},
-    models::HarnessReport,
-    runtime_env,
-};
-
-pub(crate) struct LocalCliServiceLifecycle;
-
-impl LocalCliServiceLifecycle {
-    pub(crate) async fn list_ready() -> Result<HarnessReport, String> {
-        let mut harnesses = Vec::new();
-
-        for def in HARNESSES {
-            let status = detect_harness(def).await;
-            harnesses.push(status);
-        }
-
-        let package_manager_available = runtime_env::resolve_executable("npm").is_some()
-            || detect_via_login_shell("npm", "--version").await.is_some();
-
-        let mise_preferred =
-            runtime_env::is_flatpak() && runtime_env::resolve_executable("mise").is_some();
-        let preferred_install_method = if mise_preferred {
-            Some("mise".to_string())
-        } else if package_manager_available {
-            Some("npm".to_string())
-        } else {
-            None
-        };
-
-        Ok(HarnessReport {
-            harnesses,
-            npm_available: package_manager_available,
-            preferred_inst
 use std::{
     collections::HashMap,
     sync::{
@@ -45,7 +10,6 @@ use anyhow::Context;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::engines::{
-    claude_suse crate::engines::{
     claude_sidecar::ClaudeSidecarEngine, codex::CodexEngine, opencode::OpenCodeEngine,
 };
 use crate::{commands::harness::detect_via_login_shell, runtime_env};
@@ -122,7 +86,7 @@ impl LocalCliServiceLifecycle {
         Ok(())
     }
 
-服务；该方法不会启动服务。
+    /// 取得已经由 Panes 启动阶段登记的本地 CLI 服务；该方法不会启动服务。
     pub(crate) async fn get(cli_id: &str) -> anyhow::Result<Arc<LocalCliService>> {
         LOCAL_CLI_SERVICES.get(cli_id).await
     }
@@ -225,25 +189,32 @@ impl LocalCliServiceLifecycleRegistry {
             state: Mutex::new(LocalCliServiceEntryState::Ready),
         });
 
-        let mut services = self.services.write().await;
-        if let Some(existing) = services.get(cli_id) {
-            return Ok(existing.clone());
-        }
-        services.insert(cli_id.to_string(), service.clone());
-        Ok(service)
+        let registered = {
+            let mut services = self.services.write().await;
+            if let Some(existing) = services.get(cli_id) {
+                existing.clone()
+            } else {
+                services.insert(cli_id.to_string(), service.clone());
+                service
+            }
+        };
+
+        let state = registered.state.lock().await;
+        anyhow::ensure!(
+            *state == LocalCliServiceEntryState::Ready,
+            "本地 CLI 服务正在终止，不能重复登记: cli_id={cli_id}"
+        );
+        drop(state);
+        Ok(registered)
     }
 
     async fn terminate(&self, cli_id: &str) -> anyhow::Result<bool> {
         let _mutation_guard = self.mutation_lock.lock().await;
-        let service = match self.get(cli_id).await {
-            Ok(service) => service,
-            Err(error) if error.to_string().contains("未在 Panes 启动阶段登记") => {
-                return Ok(false);
-            }
-            Err(error) => return Err(error),
-        };
+        let service = self.get(cli_id).await?;
 
-        *service.state.lock().await = LocalCliServiceEntryState::Terminating;
+        let mut state = service.state.lock().await;
+        *state = LocalCliServiceEntryState::Terminating;
+        drop(state);
 
         let mut services = self.services.write().await;
         let remove_service = services
@@ -279,8 +250,3 @@ impl LocalCliServiceLifecycleRegistry {
         }
     }
 }
-all_method,
-        })
-    }
-}
-*/
