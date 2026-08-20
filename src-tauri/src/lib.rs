@@ -576,6 +576,11 @@ pub fn run() {
                 }
                 remote_access.shutdown().await;
                 ssh_monitor.shutdown().await;
+                if let Err(error) =
+                    local_cli_service_lifecycle::LocalCliServiceLifecycle::terminate_all().await
+                {
+                    log::warn!("关闭 Panes 时停止本地 CLI 服务失败: {error:#}");
+                }
                 if let Err(error) = ssh::cli_service_lifecycle::terminate_all().await {
                     log::warn!("关闭 Panes 时停止 SSH 远端 CLI 服务失败: {error:#}");
                 }
