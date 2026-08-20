@@ -79,6 +79,8 @@ pub struct CliSessionSnapshot {
     pub cwd: String,
     /// 会话最近使用的模型。
     pub model_id: String,
+    /// 会话最近使用的思考强度。
+    pub reasoning_effort: Option<String>,
     /// 会话创建时间。
     pub created_at: Option<String>,
     /// 会话最近一次活动时间。

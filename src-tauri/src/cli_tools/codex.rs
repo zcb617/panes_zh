@@ -198,6 +198,8 @@ impl CodexCli {
                 "title": summary.title.clone(),
                 "preview": summary.preview.clone(),
                 "cwd": summary.cwd.clone(),
+                "model": summary.model_id.clone(),
+                "reasoningEffort": summary.reasoning_effort.clone(),
                 "modelProvider": summary.model_provider.clone(),
                 "sourceKind": summary.source_kind.clone(),
                 "status": {
@@ -209,6 +211,7 @@ impl CodexCli {
                 "updatedAt": summary.updated_at,
             },
             "codexModelProvider": summary.model_provider.clone(),
+            "reasoningEffort": summary.reasoning_effort.clone(),
             "codexSourceKind": summary.source_kind.clone(),
             "codexThreadStatus": summary.status_type.clone(),
             "codexThreadActiveFlags": summary.active_flags.clone(),
@@ -219,7 +222,8 @@ impl CodexCli {
             title: summary.title.unwrap_or(summary.engine_thread_id),
             preview,
             cwd: summary.cwd,
-            model_id: summary.model_provider,
+            model_id: summary.model_id.unwrap_or_else(|| "unknown".to_string()),
+            reasoning_effort: summary.reasoning_effort,
             created_at,
             updated_at,
             source_kind: Some(summary.source_kind),
@@ -456,26 +460,36 @@ impl CliTool for CodexCli {
             )
             .await;
             // service_use.release().await;
-            return result.map(|sessions| {
-                sessions
-                    .into_iter()
-                    .map(|session| CliSessionSnapshot {
-                        engine_thread_id: session.engine_thread_id,
-                        title: session.title,
-                        preview: None,
-                        cwd: session.cwd,
-                        model_id: session.model_id,
-                        created_at: None,
-                        updated_at: session.updated_at,
-                        source_kind: None,
-                        raw_status: Some(session.status.as_str().to_string()),
-                        active_flags: Vec::new(),
-                        status: session.status,
-                        archived: false,
-                        metadata: session.metadata,
-                    })
-                    .collect()
-            });
+            let mut sessions = result?
+                .into_iter()
+                .map(|session| CliSessionSnapshot {
+                    engine_thread_id: session.engine_thread_id,
+                    title: session.title,
+                    preview: None,
+                    cwd: session.cwd,
+                    model_id: session.model_id,
+                    reasoning_effort: session
+                        .metadata
+                        .get("reasoningEffort")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    created_at: None,
+                    updated_at: session.updated_at,
+                    source_kind: None,
+                    raw_status: Some(session.status.as_str().to_string()),
+                    active_flags: Vec::new(),
+                    status: session.status,
+                    archived: false,
+                    metadata: session.metadata,
+                })
+                .collect::<Vec<_>>();
+            for session in &mut sessions {
+                if session.model_id == "unknown" || session.reasoning_effort.is_none() {
+                    let engine_thread_id = session.engine_thread_id.clone();
+                    *session = self.read_session(context, &engine_thread_id).await?;
+                }
+            }
+            return Ok(sessions);
         }
         let summaries = if context.location_kind == CliLocationKind::Ssh {
             remote_project_codex_runtime_service::runtime(&workspace)
@@ -490,11 +504,18 @@ impl CliTool for CodexCli {
         };
 
         let is_ssh = context.location_kind == CliLocationKind::Ssh;
-        Ok(summaries
+        let mut sessions = summaries
             .into_iter()
             .filter(|session| path_utils::is_path_within_root(&session.cwd, &workspace.root_path))
             .map(|session| Self::map_session(session, is_ssh))
-            .collect())
+            .collect::<Vec<_>>();
+        for session in &mut sessions {
+            if session.model_id == "unknown" || session.reasoning_effort.is_none() {
+                let engine_thread_id = session.engine_thread_id.clone();
+                *session = self.read_session(context, &engine_thread_id).await?;
+            }
+        }
+        Ok(sessions)
     }
 
     async fn read_session(
@@ -526,7 +547,7 @@ impl CliTool for CodexCli {
                 .read_codex_remote_thread(engine_thread_id)
                 .await
         };
-        let summary = match summary_result {
+        let mut summary = match summary_result {
             Ok(summary) => summary,
             Err(error) => {
                 // 只有 Codex app-server 实测的 -32600/thread not loaded
@@ -537,6 +558,21 @@ impl CliTool for CodexCli {
                 return Err(error);
             }
         };
+        if context.location_kind == CliLocationKind::Ssh
+            && (summary.model_id.is_none() || summary.reasoning_effort.is_none())
+        {
+            let (model_id, reasoning_effort) =
+                remote_project_codex_runtime_service::runtime(&workspace)
+                    .await?
+                    .read_thread_runtime(engine_thread_id)
+                    .await?;
+            if summary.model_id.is_none() {
+                summary.model_id = model_id;
+            }
+            if summary.reasoning_effort.is_none() {
+                summary.reasoning_effort = reasoning_effort;
+            }
+        }
         anyhow::ensure!(
             path_utils::is_path_within_root(&summary.cwd, &workspace.root_path),
             "Codex 会话不属于当前 workspace"

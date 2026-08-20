@@ -313,11 +313,13 @@ export const ipc = {
       searchTerm: options?.searchTerm ?? null,
       archived: options?.archived ?? null,
     }),
-  attachCodexRemoteThread: (workspaceId: string, engineThreadId: string, modelId: string) =>
+  // 旧接口由界面传入 modelId，无法代表被导入 Codex 会话的真实模型；禁止恢复。
+  // attachCodexRemoteThread: (workspaceId: string, engineThreadId: string, modelId: string) =>
+  //   invoke<Thread>("attach_codex_remote_thread", { workspaceId, engineThreadId, modelId }),
+  attachCodexRemoteThread: (workspaceId: string, engineThreadId: string) =>
     invoke<Thread>("attach_codex_remote_thread", {
       workspaceId,
       engineThreadId,
-      modelId,
     }),
   listOpenCodeRemoteSessions: (
     workspaceId: string,

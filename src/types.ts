@@ -423,6 +423,8 @@ export interface CodexRemoteThread {
   cwd: string;
   createdAt: string;
   updatedAt: string;
+  modelId: string;
+  reasoningEffort?: string | null;
   modelProvider: string;
   sourceKind: string;
   statusType: string;

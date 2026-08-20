@@ -54,7 +54,8 @@ interface ThreadState {
   attachCodexRemoteThread: (
     workspaceId: string,
     engineThreadId: string,
-    modelId: string,
+    // 旧签名由界面传入 modelId，导致导入历史会话时覆盖 Codex 的实际模型；禁止恢复。
+    // modelId: string,
   ) => Promise<Thread | null>;
   attachOpenCodeRemoteSession: (
     workspaceId: string,
@@ -141,18 +142,19 @@ const LAST_THREAD_KEY = "panes:lastActiveThreadId";
 const CODEX_REMOTE_THREAD_PAGE_SIZE = 100;
 const codexRemoteThreadDiscoveryInFlight = new Map<string, Promise<void>>();
 
-function defaultCodexModelId(): string | null {
-  const codexEngine = useEngineStore.getState().engines.find((engine) => engine.id === "codex");
-  if (!codexEngine) {
-    return null;
-  }
-
-  return (
-    codexEngine.models.find((model) => model.isDefault && !model.hidden) ??
-    codexEngine.models.find((model) => !model.hidden) ??
-    codexEngine.models[0]
-  )?.id ?? null;
-}
+// 旧逻辑在导入历史会话前选取一个全局默认模型，并把它写给所有 Codex 会话；禁止恢复。
+// function defaultCodexModelId(): string | null {
+//   const codexEngine = useEngineStore.getState().engines.find((engine) => engine.id === "codex");
+//   if (!codexEngine) {
+//     return null;
+//   }
+//
+//   return (
+//     codexEngine.models.find((model) => model.isDefault && !model.hidden) ??
+//     codexEngine.models.find((model) => !model.hidden) ??
+//     codexEngine.models[0]
+//   )?.id ?? null;
+// }
 
 async function discoverCodexRemoteThreads(workspaceId: string): Promise<void> {
   const pending = codexRemoteThreadDiscoveryInFlight.get(workspaceId);
@@ -160,10 +162,10 @@ async function discoverCodexRemoteThreads(workspaceId: string): Promise<void> {
     return pending;
   }
 
-  const modelId = defaultCodexModelId();
-  if (!modelId) {
-    return;
-  }
+  // const modelId = defaultCodexModelId();
+  // if (!modelId) {
+  //   return;
+  // }
 
   const discovery = (async () => {
     try {
@@ -183,7 +185,8 @@ async function discoverCodexRemoteThreads(workspaceId: string): Promise<void> {
           }
 
           try {
-            await ipc.attachCodexRemoteThread(workspaceId, remoteThread.engineThreadId, modelId);
+            // await ipc.attachCodexRemoteThread(workspaceId, remoteThread.engineThreadId, modelId);
+            await ipc.attachCodexRemoteThread(workspaceId, remoteThread.engineThreadId);
           } catch (error) {
             console.warn(
               `Failed to attach discovered Codex thread ${remoteThread.engineThreadId}:`,
@@ -671,10 +674,11 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       return null;
     }
   },
-  attachCodexRemoteThread: async (workspaceId, engineThreadId, modelId) => {
+  attachCodexRemoteThread: async (workspaceId, engineThreadId) => {
     set({ loading: true, error: undefined });
     try {
-      const attached = await ipc.attachCodexRemoteThread(workspaceId, engineThreadId, modelId);
+      // const attached = await ipc.attachCodexRemoteThread(workspaceId, engineThreadId, modelId);
+      const attached = await ipc.attachCodexRemoteThread(workspaceId, engineThreadId);
       localStorage.setItem(LAST_THREAD_KEY, attached.id);
       set((state) => {
         const workspaceThreads = state.threadsByWorkspace[workspaceId] ?? [];

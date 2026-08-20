@@ -155,10 +155,11 @@ pub async fn attach_codex_remote_thread(
     state: State<'_, AppState>,
     workspace_id: String,
     engine_thread_id: String,
-    model_id: String,
+    // 旧接口接收前端选中的 model_id，会覆盖 Codex 历史会话自己的模型；禁止恢复。
+    // model_id: String,
 ) -> Result<ThreadDto, String> {
-    let normalized_model_id =
-        validate_model_for_engine(state.inner(), "codex", model_id.trim()).await?;
+    // let normalized_model_id =
+    //     validate_model_for_engine(state.inner(), "codex", model_id.trim()).await?;
     let db = state.db.clone();
     let (workspace_root, repos, existing_local_thread) = run_db(db.clone(), {
         let workspace_id = workspace_id.clone();
@@ -192,6 +193,37 @@ pub async fn attach_codex_remote_thread(
         .read_session(&context, &engine_thread_id)
         .await
         .map_err(err_to_string)?;
+    let validation_models = cli
+        .models_for_validation(&context, &session.model_id)
+        .await
+        .ok();
+    let normalized_model_id = validate_model_for_engine_from_catalog(
+        "codex",
+        session.model_id.trim(),
+        validation_models.as_deref(),
+    )?;
+    let normalized_reasoning_effort = session
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let validated_reasoning_effort = normalized_reasoning_effort
+        .as_deref()
+        .map(|value| {
+            validate_reasoning_effort_from_catalog(
+                &normalized_model_id,
+                value,
+                validation_models.as_deref(),
+            )
+        })
+        .transpose()?;
+    let model_provider = session
+        .metadata
+        .get("codexModelProvider")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
     let parse_timestamp = |value: Option<String>| {
         value
             .as_deref()
@@ -206,7 +238,9 @@ pub async fn attach_codex_remote_thread(
         cwd: session.cwd,
         created_at: parse_timestamp(session.created_at),
         updated_at: parse_timestamp(session.updated_at),
-        model_provider: session.model_id,
+        model_id: Some(normalized_model_id.clone()),
+        reasoning_effort: validated_reasoning_effort.clone(),
+        model_provider,
         source_kind: session.source_kind.unwrap_or_default(),
         status_type: session.raw_status.unwrap_or_default(),
         active_flags: session.active_flags,
@@ -238,7 +272,11 @@ pub async fn attach_codex_remote_thread(
     }
     let repo_id = resolve_codex_remote_thread_repo_id(&workspace_root, &repos, &remote_thread.cwd)?;
     let title = build_codex_remote_thread_title(&remote_thread);
-    let metadata = build_codex_remote_thread_metadata(&remote_thread, &normalized_model_id);
+    let metadata = build_codex_remote_thread_metadata(
+        &remote_thread,
+        &normalized_model_id,
+        validated_reasoning_effort.as_deref(),
+    );
 
     if let Some(existing) = existing_local_thread {
         return run_db(db, move |db| {
@@ -657,6 +695,12 @@ fn map_codex_remote_thread_dto(
     thread: CliSessionSnapshot,
     local_thread_id: Option<String>,
 ) -> CodexRemoteThreadDto {
+    let model_provider = thread
+        .metadata
+        .get("codexModelProvider")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
     CodexRemoteThreadDto {
         engine_thread_id: thread.engine_thread_id,
         title: Some(thread.title),
@@ -664,7 +708,9 @@ fn map_codex_remote_thread_dto(
         cwd: thread.cwd,
         created_at: thread.created_at.unwrap_or_default(),
         updated_at: thread.updated_at.unwrap_or_default(),
-        model_provider: thread.model_id,
+        model_id: thread.model_id,
+        reasoning_effort: thread.reasoning_effort,
+        model_provider,
         source_kind: thread.source_kind.unwrap_or_default(),
         status_type: thread.raw_status.unwrap_or_default(),
         active_flags: thread.active_flags,
@@ -744,7 +790,11 @@ fn short_thread_label(engine_thread_id: &str) -> String {
     engine_thread_id.chars().take(8).collect()
 }
 
-fn build_codex_remote_thread_metadata(thread: &CodexRemoteThreadSummary, model_id: &str) -> Value {
+fn build_codex_remote_thread_metadata(
+    thread: &CodexRemoteThreadSummary,
+    model_id: &str,
+    reasoning_effort: Option<&str>,
+) -> Value {
     let mut metadata = merge_codex_runtime_metadata(
         None,
         Some(thread.status_type.as_str()),
@@ -756,6 +806,9 @@ fn build_codex_remote_thread_metadata(thread: &CodexRemoteThreadSummary, model_i
 
     if let Some(object) = metadata.as_object_mut() {
         object.insert("lastModelId".to_string(), json!(model_id));
+        if let Some(reasoning_effort) = reasoning_effort {
+            object.insert("reasoningEffort".to_string(), json!(reasoning_effort));
+        }
         object.insert("codexTranscriptImported".to_string(), json!(false));
         object.insert(
             "codexModelProvider".to_string(),
@@ -4367,6 +4420,8 @@ mod tests {
             cwd: "/workspace".to_string(),
             created_at: 1_710_000_000,
             updated_at: 1_710_000_001,
+            model_id: Some("gpt-5.4".to_string()),
+            reasoning_effort: Some("high".to_string()),
             model_provider: "openai".to_string(),
             source_kind: "appServer".to_string(),
             status_type: "idle".to_string(),
@@ -4392,6 +4447,8 @@ mod tests {
             cwd: "/workspace".to_string(),
             created_at: 1_710_000_000,
             updated_at: 1_710_000_001,
+            model_id: Some("gpt-5.4".to_string()),
+            reasoning_effort: Some("high".to_string()),
             model_provider: "openai".to_string(),
             source_kind: "appServer".to_string(),
             status_type: "active".to_string(),
@@ -4399,9 +4456,10 @@ mod tests {
             archived: true,
         };
 
-        let metadata = build_codex_remote_thread_metadata(&summary, "gpt-5.4");
+        let metadata = build_codex_remote_thread_metadata(&summary, "gpt-5.4", Some("high"));
 
         assert_eq!(metadata.get("lastModelId"), Some(&json!("gpt-5.4")));
+        assert_eq!(metadata.get("reasoningEffort"), Some(&json!("high")));
         assert_eq!(metadata.get("codexTranscriptImported"), Some(&json!(false)));
         assert_eq!(metadata.get("codexModelProvider"), Some(&json!("openai")));
         assert_eq!(metadata.get("codexSourceKind"), Some(&json!("appServer")));

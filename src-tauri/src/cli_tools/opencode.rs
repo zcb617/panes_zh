@@ -297,6 +297,7 @@ impl OpenCodeCli {
             preview: None,
             cwd: summary.cwd,
             model_id: "unknown".to_string(),
+            reasoning_effort: None,
             created_at: timestamp_to_rfc3339(summary.created_at),
             updated_at: timestamp_to_rfc3339(summary.updated_at),
             source_kind: None,

@@ -4380,14 +4380,21 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }
 
   async function onAttachCodexRemoteThread(engineThreadId: string) {
-    if (!activeWorkspaceId || !selectedModelId) {
+    // if (!activeWorkspaceId || !selectedModelId) {
+    //   throw new Error(t("panel.toasts.codexThreadResumeUnavailable"));
+    // }
+    if (!activeWorkspaceId) {
       throw new Error(t("panel.toasts.codexThreadResumeUnavailable"));
     }
 
+    // const attachedThread = await attachCodexRemoteThread(
+    //   activeWorkspaceId,
+    //   engineThreadId,
+    //   selectedModelId,
+    // );
     const attachedThread = await attachCodexRemoteThread(
       activeWorkspaceId,
       engineThreadId,
-      selectedModelId,
     );
     if (!attachedThread) {
       throw new Error(t("panel.toasts.codexThreadResumeFailed"));

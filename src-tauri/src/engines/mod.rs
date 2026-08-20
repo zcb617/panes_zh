@@ -368,6 +368,8 @@ pub struct CodexRemoteThreadSummary {
     pub cwd: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub model_id: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub model_provider: String,
     pub source_kind: String,
     pub status_type: String,
@@ -726,7 +728,18 @@ impl EngineManager {
         &self,
         engine_thread_id: &str,
     ) -> anyhow::Result<CodexRemoteThreadSummary> {
-        self.codex.read_remote_thread(engine_thread_id).await
+        let mut summary = self.codex.read_remote_thread(engine_thread_id).await?;
+        if summary.model_id.is_none() || summary.reasoning_effort.is_none() {
+            let (model_id, reasoning_effort) =
+                self.codex.read_thread_runtime(engine_thread_id).await?;
+            if summary.model_id.is_none() {
+                summary.model_id = model_id;
+            }
+            if summary.reasoning_effort.is_none() {
+                summary.reasoning_effort = reasoning_effort;
+            }
+        }
+        Ok(summary)
     }
 
     pub async fn unarchive_codex_remote_thread(

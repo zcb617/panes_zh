@@ -205,6 +205,8 @@ pub struct CodexRemoteThreadDto {
     pub cwd: String,
     pub created_at: String,
     pub updated_at: String,
+    pub model_id: String,
+    pub reasoning_effort: Option<String>,
     pub model_provider: String,
     pub source_kind: String,
     pub status_type: String,

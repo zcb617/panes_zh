@@ -2556,6 +2556,55 @@ impl CodexEngine {
         })
     }
 
+    pub async fn read_thread_runtime(
+        &self,
+        engine_thread_id: &str,
+    ) -> anyhow::Result<(Option<String>, Option<String>)> {
+        let transport = self.ensure_ready_transport().await?;
+        let params = serde_json::json!({
+            "threadId": engine_thread_id,
+            "cursor": null,
+            "limit": 1,
+            "sortDirection": "desc",
+        });
+        let turn = match request_with_fallback(
+            transport.as_ref(),
+            THREAD_TURNS_LIST_METHODS,
+            params,
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        {
+            Ok(response) => response
+                .get("data")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|turns| turns.first())
+                .cloned(),
+            Err(error) if is_method_not_supported_error(&error.to_string()) => {
+                let response = request_with_fallback(
+                    transport.as_ref(),
+                    THREAD_READ_METHODS,
+                    serde_json::json!({
+                        "threadId": engine_thread_id,
+                        "includeTurns": true,
+                    }),
+                    DEFAULT_TIMEOUT,
+                )
+                .await
+                .context("failed to read Codex thread runtime")?;
+                extract_turns_from_thread_read_response(&response)
+                    .last()
+                    .cloned()
+            }
+            Err(error) => return Err(error).context("failed to read latest Codex thread turn"),
+        };
+
+        Ok(turn
+            .as_ref()
+            .map(extract_codex_turn_runtime)
+            .unwrap_or((None, None)))
+    }
+
     async fn list_thread_import_messages(
         &self,
         transport: &CodexTransport,
@@ -5394,9 +5443,7 @@ fn extract_imported_messages_from_turns(turns: &[serde_json::Value]) -> Vec<Impo
 
     for (turn_index, turn) in turns.iter().enumerate() {
         let turn_engine_id = extract_any_string(turn, &["id", "turnId", "turn_id"]);
-        let turn_model_id = extract_any_string(turn, &["model", "modelId", "model_id"]);
-        let turn_reasoning_effort =
-            extract_any_string(turn, &["reasoningEffort", "reasoning_effort", "effort"]);
+        let (turn_model_id, turn_reasoning_effort) = extract_codex_turn_runtime(turn);
         let status = imported_message_status_for_turn(turn);
         let items = turn
             .get("items")
@@ -5559,6 +5606,13 @@ fn extract_imported_messages_from_turns(turns: &[serde_json::Value]) -> Vec<Impo
     }
 
     messages
+}
+
+fn extract_codex_turn_runtime(turn: &serde_json::Value) -> (Option<String>, Option<String>) {
+    (
+        extract_any_string(turn, &["model", "modelId", "model_id"]),
+        extract_any_string(turn, &["reasoningEffort", "reasoning_effort", "effort"]),
+    )
 }
 
 fn append_user_message_item(
@@ -5927,6 +5981,13 @@ fn extract_codex_remote_thread_summary(
         cwd,
         created_at,
         updated_at,
+        model_id: extract_any_string(thread, &["model", "modelId", "model_id"])
+            .or_else(|| extract_any_string(value, &["model", "modelId", "model_id"])),
+        reasoning_effort: extract_any_string(
+            thread,
+            &["reasoningEffort", "reasoning_effort", "effort"],
+        )
+        .or_else(|| extract_any_string(value, &["reasoningEffort", "reasoning_effort", "effort"])),
         model_provider: extract_any_string(thread, &["modelProvider", "model_provider"])
             .unwrap_or_else(|| "unknown".to_string()),
         source_kind: extract_thread_source_kind(thread.get("source")),
@@ -8793,6 +8854,8 @@ mod tests {
                 "cwd": "/tmp/workspace",
                 "createdAt": 1710000000,
                 "updatedAt": 1710003600,
+                "model": "gpt-5.6-terra",
+                "reasoningEffort": "high",
                 "modelProvider": "openai",
                 "source": "appServer",
                 "status": {
@@ -8810,11 +8873,24 @@ mod tests {
         assert_eq!(summary.cwd, "/tmp/workspace");
         assert_eq!(summary.created_at, 1710000000);
         assert_eq!(summary.updated_at, 1710003600);
+        assert_eq!(summary.model_id.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(summary.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(summary.model_provider, "openai");
         assert_eq!(summary.source_kind, "appServer");
         assert_eq!(summary.status_type, "active");
         assert_eq!(summary.active_flags, vec!["waitingOnApproval".to_string()]);
         assert!(!summary.archived);
+    }
+
+    #[test]
+    fn extract_codex_turn_runtime_reads_model_and_reasoning_effort() {
+        let (model_id, reasoning_effort) = extract_codex_turn_runtime(&json!({
+            "model": "gpt-5.6-terra",
+            "reasoningEffort": "high"
+        }));
+
+        assert_eq!(model_id.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]

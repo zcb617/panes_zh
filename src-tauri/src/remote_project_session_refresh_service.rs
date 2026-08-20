@@ -580,17 +580,13 @@ fn parse_codex_session(value: &Value, expected_cwd: &str) -> Option<(RemoteSessi
         })
         .map(|title| title.chars().take(120).collect())
         .unwrap_or_else(|| id.clone());
-    let model_id = string_field(
-        thread,
-        &[
-            "model",
-            "modelId",
-            "model_id",
-            "modelProvider",
-            "model_provider",
-        ],
-    )
-    .unwrap_or_else(|| "unknown".to_string());
+    let model_id = string_field(thread, &["model", "modelId", "model_id"])
+        .or_else(|| string_field(value, &["model", "modelId", "model_id"]))
+        .unwrap_or_else(|| "unknown".to_string());
+    let reasoning_effort = string_field(thread, &["reasoningEffort", "reasoning_effort", "effort"])
+        .or_else(|| string_field(value, &["reasoningEffort", "reasoning_effort", "effort"]));
+    let model_provider = string_field(thread, &["modelProvider", "model_provider"])
+        .or_else(|| string_field(value, &["modelProvider", "model_provider"]));
     Some((
         RemoteSessionSnapshot {
             engine_thread_id: id,
@@ -599,7 +595,13 @@ fn parse_codex_session(value: &Value, expected_cwd: &str) -> Option<(RemoteSessi
             model_id,
             updated_at: updated.map(unix_to_rfc3339),
             status: status_from_value(value.get("status").or_else(|| thread.get("status"))),
-            metadata: json!({"sshRemote":true,"codexRemoteCwd":cwd,"codexRemote":value}),
+            metadata: json!({
+                "sshRemote": true,
+                "codexRemoteCwd": cwd,
+                "codexRemote": value,
+                "codexModelProvider": model_provider,
+                "reasoningEffort": reasoning_effort,
+            }),
         },
         title_needs_read,
     ))
@@ -1027,6 +1029,31 @@ mod tests {
         let (session, title_needs_read) = parse_codex_session(&value, "/a").unwrap();
         assert_eq!(session.title, "第一行标题");
         assert!(!title_needs_read);
+    }
+
+    #[test]
+    fn codex_parser_keeps_model_and_reasoning_effort() {
+        let value = json!({
+            "thread": {
+                "id": "thread-a",
+                "cwd": "/a",
+                "createdAt": 1,
+                "model": "gpt-5.6-terra",
+                "modelProvider": "llm_router",
+                "reasoningEffort": "high"
+            }
+        });
+
+        let (session, _) = parse_codex_session(&value, "/a").unwrap();
+        assert_eq!(session.model_id, "gpt-5.6-terra");
+        assert_eq!(
+            session.metadata.get("reasoningEffort"),
+            Some(&json!("high"))
+        );
+        assert_eq!(
+            session.metadata.get("codexModelProvider"),
+            Some(&json!("llm_router"))
+        );
     }
 
     #[test]

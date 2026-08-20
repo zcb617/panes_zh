@@ -102,6 +102,8 @@ describe("threadStore remote Codex discovery", () => {
             cwd: "/workspace",
             createdAt: new Date(0).toISOString(),
             updatedAt: new Date(0).toISOString(),
+            modelId: "gpt-5.6-terra",
+            reasoningEffort: "high",
             modelProvider: "openai",
             sourceKind: "appServer",
             statusType: "idle",
@@ -116,6 +118,8 @@ describe("threadStore remote Codex discovery", () => {
             cwd: "/workspace",
             createdAt: new Date(0).toISOString(),
             updatedAt: new Date(0).toISOString(),
+            modelId: "gpt-5.6-sol",
+            reasoningEffort: "medium",
             modelProvider: "openai",
             sourceKind: "appServer",
             statusType: "idle",
@@ -135,6 +139,8 @@ describe("threadStore remote Codex discovery", () => {
             cwd: "/workspace",
             createdAt: new Date(0).toISOString(),
             updatedAt: new Date(0).toISOString(),
+            modelId: "gpt-5.6-terra",
+            reasoningEffort: "xhigh",
             modelProvider: "openai",
             sourceKind: "appServer",
             statusType: "idle",
@@ -152,13 +158,11 @@ describe("threadStore remote Codex discovery", () => {
       1,
       "workspace-1",
       "remote-1",
-      "gpt-5.6",
     );
     expect(mockIpc.attachCodexRemoteThread).toHaveBeenNthCalledWith(
       2,
       "workspace-1",
       "remote-2",
-      "gpt-5.6",
     );
     expect(mockIpc.attachCodexRemoteThread).toHaveBeenCalledTimes(2);
     expect(mockIpc.listThreads).toHaveBeenCalledWith("workspace-1");
