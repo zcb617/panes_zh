@@ -62,6 +62,9 @@ pub(crate) const HARNESSES: &[HarnessDef] = &[
         website: "https://docs.anthropic.com/en/docs/claude-code",
         native: false,
     },
+    /*
+    当前系统只支持 opencode | codex | claude code 三个工具，其余工具定义保留备查，
+    不再参与探测和展示：
     HarnessDef {
         id: "gemini-cli",
         name: "Gemini CLI",
@@ -98,6 +101,7 @@ pub(crate) const HARNESSES: &[HarnessDef] = &[
         website: "https://kiro.dev",
         native: false,
     },
+    */
     HarnessDef {
         id: "opencode",
         name: "OpenCode",
@@ -110,6 +114,8 @@ pub(crate) const HARNESSES: &[HarnessDef] = &[
         website: "https://opencode.ai",
         native: false,
     },
+    /*
+    与上面相同的下线处理：
     HarnessDef {
         id: "kilo-code",
         name: "Kilo Code",
@@ -134,6 +140,7 @@ pub(crate) const HARNESSES: &[HarnessDef] = &[
         website: "https://factory.ai",
         native: false,
     },
+    */
 ];
 
 // ---------------------------------------------------------------------------

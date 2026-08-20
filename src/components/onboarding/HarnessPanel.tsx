@@ -13,12 +13,14 @@ import {
   RefreshCw,
   SlidersHorizontal,
   Terminal,
+  XCircle,
 } from "lucide-react";
 import { useHarnessStore } from "../../stores/harnessStore";
+import { useEngineStore } from "../../stores/engineStore";
 import { useTerminalStore } from "../../stores/terminalStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useUiStore } from "../../stores/uiStore";
-import { writeCommandToNewSession } from "../../lib/ipc";
+import { ipc, writeCommandToNewSession } from "../../lib/ipc";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { showWorkspaceSurface } from "../../lib/workspacePaneNavigation";
 import {
@@ -29,6 +31,45 @@ import { handleDragDoubleClick, handleDragMouseDown } from "../../lib/windowDrag
 import { getHarnessIcon } from "../shared/HarnessLogos";
 import { HarnessLaunchSettingsModal } from "./HarnessLaunchSettingsModal";
 import type { HarnessInfo } from "../../types";
+
+/*
+当前系统只支持 opencode | codex | claude code 三个运行工具。工具的静态信息
+（名称、网站、是否原生）由前端本地维护；已安装状态直接 live 订阅 engineStore
+的本机 CLI 目录缓存（enginesByTarget["local"]，启动时已预热、由后端健康检查
+事件驱动刷新），进入本页不再实时探测，因此不转圈。
+*/
+const PANEL_HARNESSES: ReadonlyArray<{
+  id: string;
+  name: string;
+  website: string;
+  native: boolean;
+}> = [
+  {
+    id: "codex",
+    name: "Codex CLI",
+    website: "https://github.com/openai/codex",
+    native: true,
+  },
+  {
+    id: "claude-code",
+    name: "Claude Code",
+    website: "https://docs.anthropic.com/en/docs/claude-code",
+    native: false,
+  },
+  {
+    id: "opencode",
+    name: "OpenCode",
+    website: "https://opencode.ai",
+    native: false,
+  },
+];
+
+/* 运行工具 ID → 本机 CLI 生命周期 MAP 中的 CLI ID（claude-code 在生命周期里登记为 claude）。 */
+const ENGINE_ID_BY_HARNESS_ID: Readonly<Record<string, string>> = {
+  codex: "codex",
+  "claude-code": "claude",
+  opencode: "opencode",
+};
 
 /* ─── Harness tile ─── */
 function HarnessTile({
@@ -68,24 +109,29 @@ function HarnessTile({
           {harness.native && <span className="hp-tile-badge">{t("harnesses.native")}</span>}
         </div>
         <p className="hp-tile-desc">{description}</p>
-        {(harness.found || launchArgs) && (
-          <div className="hp-tile-meta">
-            {harness.found && (
-              <span className="hp-tile-status-ok">
-                <CheckCircle2 size={10} />
-                {t("harnesses.installed")}
-              </span>
-            )}
-            {harness.found && harness.version && (
-              <span className="hp-tile-version">{harness.version}</span>
-            )}
-            {launchArgs && (
-              <span className="hp-tile-flags" title={launchArgs}>
-                {launchArgs}
-              </span>
-            )}
-          </div>
-        )}
+        <div className="hp-tile-meta">
+          {harness.found ? (
+            <span className="hp-tile-status-ok">
+              <CheckCircle2 size={10} />
+              {t("harnesses.installed")}
+            </span>
+          ) : (
+            <span className="hp-tile-status-missing">
+              <XCircle size={10} />
+              {t("harnesses.notInstalled")}
+            </span>
+          )}
+          {/* 需求只显示已安装/未安装，版本号不再展示，原逻辑保留备查：
+          {harness.found && harness.version && (
+            <span className="hp-tile-version">{harness.version}</span>
+          )}
+          */}
+          {launchArgs && (
+            <span className="hp-tile-flags" title={launchArgs}>
+              {launchArgs}
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="hp-tile-action">
@@ -143,33 +189,67 @@ function HarnessTile({
 /* ─── Main panel (full page) ─── */
 export function HarnessPanel() {
   const { t } = useTranslation("app");
+  /*
+  旧实现进页面挂载即 ensureScanned() 全量探测本机进程，phase 置为 scanning 导致
+  整页转圈；现在已安装状态改为 live 订阅 engineStore 的本机 CLI 目录缓存，不再
+  在挂载时扫描，以下 store 订阅随之停用，保留备查：
   const phase = useHarnessStore((s) => s.phase);
   const harnesses = useHarnessStore((s) => s.harnesses);
   const error = useHarnessStore((s) => s.error);
   const loadedOnce = useHarnessStore((s) => s.loadedOnce);
   const scan = useHarnessStore((s) => s.scan);
   const ensureScanned = useHarnessStore((s) => s.ensureScanned);
+  */
   const launch = useHarnessStore((s) => s.launch);
   const preferredInstallMethod = useHarnessStore((s) => s.preferredInstallMethod);
   const launchArgs = useHarnessStore((s) => s.launchArgs);
   const launchArgsLoaded = useHarnessStore((s) => s.launchArgsLoaded);
   const loadLaunchArgs = useHarnessStore((s) => s.loadLaunchArgs);
 
+  const localEngines = useEngineStore((s) => s.enginesByTarget["local"]);
+  const applyCliServicesUpdated = useEngineStore((s) => s.applyCliServicesUpdated);
+
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const createSession = useTerminalStore((s) => s.createSession);
   const setActiveView = useUiStore((s) => s.setActiveView);
 
   const [settingsHarness, setSettingsHarness] = useState<HarnessInfo | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
+  const installedEngineIds = new Set((localEngines ?? []).map((engine) => engine.id));
+  const harnesses: HarnessInfo[] = PANEL_HARNESSES.map((def) => ({
+    id: def.id,
+    name: def.name,
+    description: "",
+    command: "",
+    found: installedEngineIds.has(ENGINE_ID_BY_HARNESS_ID[def.id] ?? def.id),
+    version: null,
+    path: null,
+    canAutoInstall: true,
+    website: def.website,
+    native: def.native,
+  }));
   const installedCount = harnesses.filter((h) => h.found).length;
   const goBack = useCallback(() => setActiveView("chat"), [setActiveView]);
 
+  /*
+  旧实现的挂载即扫描逻辑，已停用（见上方说明）：
   useEffect(() => {
     if (loadedOnce) {
       return;
     }
     void ensureScanned();
   }, [ensureScanned, loadedOnce]);
+  */
+
+  useEffect(() => {
+    // 启动预热尚未完成（缓存为 undefined）的极端情况下静默补拉一次本机目录；
+    // 后端读的是内存生命周期 MAP，毫秒级返回，页面不转圈，数据落地后由 live
+    // 订阅自动填充。
+    if (useEngineStore.getState().enginesByTarget["local"] === undefined) {
+      void applyCliServicesUpdated({ scope: "local", connectionId: null, revision: 0 });
+    }
+  }, [applyCliServicesUpdated]);
 
   useEffect(() => {
     if (launchArgsLoaded) {
@@ -177,6 +257,22 @@ export function HarnessPanel() {
     }
     void loadLaunchArgs();
   }, [launchArgsLoaded, loadLaunchArgs]);
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      // 先等后端健康检查 reconcile 完生命周期 MAP，再刷新本机 CLI 目录缓存，
+      // 保证转圈结束时 live 订阅读到的已经是新数据。
+      await ipc.refreshLocalCliHealth();
+      await applyCliServicesUpdated({ scope: "local", connectionId: null, revision: 0 });
+      const { toast } = await import("../../stores/toastStore");
+      toast.success(t("harnesses.refreshSynced"));
+    } catch (error) {
+      console.warn("本机 CLI 健康检查失败:", error);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [applyCliServicesUpdated, t]);
 
   const spawnInTerminal = useCallback(
     async (command: string) => {
@@ -249,25 +345,23 @@ export function HarnessPanel() {
               <div className="hp-header-text">
                 <h1 className="hp-title">{t("harnesses.title")}</h1>
                 <p className="hp-subtitle">
-                  {phase === "scanning"
-                    ? t("harnesses.scanning")
-                    : t("harnesses.detectedCount", {
-                        installed: installedCount,
-                        total: harnesses.length,
-                      })}
+                  {t("harnesses.detectedCount", {
+                    installed: installedCount,
+                    total: PANEL_HARNESSES.length,
+                  })}
                 </p>
               </div>
               <button
                 type="button"
                 className="hp-rescan"
-                onClick={() => void scan()}
-                disabled={phase === "scanning"}
+                onClick={() => void handleRefresh()}
+                disabled={refreshing}
                 title={t("harnesses.rescan")}
               >
                 <RefreshCw
                   size={12}
                   style={{
-                    animation: phase === "scanning" ? "spin 1s linear infinite" : "none",
+                    animation: refreshing ? "spin 1s linear infinite" : "none",
                   }}
                 />
               </button>
@@ -275,7 +369,9 @@ export function HarnessPanel() {
           </div>
 
           {/* Content */}
-          {phase === "scanning" && harnesses.length === 0 ? (
+          {/* 旧实现进入页面挂载即扫描时显示整页 loading 转圈；现在进入页面直接读缓存
+              渲染列表，只有手动点击刷新按钮期间才显示整页转圈： */}
+          {refreshing ? (
             <div className="hp-loading">
               <Loader2
                 size={20}
@@ -284,25 +380,25 @@ export function HarnessPanel() {
               <p>{t("harnesses.loading")}</p>
             </div>
           ) : (
-            <div className="hp-grid">
-              {harnesses.map((h) => (
-                <HarnessTile
-                  key={h.id}
-                  harness={h}
-                  description={t(`harnesses.descriptions.${h.id}`, { defaultValue: h.description })}
-                  preferredInstallMethod={preferredInstallMethod}
-                  launchArgs={launchArgs[h.id]}
-                  onInstallInTerminal={() => handleInstallInTerminal(h.id)}
-                  onCopyCommand={() => handleCopyCommand(h.id)}
-                  onLaunch={() => void handleLaunch(h.id)}
-                  onOpenWebsite={() => handleOpenWebsite(h.website)}
-                  onOpenLaunchSettings={() => setSettingsHarness(h)}
-                />
-              ))}
-            </div>
+          <div className="hp-grid">
+            {harnesses.map((h) => (
+              <HarnessTile
+                key={h.id}
+                harness={h}
+                description={t(`harnesses.descriptions.${h.id}`, { defaultValue: h.description })}
+                preferredInstallMethod={preferredInstallMethod}
+                launchArgs={launchArgs[h.id]}
+                onInstallInTerminal={() => handleInstallInTerminal(h.id)}
+                onCopyCommand={() => handleCopyCommand(h.id)}
+                onLaunch={() => void handleLaunch(h.id)}
+                onOpenWebsite={() => handleOpenWebsite(h.website)}
+                onOpenLaunchSettings={() => setSettingsHarness(h)}
+              />
+            ))}
+          </div>
           )}
 
-          {/* Error */}
+          {/* 扫描错误提示随扫描逻辑一并停用；手动刷新失败只在控制台告警，保留备查：
           {error && (
             <div className="hp-error">
               <p>{error}</p>
@@ -315,6 +411,7 @@ export function HarnessPanel() {
               </button>
             </div>
           )}
+          */}
 
           {/* Footer hint */}
           <div className="hp-footer">

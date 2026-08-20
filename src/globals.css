@@ -11163,6 +11163,15 @@ button.chat-context-section:hover {
   color: var(--success);
 }
 
+.hp-tile-status-missing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-3);
+}
+
 .hp-tile-version {
   font-size: 10px;
   font-family: var(--font-mono);

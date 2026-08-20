@@ -26,6 +26,16 @@ const REMOTE_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 static NEXT_EVENT_REVISION: AtomicU64 = AtomicU64::new(1);
 
+/// 智能体运行工具页刷新按钮触发的本机 CLI 手动健康检查。
+///
+/// 只做一次 reconcile 并返回 MAP 是否发生增删；不发 `cli-services-updated`
+/// 事件——前端调用方在拿到返回后自行刷新 CLI 目录缓存，保证"转圈结束"发生在
+/// 新数据落地之后，事件路径无法保证这个顺序。
+#[tauri::command]
+pub async fn refresh_local_cli_health() -> Result<bool, String> {
+    Ok(LocalCliServiceLifecycle::reconcile_health().await)
+}
+
 /// 启动本地和远端两条健康检查循环。
 pub fn spawn_cli_service_health_scheduler(app: AppHandle, db: Database) {
     let local_app = app.clone();

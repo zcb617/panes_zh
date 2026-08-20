@@ -939,6 +939,7 @@ export const ipc = {
     invoke<Record<string, string>>("get_harness_launch_args"),
   setHarnessLaunchArgs: (harnessId: string, args: string) =>
     invoke<string>("set_harness_launch_args", { harnessId, args }),
+  refreshLocalCliHealth: () => invoke<boolean>("refresh_local_cli_health"),
   getDefaultAutonomyPreset: () =>
     invoke<string | null>("get_default_autonomy_preset"),
   setDefaultAutonomyPreset: (preset: string | null) =>
