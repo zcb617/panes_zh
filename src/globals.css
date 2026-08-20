@@ -1107,9 +1107,9 @@ button, input, textarea, select {
 }
 
 .linux-window-update-control {
-  height: 24px;
-  min-width: 42px;
-  padding: 0 8px;
+  height: 16px;
+  min-width: 28px;
+  padding: 0 5px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1118,7 +1118,7 @@ button, input, textarea, select {
   border: 1px solid var(--success-border);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 7.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
@@ -1140,14 +1140,14 @@ button.linux-window-update-control:hover {
 }
 
 .linux-window-update-control--progress {
-  width: 30px;
-  height: 30px;
-  min-width: 30px;
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
   padding: 0;
   border-radius: 50%;
   border-color: var(--success-indicator);
   background: transparent;
-  font-size: 9px;
+  font-size: 6px;
   letter-spacing: -0.04em;
 }
 
