@@ -173,6 +173,84 @@ pub async fn terminate(connection_id: &str, cli_id: &str) -> anyhow::Result<bool
     SSH_CLI_SERVICES.terminate(connection_id, cli_id).await
 }
 
+/// 定时健康检查：以远端服务进程的真实存活状态为准 reconcile 生命周期 MAP。
+///
+/// 已登记但连续两次探活失败的服务移除登记；隧道和远端服务都存活但未登记的
+/// 服务补登记。隧道的断线恢复由 `cli_tunnel_registry` 负责，本函数只观测远端
+/// 服务进程并 reconcile MAP。返回本次 reconcile 是否对 MAP 做过增删。
+pub async fn reconcile_health(connection_id: &str) -> bool {
+    let mut changed = false;
+
+    let registered = {
+        let services = SSH_CLI_SERVICES.services.read().await;
+        services
+            .get(connection_id)
+            .map(|host_services| {
+                host_services
+                    .iter()
+                    .map(|(cli_id, service)| (cli_id.clone(), service.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    for (cli_id, service) in registered {
+        if cli_tunnel_registry::probe_remote_cli_service_alive(service.tunnel.as_ref()).await {
+            continue;
+        }
+        // 单次探活失败可能是网络抖动，间隔后再确认一次，避免误杀健康服务。
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if cli_tunnel_registry::probe_remote_cli_service_alive(service.tunnel.as_ref()).await {
+            continue;
+        }
+        match terminate(connection_id, &cli_id).await {
+            Ok(_) => {
+                changed = true;
+                log::info!(
+                    "健康检查发现 SSH 远端 CLI 服务不存活，已移除生命周期登记: connection_id={connection_id} cli_id={cli_id}"
+                );
+            }
+            Err(error) => {
+                log::warn!(
+                    "健康检查移除 SSH 远端 CLI 登记失败: connection_id={connection_id} cli_id={cli_id} error={error:#}"
+                );
+            }
+        }
+    }
+
+    let tunnels = cli_tunnel_registry::list_by_host(connection_id).await;
+    let registered_cli_ids = {
+        let services = SSH_CLI_SERVICES.services.read().await;
+        services
+            .get(connection_id)
+            .map(|host_services| host_services.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    for (cli_id, tunnel) in tunnels {
+        if registered_cli_ids.contains(&cli_id) {
+            continue;
+        }
+        if !cli_tunnel_registry::probe_remote_cli_service_alive(tunnel.as_ref()).await {
+            continue;
+        }
+        match set(connection_id, &cli_id).await {
+            Ok(_) => {
+                changed = true;
+                log::info!(
+                    "健康检查发现未登记的存活 SSH 远端 CLI 服务，已补登记: connection_id={connection_id} cli_id={cli_id}"
+                );
+            }
+            Err(error) => {
+                log::warn!(
+                    "健康检查补登记 SSH 远端 CLI 服务失败: connection_id={connection_id} cli_id={cli_id} error={error:#}"
+                );
+            }
+        }
+    }
+
+    changed
+}
+
 /// 终止当前应用已登记的全部远端 CLI 服务。
 pub async fn terminate_all() -> anyhow::Result<()> {
     SSH_CLI_SERVICES.terminate_all().await

@@ -1033,6 +1033,26 @@ export async function listenSshRemoteProjectSessionsRefreshed(
   );
 }
 
+export const CLI_SERVICES_UPDATED_EVENT = "cli-services-updated";
+
+export interface CliServicesUpdatedEvent {
+  /** 发生变化的范围：local 表示本机，ssh 表示指定远端连接。 */
+  scope: "local" | "ssh";
+  /** scope 为 ssh 时的 SSH 连接配置标识。 */
+  connectionId: string | null;
+  /** 单调递增的事件序号，用于识别乱序事件。 */
+  revision: number;
+}
+
+export async function listenCliServicesUpdated(
+  onEvent: (event: CliServicesUpdatedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<CliServicesUpdatedEvent>(
+    CLI_SERVICES_UPDATED_EVENT,
+    ({ payload }) => onEvent(payload),
+  );
+}
+
 export interface CodexRemoteThreadRemovedEvent {
   thread: Thread;
   remoteAction: "archived" | "deleted";

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockIpc = vi.hoisted(() => ({
   getExecutionTarget: vi.fn(),
   listActivedClis: vi.fn(),
+  listSshConnections: vi.fn(),
   getEngineInfo: vi.fn(),
   getChatProviderUsage: vi.fn(),
   engineHealth: vi.fn(),
@@ -48,6 +49,7 @@ describe("engineStore", () => {
       ),
     );
     mockIpc.getChatProviderUsage.mockResolvedValue([]);
+    mockIpc.listSshConnections.mockResolvedValue([]);
     useEngineStore.setState({
       target: {
         targetKey: "local",
@@ -55,7 +57,7 @@ describe("engineStore", () => {
         displayName: "本机",
       },
       engines: [],
-      // 旧实现：enginesByTarget: {},
+      enginesByTarget: {},
       health: {},
       // 旧实现：healthByTarget: {},
       usage: {},
@@ -103,7 +105,7 @@ describe("engineStore", () => {
     expect(mockIpc.listActivedClis.mock.calls[0]).toEqual([]);
   });
 
-  it("reads the active CLI list from the backend on every load", async () => {
+  it("reuses the cached CLI list on repeated loads", async () => {
     mockIpc.listActivedClis.mockResolvedValue([
       {
         id: "codex",
@@ -115,6 +117,92 @@ describe("engineStore", () => {
 
     await useEngineStore.getState().load(null);
     await useEngineStore.getState().load(null);
+
+    // 第二次 load 命中缓存，不再重复调用后端；缓存由后端健康检查事件驱动刷新。
+    expect(mockIpc.listActivedClis).toHaveBeenCalledTimes(1);
+    expect(useEngineStore.getState().enginesByTarget.local).toHaveLength(1);
+  });
+
+  it("refreshes the cached CLI list when a backend update event arrives", async () => {
+    mockIpc.listActivedClis
+      .mockResolvedValueOnce([
+        {
+          id: "codex",
+          name: "Codex",
+          models: [{ id: "gpt-old" }],
+          capabilities: { permissionModes: [], sandboxModes: [], approvalDecisions: [] },
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: "codex",
+          name: "Codex",
+          models: [{ id: "gpt-new" }],
+          capabilities: { permissionModes: [], sandboxModes: [], approvalDecisions: [] },
+        },
+      ]);
+
+    await useEngineStore.getState().load(null);
+    await useEngineStore.getState().applyCliServicesUpdated({
+      scope: "local",
+      connectionId: null,
+      revision: 1,
+    });
+
+    expect(mockIpc.listActivedClis).toHaveBeenCalledTimes(2);
+    expect(useEngineStore.getState().engines[0]?.models[0]?.id).toBe("gpt-new");
+  });
+
+  it("caches an empty catalog when the backend reports no activated CLIs", async () => {
+    mockIpc.listActivedClis.mockRejectedValue(
+      new Error("SSH 远端机器没有已激活的 Codex、OpenCode 或 Claude CLI 工具"),
+    );
+
+    await useEngineStore.getState().applyCliServicesUpdated({
+      scope: "ssh",
+      connectionId: "connection-a",
+      revision: 1,
+    });
+
+    expect(useEngineStore.getState().enginesByTarget["ssh:connection-a"]).toEqual([]);
+  });
+
+  it("keeps the cached CLI list when a refresh fails transiently", async () => {
+    mockIpc.listActivedClis.mockResolvedValue([
+      {
+        id: "codex",
+        name: "Codex",
+        models: [{ id: "gpt-live" }],
+        capabilities: { permissionModes: [], sandboxModes: [], approvalDecisions: [] },
+      },
+    ]);
+    await useEngineStore.getState().load(null);
+
+    mockIpc.listActivedClis.mockRejectedValue(new Error("network unreachable"));
+    await useEngineStore.getState().applyCliServicesUpdated({
+      scope: "local",
+      connectionId: null,
+      revision: 2,
+    });
+
+    expect(useEngineStore.getState().engines[0]?.models[0]?.id).toBe("gpt-live");
+  });
+
+  it("refetches after the cached CLI list is dropped by invalidation", async () => {
+    mockIpc.listActivedClis.mockResolvedValue([
+      {
+        id: "codex",
+        name: "Codex",
+        models: [{ id: "remote-model" }],
+        capabilities: { permissionModes: [], sandboxModes: [], approvalDecisions: [] },
+      },
+    ]);
+
+    await useEngineStore.getState().load("workspace-ssh");
+    useEngineStore.getState().invalidateConnection("connection-a");
+    expect(useEngineStore.getState().enginesByTarget["ssh:connection-a"]).toBeUndefined();
+
+    await useEngineStore.getState().load("workspace-ssh");
 
     expect(mockIpc.listActivedClis).toHaveBeenCalledTimes(2);
   });
@@ -180,7 +268,8 @@ describe("engineStore", () => {
 
     expect(useEngineStore.getState().target?.targetKey).toBe("ssh:workspace-b");
     expect(useEngineStore.getState().engines[0]?.models[0]?.id).toBe("model-b");
-    // 旧实现会把迟到结果归档到 enginesByTarget；前端不再保存其他目标的 CLI 状态。
+    // 迟到结果由加载序号守卫丢弃，不会写入 enginesByTarget 污染其他目标的缓存。
+    expect(useEngineStore.getState().enginesByTarget["ssh:workspace-a"]).toBeUndefined();
   });
 
   it("does not restore invalidated target data from an older request", async () => {
@@ -212,8 +301,9 @@ describe("engineStore", () => {
     });
     await refresh;
 
-    // 旧实现还会断言 enginesByTarget 已删除；该缓存结构现已不存在。
+    // 失效连接的目标缓存同步删除，当前视图清空。
     expect(useEngineStore.getState().engines).toEqual([]);
+    expect(useEngineStore.getState().enginesByTarget["ssh:connection-a"]).toBeUndefined();
   });
 
   it("loads engine health on demand", async () => {
@@ -270,12 +360,20 @@ describe("engineStore", () => {
           },
         },
       ],
-      /*
-      旧实现还要同步设置 enginesByTarget：
       enginesByTarget: {
-        "ssh:connection-a": [],
+        "ssh:connection-a": [
+          {
+            id: "claude",
+            name: "Claude",
+            models: [],
+            capabilities: {
+              permissionModes: [],
+              sandboxModes: [],
+              approvalDecisions: [],
+            },
+          },
+        ],
       },
-      */
     });
     mockIpc.engineHealth.mockResolvedValue({
       id: "claude",
@@ -314,6 +412,10 @@ describe("engineStore", () => {
     expect(health?.available).toBe(true);
     expect(mockIpc.getEngineInfo).toHaveBeenCalledWith("claude", "workspace-ssh");
     expect(useEngineStore.getState().engines[0]?.models[0]?.id).toBe("opus[1m]");
+    // 单引擎目录刷新写穿目标缓存，视图与缓存保持一致。
+    expect(
+      useEngineStore.getState().enginesByTarget["ssh:connection-a"]?.[0]?.models[0]?.id,
+    ).toBe("opus[1m]");
     expect(useEngineStore.getState().engineCatalogLoading).toEqual({});
   });
 

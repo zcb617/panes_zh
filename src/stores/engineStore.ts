@@ -7,6 +7,7 @@ import type {
   ExecutionTarget,
 } from "../types";
 import { ipc } from "../lib/ipc";
+import type { CliServicesUpdatedEvent } from "../lib/ipc";
 
 /*
 旧实现按执行目标缓存 CLI、模型、健康状态和用量，并在命中缓存后跳过后端接口。
@@ -629,6 +630,12 @@ export const useEngineStore = create<EngineState>((set, get) => ({
 interface EngineState {
   target: ExecutionTarget | null;
   engines: EngineInfo[];
+  /**
+   * 按执行目标缓存的 CLI 目录（local 或 ssh:{connectionId}）。
+   * 缓存在启动完成后一次性预热，之后由后端健康检查事件驱动刷新；
+   * 页面只读缓存，不再每次打开都实时拉取。
+   */
+  enginesByTarget: Record<string, EngineInfo[]>;
   health: Record<string, EngineHealth>;
   usage: Record<string, ChatProviderUsage>;
   healthLoading: Record<string, boolean>;
@@ -639,6 +646,8 @@ interface EngineState {
   activeWorkspaceId: string | null;
   error?: string;
   load: (workspaceId?: string | null) => Promise<void>;
+  preloadCatalogs: () => Promise<void>;
+  applyCliServicesUpdated: (event: CliServicesUpdatedEvent) => Promise<void>;
   refreshEngineCatalog: (engineId: string) => Promise<EngineInfo | null>;
   ensureHealth: (
     engineId: string,
@@ -676,9 +685,48 @@ function isCurrentTarget(
   );
 }
 
+/**
+ * 拉取指定执行目标的 CLI 目录并写入缓存；命中当前激活目标时同步更新页面视图。
+ * 启动预热和后端健康检查事件刷新共用本条取数路径（与启动时首次取数是同一个
+ * listActivedClis 接口）。
+ */
+async function fetchAndCacheCatalog(
+  targetKey: string,
+  connectionId: string | null,
+): Promise<void> {
+  const requestGeneration = requestGenerations[targetKey] ?? 0;
+  const applyCatalog = (engines: EngineInfo[]) => {
+    if ((requestGenerations[targetKey] ?? 0) !== requestGeneration) {
+      return;
+    }
+    useEngineStore.setState((state) => {
+      const enginesByTarget = { ...state.enginesByTarget, [targetKey]: engines };
+      return state.target?.targetKey === targetKey
+        ? { enginesByTarget, engines, error: undefined }
+        : { enginesByTarget };
+    });
+  };
+
+  try {
+    const engines = connectionId
+      ? await ipc.listActivedClis(connectionId)
+      : await ipc.listActivedClis();
+    applyCatalog(engines);
+  } catch (error) {
+    // 后端在目标没有任何已激活 CLI 时返回错误；健康检查 reconcile 后这代表
+    // 目录已被清空，缓存同步置空。其他错误保留旧缓存，避免瞬时故障清空界面。
+    if (String(error).includes("没有已激活")) {
+      applyCatalog([]);
+      return;
+    }
+    console.warn(`Failed to refresh engine catalog for ${targetKey}:`, error);
+  }
+}
+
 export const useEngineStore = create<EngineState>((set, get) => ({
   target: null,
   engines: [],
+  enginesByTarget: {},
   health: {},
   usage: {},
   healthLoading: {},
@@ -691,15 +739,9 @@ export const useEngineStore = create<EngineState>((set, get) => ({
   load: async (workspaceId = null) => {
     const normalizedWorkspaceId = workspaceId ?? null;
     const sequence = ++engineLoadSequence;
+    // 不再同步清空已有目录：缓存由启动预热和后端健康检查事件维护，重复加载
+    // 直接复用缓存，避免每次使用都经历“清空 → 远端拉取”的转圈窗口。
     set({
-      target: null,
-      engines: [],
-      health: {},
-      usage: {},
-      healthLoading: {},
-      engineCatalogLoading: {},
-      usageLoading: {},
-      loading: true,
       activeWorkspaceId: normalizedWorkspaceId,
       error: undefined,
     });
@@ -712,7 +754,25 @@ export const useEngineStore = create<EngineState>((set, get) => ({
       ) {
         return;
       }
-      set({ target });
+
+      const targetChanged = get().target?.targetKey !== target.targetKey;
+      const cachedEngines = get().enginesByTarget[target.targetKey];
+      set((state) => ({
+        target,
+        engines: cachedEngines ?? (targetChanged ? [] : state.engines),
+        health: targetChanged ? {} : state.health,
+        usage: targetChanged ? {} : state.usage,
+        healthLoading: targetChanged ? {} : state.healthLoading,
+        engineCatalogLoading: targetChanged ? {} : state.engineCatalogLoading,
+        usageLoading: targetChanged ? {} : state.usageLoading,
+        loading: cachedEngines === undefined,
+        loadedOnce: cachedEngines !== undefined || state.loadedOnce,
+        error: undefined,
+      }));
+      if (cachedEngines !== undefined) {
+        return;
+      }
+
       const targetRequestGeneration = requestGenerations[target.targetKey] ?? 0;
 
       let engines: EngineInfo[];
@@ -735,12 +795,13 @@ export const useEngineStore = create<EngineState>((set, get) => ({
       ) {
         return;
       }
-      set({
+      set((state) => ({
         engines,
+        enginesByTarget: { ...state.enginesByTarget, [target.targetKey]: engines },
         loading: false,
         loadedOnce: true,
         error: undefined,
-      });
+      }));
     } catch (error) {
       if (
         sequence !== engineLoadSequence ||
@@ -754,6 +815,34 @@ export const useEngineStore = create<EngineState>((set, get) => ({
         error: String(error),
       });
     }
+  },
+
+  preloadCatalogs: async () => {
+    // 启动完成后一次性预热本机和全部已启用 SSH 连接的 CLI 目录缓存。
+    const tasks: Promise<void>[] = [fetchAndCacheCatalog("local", null)];
+    try {
+      const connections = await ipc.listSshConnections();
+      for (const connection of connections) {
+        if (!connection.enabled) {
+          continue;
+        }
+        tasks.push(fetchAndCacheCatalog(`ssh:${connection.id}`, connection.id));
+      }
+    } catch (error) {
+      console.warn("Failed to list SSH connections for engine catalog preload:", error);
+    }
+    await Promise.all(tasks);
+  },
+
+  applyCliServicesUpdated: async (event) => {
+    const targetKey =
+      event.scope === "ssh" && event.connectionId
+        ? `ssh:${event.connectionId}`
+        : "local";
+    await fetchAndCacheCatalog(
+      targetKey,
+      event.scope === "ssh" ? event.connectionId : null,
+    );
   },
 
   refreshEngineCatalog: async (engineId) => {
@@ -781,24 +870,29 @@ export const useEngineStore = create<EngineState>((set, get) => ({
         if (!isCurrentTarget(get(), workspaceId, targetKey, requestGeneration)) {
           return engine;
         }
-        set((state) => ({
-          engines: state.engines.some((item) => item.id === engine.id)
+        set((state) => {
+          const engines = state.engines.some((item) => item.id === engine.id)
             ? state.engines.map((item) => (item.id === engine.id ? engine : item))
-            : [...state.engines, engine],
-          health: {
-            ...state.health,
-            [engine.id]: {
-              id: engine.id,
-              available: true,
-              details: state.health[engine.id]?.details,
-              warnings: state.health[engine.id]?.warnings ?? [],
-              checks: state.health[engine.id]?.checks ?? [],
-              fixes: state.health[engine.id]?.fixes ?? [],
-              protocolDiagnostics: state.health[engine.id]?.protocolDiagnostics,
+            : [...state.engines, engine];
+          return {
+            engines,
+            // 单引擎目录刷新同步写穿目标缓存，避免视图与缓存分叉。
+            enginesByTarget: { ...state.enginesByTarget, [targetKey]: engines },
+            health: {
+              ...state.health,
+              [engine.id]: {
+                id: engine.id,
+                available: true,
+                details: state.health[engine.id]?.details,
+                warnings: state.health[engine.id]?.warnings ?? [],
+                checks: state.health[engine.id]?.checks ?? [],
+                fixes: state.health[engine.id]?.fixes ?? [],
+                protocolDiagnostics: state.health[engine.id]?.protocolDiagnostics,
+              },
             },
-          },
-          error: state.error?.startsWith(`${engineId}:`) ? undefined : state.error,
-        }));
+            error: state.error?.startsWith(`${engineId}:`) ? undefined : state.error,
+          };
+        });
         return engine;
       } catch (error) {
         const message = String(error);
@@ -960,9 +1054,11 @@ export const useEngineStore = create<EngineState>((set, get) => ({
     for (const requestKey of Object.keys(pendingUsageRequests)) {
       if (requestKey.startsWith(`${targetKey}:`)) delete pendingUsageRequests[requestKey];
     }
-    set((state) =>
-      state.target?.connectionId === connectionId
+    set((state) => {
+      const { [targetKey]: _dropped, ...enginesByTarget } = state.enginesByTarget;
+      return state.target?.connectionId === connectionId
         ? {
+            enginesByTarget,
             engines: [],
             health: {},
             usage: {},
@@ -971,8 +1067,8 @@ export const useEngineStore = create<EngineState>((set, get) => ({
             usageLoading: {},
             error: undefined,
           }
-        : state,
-    );
+        : { enginesByTarget };
+    });
   },
 
   mergeHealth: (reports) =>

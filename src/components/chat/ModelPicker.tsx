@@ -391,8 +391,10 @@ export function ModelPicker({
     }
     wasOpenRef.current = true;
 
-    // 每次打开都携带当前 workspaceId 调用后端 list_actived_clis，不使用前端缓存。
-    void onRetry?.();
+    // CLI 目录已经由启动预热写入前端缓存，并由后端健康检查事件驱动刷新；
+    // 打开选择器不再每次强制调用后端 list_actived_clis，直接使用缓存数据，
+    // 避免每次点击都出现“正在启动 …”的转圈。
+    // void onRetry?.();
     /*
      * 旧逻辑还会遍历全部 CLI，执行健康检查并刷新模型目录：
      *

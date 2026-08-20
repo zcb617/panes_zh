@@ -61,16 +61,19 @@ static LOCAL_CLI_SERVICES: LazyLock<LocalCliServiceLifecycleRegistry> =
     LazyLock::new(LocalCliServiceLifecycleRegistry::default);
 static NEXT_SERVICE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// 本机支持接入生命周期的聊天 CLI 及其可执行文件名称。
+const LOCAL_CLI_COMMANDS: [(&str, &str); 3] = [
+    ("codex", "codex"),
+    ("opencode", "opencode"),
+    ("claude", "claude"),
+];
+
 pub(crate) struct LocalCliServiceLifecycle;
 
 impl LocalCliServiceLifecycle {
     /// 探测本机三种聊天 CLI，并将已安装的 CLI 服务逐个登记到生命周期 MAP。
     pub(crate) async fn init() -> anyhow::Result<()> {
-        for (cli_id, command) in [
-            ("codex", "codex"),
-            ("opencode", "opencode"),
-            ("claude", "claude"),
-        ] {
+        for (cli_id, command) in LOCAL_CLI_COMMANDS {
             let found = runtime_env::resolve_executable(command).is_some()
                 || detect_via_login_shell(command, "--version").await.is_some();
             if !found {
@@ -84,6 +87,46 @@ impl LocalCliServiceLifecycle {
         }
 
         Ok(())
+    }
+
+    /// 定时健康检查：以可执行文件探测结果为准 reconcile 生命周期 MAP。
+    ///
+    /// 探测到但未登记的 CLI 立即登记（覆盖 Panes 运行期间新安装的情况）；
+    /// 已登记但探测不到的 CLI 移除登记（覆盖运行期间被卸载的情况）。
+    /// 返回本次 reconcile 是否对 MAP 做过增删。
+    pub(crate) async fn reconcile_health() -> bool {
+        let mut changed = false;
+        for (cli_id, command) in LOCAL_CLI_COMMANDS {
+            let found = runtime_env::resolve_executable(command).is_some()
+                || detect_via_login_shell(command, "--version").await.is_some();
+            let registered = LOCAL_CLI_SERVICES.services.read().await.contains_key(cli_id);
+            if found == registered {
+                continue;
+            }
+
+            if found {
+                match Self::set(cli_id).await {
+                    Ok(_) => {
+                        changed = true;
+                        log::info!("健康检查发现本机新装 CLI，已登记生命周期: cli_id={cli_id}");
+                    }
+                    Err(error) => {
+                        log::warn!("健康检查登记本机 CLI 失败: cli_id={cli_id} error={error:#}");
+                    }
+                }
+            } else {
+                match Self::terminate(cli_id).await {
+                    Ok(_) => {
+                        changed = true;
+                        log::info!("健康检查发现本机 CLI 已不可用，已移除生命周期登记: cli_id={cli_id}");
+                    }
+                    Err(error) => {
+                        log::warn!("健康检查移除本机 CLI 登记失败: cli_id={cli_id} error={error:#}");
+                    }
+                }
+            }
+        }
+        changed
     }
 
     /// 取得已经由 Panes 启动阶段登记的本地 CLI 服务；该方法不会启动服务。

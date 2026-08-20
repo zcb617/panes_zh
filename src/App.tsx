@@ -17,6 +17,7 @@ import {
   listenCliServiceRestartRequired,
   listenComputerControlApprovalRequested,
   listenChatTurnFinished,
+  listenCliServicesUpdated,
   listenCodexRemoteThreadRemoved,
   listenEngineRuntimeUpdated,
   listenMenuAction,
@@ -144,6 +145,8 @@ export function App() {
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const completeSshSessionSync = useWorkspaceStore((s) => s.completeSshSessionSync);
   const loadEngines = useEngineStore((s) => s.load);
+  const preloadEngineCatalogs = useEngineStore((s) => s.preloadCatalogs);
+  const applyCliServicesUpdated = useEngineStore((s) => s.applyCliServicesUpdated);
   const engines = useEngineStore((s) => s.engines);
   const applyEngineRuntimeUpdate = useEngineStore((s) => s.applyRuntimeUpdate);
   const loadKeepAwake = useKeepAwakeStore((s) => s.load);
@@ -366,6 +369,9 @@ export function App() {
     void listenAppStartupProgress((event) => {
       setStartupProgress(event);
       if (event.phase === "completed") {
+        // 后端初始化完成后，除取会话列表外，同时把本机和各远端机器的 CLI 目录
+        // 预热进前端缓存；之后页面只读缓存，目录变化由后端健康检查事件驱动。
+        void preloadEngineCatalogs();
         const sshWorkspaceIds = useWorkspaceStore
           .getState()
           .workspaces.filter((workspace) => workspace.locationKind === "ssh")
@@ -396,7 +402,30 @@ export function App() {
         unlisten();
       }
     };
-  }, [reloadThreadsFromLocalDatabase]);
+  }, [preloadEngineCatalogs, reloadThreadsFromLocalDatabase]);
+
+  // 后端健康检查 reconcile 生命周期 MAP 后推送本事件；收到后立即用与启动预热
+  // 相同的接口刷新对应目标的前端 CLI 目录缓存。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenCliServicesUpdated((event) => {
+      void applyCliServicesUpdated(event);
+    }).then((fn) => {
+      if (disposed) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, [applyCliServicesUpdated]);
 
   useEffect(() => {
     if (

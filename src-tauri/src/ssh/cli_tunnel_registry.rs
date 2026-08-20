@@ -797,6 +797,32 @@ pub(crate) async fn stop_remote_cli_service_for_tunnel(
         .map(|_| ())
 }
 
+/// 仅供 `cli_service_lifecycle` 健康检查调用的远端服务端探活原语。
+///
+/// 单次执行、不做等待：PID 文件中的进程存活且远端端口处于监听状态才算活着。
+/// 隧道的断线恢复不属于本函数职责，探活失败只说明当前服务不可达。
+pub(crate) async fn probe_remote_cli_service_alive(tunnel: &SshCliTunnel) -> bool {
+    let pid_file = remote_service_pid_file(tunnel);
+    let probe_command = format!(
+        "pid_file=\"{pid_file}\"; port={port}; \
+[ -f \"$pid_file\" ] && kill -0 \"$(cat \"$pid_file\")\" 2>/dev/null && \
+ss -ltn 2>/dev/null | awk '{{print $4}}' | grep -Eq \"[:.]${{port}}$\"",
+        pid_file = pid_file,
+        port = tunnel.remote_port(),
+    );
+    match gateway::run_command(tunnel.connection(), &probe_command).await {
+        Ok(_) => true,
+        Err(error) => {
+            log::warn!(
+                "SSH 远端 CLI 服务探活失败: connection_id={} cli_id={} error={error:#}",
+                tunnel.connection_id(),
+                tunnel.cli_id()
+            );
+            false
+        }
+    }
+}
+
 fn build_remote_service_start_command(tunnel: &SshCliTunnel) -> anyhow::Result<String> {
     let pid_file = remote_service_pid_file(tunnel);
     let log_file = remote_service_log_file(tunnel);

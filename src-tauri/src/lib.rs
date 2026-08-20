@@ -1,4 +1,5 @@
 pub(crate) mod cli_tools;
+mod cli_service_health;
 mod commands;
 mod computer_control_sdk;
 mod computer_control_service;
@@ -236,6 +237,10 @@ pub fn run() {
             }
             tauri::async_runtime::spawn(run_codex_runtime_bridge(handle.clone(), state.clone()));
             spawn_catalog_refresh_scheduler(handle.clone(), state.clone());
+            cli_service_health::spawn_cli_service_health_scheduler(
+                handle.clone(),
+                state.db.clone(),
+            );
             state
                 .scheduled_tasks
                 .clone()

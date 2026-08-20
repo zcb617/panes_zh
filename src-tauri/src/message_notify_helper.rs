@@ -9,6 +9,9 @@ pub const SSH_REMOTE_PROJECT_SESSIONS_REFRESHED_EVENT: &str =
 /// 前端启动界面用于显示后端初始化进度的事件名称。
 pub const APP_STARTUP_PROGRESS_EVENT: &str = "app-startup-progress";
 
+/// 前端用于刷新 CLI 目录缓存的事件名称。
+pub const CLI_SERVICES_UPDATED_EVENT: &str = "cli-services-updated";
+
 /// 后端初始化阶段发生变化时发送给前端的事件载荷。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +30,30 @@ pub struct SshRemoteProjectSessionsRefreshedEvent {
     pub succeeded_cli_ids: Vec<String>,
     /// 刷新失败的远端 CLI 标识列表。
     pub failed_cli_ids: Vec<String>,
+}
+
+/// CLI 生命周期 MAP 被健康检查 reconcile 后发送给前端的事件载荷。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliServicesUpdatedEvent {
+    /// 发生变化的范围：local 表示本机，ssh 表示指定远端连接。
+    pub scope: String,
+    /// scope 为 ssh 时的 SSH 连接配置标识。
+    pub connection_id: Option<String>,
+    /// 单调递增的事件序号，前端用于识别乱序事件。
+    pub revision: u64,
+}
+
+/// 向前端发送 CLI 目录更新事件。
+///
+/// 调用方必须先完成生命周期 MAP 的 reconcile 再调用本函数，保证前端收到事件后
+/// 立即拉取时读到的是新状态；本函数只负责把固定契约发送给 Tauri 前端。
+pub fn notify_cli_services_updated(
+    app: &AppHandle,
+    event: CliServicesUpdatedEvent,
+) -> anyhow::Result<()> {
+    app.emit(CLI_SERVICES_UPDATED_EVENT, event)
+        .context("failed to emit CLI services updated event")
 }
 
 /// 向前端发送 SSH 远端项目会话刷新完成事件。
