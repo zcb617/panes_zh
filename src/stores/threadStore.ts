@@ -168,6 +168,10 @@ async function discoverCodexRemoteThreads(workspaceId: string): Promise<void> {
   // }
 
   const discovery = (async () => {
+    // 旧实现每条 attach 失败只写一句无上下文的 console.warn，发布版无从排查；
+    // 现在逐条记录工作区与完整错误文本，并在结束时输出导入汇总。
+    let attachedCount = 0;
+    let failedCount = 0;
     try {
       let cursor: string | null = null;
       const seenCursors = new Set<string>();
@@ -187,9 +191,15 @@ async function discoverCodexRemoteThreads(workspaceId: string): Promise<void> {
           try {
             // await ipc.attachCodexRemoteThread(workspaceId, remoteThread.engineThreadId, modelId);
             await ipc.attachCodexRemoteThread(workspaceId, remoteThread.engineThreadId);
+            attachedCount += 1;
           } catch (error) {
+            failedCount += 1;
+            // console.warn(
+            //   `Failed to attach discovered Codex thread ${remoteThread.engineThreadId}:`,
+            //   error,
+            // );
             console.warn(
-              `Failed to attach discovered Codex thread ${remoteThread.engineThreadId}:`,
+              `Failed to attach discovered Codex thread ${remoteThread.engineThreadId} in workspace ${workspaceId}: ${String(error)}`,
               error,
             );
           }
@@ -203,8 +213,17 @@ async function discoverCodexRemoteThreads(workspaceId: string): Promise<void> {
         cursor = nextCursor;
       }
     } catch (error) {
-      console.warn(`Failed to discover Codex threads for workspace ${workspaceId}:`, error);
+      // console.warn(`Failed to discover Codex threads for workspace ${workspaceId}:`, error);
+      console.warn(
+        `Failed to discover Codex threads for workspace ${workspaceId}: ${String(error)}`,
+        error,
+      );
     } finally {
+      if (attachedCount > 0 || failedCount > 0) {
+        console.info(
+          `Codex thread discovery finished for workspace ${workspaceId}: attached=${attachedCount} failed=${failedCount}`,
+        );
+      }
       codexRemoteThreadDiscoveryInFlight.delete(workspaceId);
     }
   })();

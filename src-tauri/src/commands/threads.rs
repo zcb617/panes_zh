@@ -197,17 +197,70 @@ pub async fn attach_codex_remote_thread(
         .models_for_validation(&context, &session.model_id)
         .await
         .ok();
-    let normalized_model_id = validate_model_for_engine_from_catalog(
+    // Codex Desktop / vscode 创建的会话 model 为 null（映射后为 "unknown"），不在
+    // 模型目录中。目录校验失败不得中断导入：优先回退到目录默认模型，目录不可用
+    // 时保留会话原值，保证这类会话能正常发现并显示。
+    // 旧实现校验失败直接返回错误，导致无 model 的会话被整体丢弃、项目下"没有会话"：
+    // let normalized_model_id = validate_model_for_engine_from_catalog(
+    //     "codex",
+    //     session.model_id.trim(),
+    //     validation_models.as_deref(),
+    // )?;
+    let normalized_model_id = match validate_model_for_engine_from_catalog(
         "codex",
         session.model_id.trim(),
         validation_models.as_deref(),
-    )?;
+    ) {
+        Ok(model_id) => model_id,
+        Err(error) => {
+            let fallback = validation_models.as_deref().and_then(|models| {
+                models
+                    .iter()
+                    .find(|model| model.is_default && !model.hidden)
+                    .or_else(|| models.iter().find(|model| !model.hidden))
+                    .or_else(|| models.first())
+            });
+            match fallback {
+                Some(model) => {
+                    log::warn!(
+                        "Codex 会话模型不在模型目录中，导入回退到目录默认模型: engine_thread_id={} session_model={} fallback_model={} error={}",
+                        engine_thread_id,
+                        session.model_id.trim(),
+                        model.id,
+                        error,
+                    );
+                    model.id.clone()
+                }
+                None => {
+                    log::warn!(
+                        "Codex 会话模型校验失败且无模型目录可回退，导入保留会话原模型: engine_thread_id={} session_model={} error={}",
+                        engine_thread_id,
+                        session.model_id.trim(),
+                        error,
+                    );
+                    session.model_id.trim().to_string()
+                }
+            }
+        }
+    };
     let normalized_reasoning_effort = session
         .reasoning_effort
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_lowercase);
+    // reasoning_effort 校验失败同样不得中断导入：忽略该值、保留会话本体。
+    // 旧实现直接返回错误：
+    // let validated_reasoning_effort = normalized_reasoning_effort
+    //     .as_deref()
+    //     .map(|value| {
+    //         validate_reasoning_effort_from_catalog(
+    //             &normalized_model_id,
+    //             value,
+    //             validation_models.as_deref(),
+    //         )
+    //     })
+    //     .transpose()?;
     let validated_reasoning_effort = normalized_reasoning_effort
         .as_deref()
         .map(|value| {
@@ -217,7 +270,15 @@ pub async fn attach_codex_remote_thread(
                 validation_models.as_deref(),
             )
         })
-        .transpose()?;
+        .transpose()
+        .unwrap_or_else(|error| {
+            log::warn!(
+                "Codex 会话 reasoning_effort 不受支持，导入时忽略该值: engine_thread_id={} error={}",
+                engine_thread_id,
+                error,
+            );
+            None
+        });
     let model_provider = session
         .metadata
         .get("codexModelProvider")
