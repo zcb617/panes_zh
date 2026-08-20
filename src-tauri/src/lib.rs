@@ -229,6 +229,11 @@ pub fn run() {
                 .engines
                 .set_computer_control_service(state.computer_control_service.clone());
             state.engines.set_resource_dir(resource_dir);
+            if let Err(error) = tauri::async_runtime::block_on(
+                local_cli_service_lifecycle::LocalCliServiceLifecycle::init(),
+            ) {
+                log::warn!("Panes 启动时初始化本地 CLI 服务失败: {error:#}");
+            }
             tauri::async_runtime::spawn(run_codex_runtime_bridge(handle.clone(), state.clone()));
             spawn_catalog_refresh_scheduler(handle.clone(), state.clone());
             state
