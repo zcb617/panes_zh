@@ -19,6 +19,7 @@ use crate::{
         ThreadScope, ThreadSyncSnapshot, TurnInput,
     },
     extensions,
+    local_cli_service_lifecycle::{LocalCliHandle, LocalCliServiceLifecycle},
     models::{
         CachedExtensionCatalogDto, ChatProviderUsageDto, CodexAppDto, CodexPluginDto,
         CodexSkillDto, EngineHealthDto, EngineInfoDto, ExtensionActionResultDto,
@@ -47,12 +48,18 @@ impl OpenCodeCli {
         }
     }
 
-    fn configure_local_computer_control(&self) {
-        self.state
-            .engines
-            .set_local_opencode_computer_control_service(
-                self.state.computer_control_service.clone(),
-            );
+    async fn local_engine(&self) -> Result<Arc<OpenCodeEngine>> {
+        let service = LocalCliServiceLifecycle::get("opencode").await?;
+        match service.handle() {
+            LocalCliHandle::OpenCode(engine) => Ok(engine.clone()),
+            _ => anyhow::bail!("本地 CLI 生命周期返回了错误的 OpenCode 句柄类型"),
+        }
+    }
+
+    async fn configure_local_computer_control(&self) -> Result<Arc<OpenCodeEngine>> {
+        let engine = self.local_engine().await?;
+        engine.set_computer_control_service(self.state.computer_control_service.clone());
+        Ok(engine)
     }
 
     /// 根据 workspace 建立 OpenCode 操作目标。
@@ -236,13 +243,9 @@ impl OpenCodeCli {
             // service_use.release().await;
             result?;
         } else {
+            let engine = self.local_engine().await?;
             for cwd in roots.iter() {
-                sessions.extend(
-                    self.state
-                        .engines
-                        .list_opencode_remote_sessions(cwd, search_term, archived)
-                        .await?,
-                );
+                sessions.extend(engine.list_sessions(cwd, search_term, archived).await?);
             }
         }
 
@@ -379,11 +382,7 @@ impl CliTool for OpenCodeCli {
             });
         }
 
-        let models = self
-            .state
-            .engines
-            .models_for_validation("opencode", "")
-            .await?;
+        let models = self.local_engine().await?.list_models_runtime().await;
         Ok(EngineInfoDto {
             id: "opencode".to_string(),
             name: "OpenCode".to_string(),
@@ -416,10 +415,15 @@ impl CliTool for OpenCodeCli {
                 .context("SSH 远端 OpenCode 未绑定连接")?;
             return remote_project_opencode_runtime_service::model_infos(connection_id, None).await;
         }
-        self.state
-            .engines
-            .models_for_validation("opencode", requested_model_id)
-            .await
+        let engine = self.local_engine().await?;
+        let cached_models = engine.runtime_model_fallback().await;
+        if cached_models
+            .iter()
+            .any(|model| model.id == requested_model_id)
+        {
+            return Ok(cached_models);
+        }
+        Ok(engine.list_models_runtime().await)
     }
 
     async fn get_chat_provider_usage(
@@ -433,7 +437,17 @@ impl CliTool for OpenCodeCli {
     async fn engine_health(&self, context: &CliExecutionContext) -> Result<EngineHealthDto> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Local {
-            return self.state.engines.health("opencode").await;
+            let report = self.local_engine().await?.health_report().await;
+            return Ok(EngineHealthDto {
+                id: "opencode".to_string(),
+                available: report.available,
+                version: report.version,
+                details: report.details,
+                warnings: report.warnings,
+                checks: report.checks,
+                fixes: report.fixes,
+                protocol_diagnostics: None,
+            });
         }
 
         let connection_id =
@@ -498,7 +512,7 @@ impl CliTool for OpenCodeCli {
                 .prewarm()
                 .await
         } else {
-            self.state.engines.prewarm("opencode").await
+            self.local_engine().await?.prewarm().await
         }
     }
 
@@ -545,14 +559,10 @@ impl CliTool for OpenCodeCli {
         if context.location_kind != CliLocationKind::Ssh {
             // 本机 OpenCode 允许 workspace 根目录和各仓库目录分别拥有会话；只有明确的
             // 404 才继续尝试下一个目录，其他错误必须原样返回，不能误报为“会话不存在”。
+            let engine = self.local_engine().await?;
             let roots = self.workspace_roots(&workspace).await?;
             for cwd in roots.iter() {
-                match self
-                    .state
-                    .engines
-                    .read_opencode_remote_session(cwd, engine_thread_id)
-                    .await
-                {
+                match engine.read_session(cwd, engine_thread_id).await {
                     Ok(summary) => {
                         anyhow::ensure!(
                             summary.engine_thread_id == engine_thread_id,
@@ -672,13 +682,15 @@ impl CliTool for OpenCodeCli {
             .await;
         }
 
-        self.configure_local_computer_control();
-        let engine_thread_id = self
-            .state
-            .engines
-            .ensure_engine_thread(thread, Some(model), scope, sandbox)
-            .await?;
-        Ok(EngineThread { engine_thread_id })
+        let engine = self.configure_local_computer_control().await?;
+        Engine::start_thread(
+            engine.as_ref(),
+            scope,
+            thread.engine_thread_id.as_deref(),
+            model,
+            sandbox,
+        )
+        .await
     }
 
     async fn send_message(
@@ -707,11 +719,15 @@ impl CliTool for OpenCodeCli {
             return result;
         }
 
-        self.configure_local_computer_control();
-        self.state
-            .engines
-            .send_message(thread, engine_thread_id, input, event_tx, cancellation)
-            .await
+        let engine = self.configure_local_computer_control().await?;
+        Engine::send_message(
+            engine.as_ref(),
+            engine_thread_id,
+            input,
+            event_tx,
+            cancellation,
+        )
+        .await
     }
 
     async fn steer_message(
@@ -749,10 +765,13 @@ impl CliTool for OpenCodeCli {
                     )
                 })
         } else {
-            self.state
-                .engines
-                .respond_to_approval(thread, approval_id, response, route)
-                .await
+            Engine::respond_to_approval(
+                self.local_engine().await?.as_ref(),
+                approval_id,
+                response,
+                route,
+            )
+            .await
         }
     }
 
@@ -778,7 +797,10 @@ impl CliTool for OpenCodeCli {
                 .abort_session(&cwd, actual_engine_thread_id)
                 .await
         } else {
-            self.state.engines.interrupt(thread).await
+            let Some(engine_thread_id) = thread.engine_thread_id.as_deref() else {
+                return Ok(());
+            };
+            Engine::interrupt(self.local_engine().await?.as_ref(), engine_thread_id).await
         }
     }
 
@@ -797,9 +819,9 @@ impl CliTool for OpenCodeCli {
                 .set_session_archived(&cwd, engine_thread_id, true)
                 .await
         } else {
-            self.state
-                .engines
-                .archive_opencode_remote_session(&cwd, engine_thread_id)
+            self.local_engine()
+                .await?
+                .set_session_archived(&cwd, engine_thread_id, true)
                 .await
         }
     }
@@ -819,9 +841,9 @@ impl CliTool for OpenCodeCli {
                 .set_session_archived(&cwd, engine_thread_id, false)
                 .await
         } else {
-            self.state
-                .engines
-                .unarchive_opencode_remote_session(&cwd, engine_thread_id)
+            self.local_engine()
+                .await?
+                .set_session_archived(&cwd, engine_thread_id, false)
                 .await
         }
     }
@@ -841,9 +863,9 @@ impl CliTool for OpenCodeCli {
                 .forget_session(engine_thread_id)
                 .await;
         } else {
-            self.state
-                .engines
-                .forget_opencode_session(engine_thread_id)
+            self.local_engine()
+                .await?
+                .forget_session(engine_thread_id)
                 .await;
         }
         Ok(())
@@ -919,8 +941,9 @@ impl CliTool for OpenCodeCli {
                 .runtime_catalog(&cwd)
                 .await
         } else {
-            self.configure_local_computer_control();
-            self.state.engines.opencode_runtime_catalog(&cwd).await
+            let engine = self.local_engine().await?;
+            engine.set_computer_control_service(self.state.computer_control_service.clone());
+            engine.runtime_catalog(&cwd).await
         }
     }
 
@@ -933,7 +956,11 @@ impl CliTool for OpenCodeCli {
         let workspace = self.load_workspace(context).await?;
         let cwd = self.resolve_workspace_cwd(&workspace, cwd).await?;
         if context.location_kind == CliLocationKind::Local {
-            self.configure_local_computer_control();
+            self.state
+                .engines
+                .set_local_opencode_computer_control_service(
+                    self.state.computer_control_service.clone(),
+                );
             let mut results = Vec::new();
             for kind in requested_kinds {
                 results.push(

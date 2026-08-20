@@ -20,6 +20,7 @@ use crate::{
         EngineThread, ModelInfo, SandboxPolicy, ThreadScope, ThreadSyncSnapshot, TurnInput,
     },
     extensions,
+    local_cli_service_lifecycle::{LocalCliHandle, LocalCliServiceLifecycle},
     models::{
         CachedExtensionCatalogDto, ChatProviderUsageDto, CodexAppDto, CodexPluginDto,
         CodexSkillDto, EngineHealthDto, EngineInfoDto, ExtensionActionResultDto,
@@ -48,10 +49,18 @@ impl CodexCli {
         }
     }
 
-    fn configure_local_computer_control(&self) {
-        self.state
-            .engines
-            .set_local_codex_computer_control_service(self.state.computer_control_service.clone());
+    async fn local_engine(&self) -> Result<Arc<CodexEngine>> {
+        let service = LocalCliServiceLifecycle::get("codex").await?;
+        match service.handle() {
+            LocalCliHandle::Codex(engine) => Ok(engine.clone()),
+            _ => anyhow::bail!("本地 CLI 生命周期返回了错误的 Codex 句柄类型"),
+        }
+    }
+
+    async fn configure_local_computer_control(&self) -> Result<Arc<CodexEngine>> {
+        let engine = self.local_engine().await?;
+        engine.set_computer_control_service(self.state.computer_control_service.clone());
+        Ok(engine)
     }
 
     /// 用户进入某个 workspace 的 Codex 功能时，读取该 workspace 的正式项目位置，作为后续本机或 SSH 操作的依据。
@@ -288,13 +297,14 @@ impl CliTool for CodexCli {
             });
         }
 
-        self.state
-            .engines
-            .list_actived_clis()
-            .await?
-            .into_iter()
-            .find(|engine| engine.id == "codex")
-            .ok_or_else(|| anyhow::anyhow!("Codex 不在当前可用 CLI 列表中"))
+        let engine = self.local_engine().await?;
+        let models = engine.list_models_runtime().await;
+        Ok(EngineInfoDto {
+            id: "codex".to_string(),
+            name: "Codex".to_string(),
+            models: models.into_iter().map(map_model_info).collect(),
+            capabilities: map_engine_capabilities(capabilities_for_engine("codex")),
+        })
     }
 
     async fn models_for_validation(
@@ -320,10 +330,15 @@ impl CliTool for CodexCli {
             return remote_project_codex_runtime_service::model_infos(connection_id, None).await;
         }
 
-        self.state
-            .engines
-            .models_for_validation("codex", requested_model_id)
-            .await
+        let engine = self.local_engine().await?;
+        let cached_models = engine.runtime_model_fallback().await;
+        if cached_models
+            .iter()
+            .any(|model| model.id == requested_model_id)
+        {
+            return Ok(cached_models);
+        }
+        Ok(engine.list_models_runtime().await)
     }
 
     async fn get_chat_provider_usage(
@@ -339,19 +354,28 @@ impl CliTool for CodexCli {
             return Ok(Some(map_provider_usage("codex", "Codex", result)));
         }
 
-        Ok(self
-            .state
-            .engines
-            .chat_provider_usage()
-            .await
-            .into_iter()
-            .find(|usage| usage.engine_id == "codex"))
+        let engine = self.local_engine().await?;
+        Ok(Some(map_provider_usage(
+            "codex",
+            "Codex",
+            engine.usage_limits_snapshot().await,
+        )))
     }
 
     async fn engine_health(&self, context: &CliExecutionContext) -> Result<EngineHealthDto> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Local {
-            return self.state.engines.health("codex").await;
+            let report = self.local_engine().await?.health_report().await;
+            return Ok(EngineHealthDto {
+                id: "codex".to_string(),
+                available: report.available,
+                version: report.version,
+                details: report.details,
+                warnings: report.warnings,
+                checks: report.checks,
+                fixes: report.fixes,
+                protocol_diagnostics: report.protocol_diagnostics,
+            });
         }
 
         let connection_id =
@@ -424,7 +448,7 @@ impl CliTool for CodexCli {
                 .await;
             Ok(())
         } else {
-            self.state.engines.prewarm("codex").await
+            self.local_engine().await?.prewarm().await
         }
     }
 
@@ -433,7 +457,7 @@ impl CliTool for CodexCli {
         if context.location_kind == CliLocationKind::Ssh {
             Ok(false)
         } else {
-            Ok(self.state.engines.codex_uses_external_sandbox().await)
+            Ok(self.local_engine().await?.uses_external_sandbox().await)
         }
     }
 
@@ -497,9 +521,9 @@ impl CliTool for CodexCli {
                 .list_threads(search_term, archived)
                 .await?
         } else {
-            self.state
-                .engines
-                .list_codex_remote_threads(search_term, archived)
+            self.local_engine()
+                .await?
+                .list_threads(search_term, archived)
                 .await?
         };
 
@@ -542,9 +566,9 @@ impl CliTool for CodexCli {
                 .read_remote_thread(engine_thread_id)
                 .await
         } else {
-            self.state
-                .engines
-                .read_codex_remote_thread(engine_thread_id)
+            self.local_engine()
+                .await?
+                .read_remote_thread(engine_thread_id)
                 .await
         };
         let mut summary = match summary_result {
@@ -617,19 +641,21 @@ impl CliTool for CodexCli {
             .await;
         }
 
-        self.configure_local_computer_control();
-        let engine_thread_id = self
-            .state
-            .engines
-            .ensure_engine_thread(thread, Some(model), scope, sandbox)
-            .await?;
-        Ok(EngineThread { engine_thread_id })
+        let engine = self.configure_local_computer_control().await?;
+        Engine::start_thread(
+            engine.as_ref(),
+            scope,
+            thread.engine_thread_id.as_deref(),
+            model,
+            sandbox,
+        )
+        .await
     }
 
     async fn send_message(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
+        _thread: &ThreadDto,
         engine_thread_id: &str,
         input: TurnInput,
         event_tx: mpsc::Sender<EngineEvent>,
@@ -652,17 +678,21 @@ impl CliTool for CodexCli {
             return result;
         }
 
-        self.configure_local_computer_control();
-        self.state
-            .engines
-            .send_message(thread, engine_thread_id, input, event_tx, cancellation)
-            .await
+        let engine = self.configure_local_computer_control().await?;
+        Engine::send_message(
+            engine.as_ref(),
+            engine_thread_id,
+            input,
+            event_tx,
+            cancellation,
+        )
+        .await
     }
 
     async fn steer_message(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
+        _thread: &ThreadDto,
         engine_thread_id: &str,
         client_steer_id: &str,
         content: &str,
@@ -680,11 +710,15 @@ impl CliTool for CodexCli {
             )
             .await
         } else {
-            self.configure_local_computer_control();
-            self.state
-                .engines
-                .steer_message(thread, engine_thread_id, client_steer_id, content, input)
-                .await
+            let engine = self.configure_local_computer_control().await?;
+            Engine::steer_message(
+                engine.as_ref(),
+                engine_thread_id,
+                client_steer_id,
+                content,
+                input,
+            )
+            .await
         }
     }
 
@@ -703,10 +737,8 @@ impl CliTool for CodexCli {
                 .await
                 .with_context(|| format!("SSH 远端 Codex 审批回复失败: thread_id={}", thread.id))
         } else {
-            self.state
-                .engines
-                .respond_to_approval(thread, approval_id, response, route)
-                .await
+            let engine = self.local_engine().await?;
+            Engine::respond_to_approval(engine.as_ref(), approval_id, response, route).await
         }
     }
 
@@ -726,14 +758,15 @@ impl CliTool for CodexCli {
                 .await
                 .with_context(|| format!("SSH 远端 Codex 取消失败: thread_id={}", thread.id))
         } else {
-            self.state.engines.interrupt(thread).await
+            let engine_thread_id = thread.engine_thread_id.as_deref().unwrap_or("default");
+            Engine::interrupt(self.local_engine().await?.as_ref(), engine_thread_id).await
         }
     }
 
     async fn archive_thread(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
+        _thread: &ThreadDto,
         engine_thread_id: &str,
     ) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
@@ -741,15 +774,11 @@ impl CliTool for CodexCli {
             let engine = remote_project_codex_runtime_service::runtime(&workspace).await?;
             Engine::archive_thread(engine.as_ref(), engine_thread_id).await
         } else {
-            match self.state.engines.archive_thread(thread).await {
+            let engine = self.local_engine().await?;
+            match Engine::archive_thread(engine.as_ref(), engine_thread_id).await {
                 Ok(()) => Ok(()),
                 Err(error) => {
-                    let archived = match self
-                        .state
-                        .engines
-                        .list_codex_remote_threads(None, Some(true))
-                        .await
-                    {
+                    let archived = match engine.list_threads(None, Some(true)).await {
                         Ok(sessions) => sessions
                             .into_iter()
                             .any(|session| session.engine_thread_id == engine_thread_id),
@@ -758,12 +787,7 @@ impl CliTool for CodexCli {
                     if archived {
                         return Ok(());
                     }
-                    let active = match self
-                        .state
-                        .engines
-                        .list_codex_remote_threads(None, Some(false))
-                        .await
-                    {
+                    let active = match engine.list_threads(None, Some(false)).await {
                         Ok(sessions) => sessions
                             .into_iter()
                             .any(|session| session.engine_thread_id == engine_thread_id),
@@ -782,7 +806,7 @@ impl CliTool for CodexCli {
     async fn unarchive_thread(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
+        _thread: &ThreadDto,
         engine_thread_id: &str,
     ) -> Result<()> {
         let workspace = self.load_workspace(context).await?;
@@ -790,7 +814,7 @@ impl CliTool for CodexCli {
             let engine = remote_project_codex_runtime_service::runtime(&workspace).await?;
             Engine::unarchive_thread(engine.as_ref(), engine_thread_id).await
         } else {
-            self.state.engines.unarchive_thread(thread).await
+            Engine::unarchive_thread(self.local_engine().await?.as_ref(), engine_thread_id).await
         }
     }
 
@@ -807,7 +831,7 @@ impl CliTool for CodexCli {
     async fn read_thread_preview(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
+        _thread: &ThreadDto,
         engine_thread_id: &str,
     ) -> Result<Option<String>> {
         let workspace = self.load_workspace(context).await?;
@@ -819,9 +843,9 @@ impl CliTool for CodexCli {
             Ok(preview)
         } else {
             Ok(self
-                .state
-                .engines
-                .read_thread_preview(thread, engine_thread_id)
+                .local_engine()
+                .await?
+                .read_thread_preview(engine_thread_id)
                 .await)
         }
     }
@@ -829,7 +853,7 @@ impl CliTool for CodexCli {
     async fn read_thread_sync_snapshot(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
+        _thread: &ThreadDto,
         engine_thread_id: &str,
     ) -> Result<Option<ThreadSyncSnapshot>> {
         let workspace = self.load_workspace(context).await?;
@@ -841,13 +865,17 @@ impl CliTool for CodexCli {
                 .map(Some);
         }
 
-        self.state.engines.read_thread_sync_snapshot(thread).await
+        self.local_engine()
+            .await?
+            .read_thread_sync_snapshot(engine_thread_id)
+            .await
+            .map(Some)
     }
 
     async fn set_thread_name(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
+        _thread: &ThreadDto,
         engine_thread_id: &str,
         name: &str,
     ) -> Result<()> {
@@ -858,9 +886,9 @@ impl CliTool for CodexCli {
                 .set_thread_name(engine_thread_id, name)
                 .await
         } else {
-            self.state
-                .engines
-                .set_thread_name(thread, engine_thread_id, name)
+            self.local_engine()
+                .await?
+                .set_thread_name(engine_thread_id, name)
                 .await
         }
     }
@@ -877,7 +905,7 @@ impl CliTool for CodexCli {
                 .list_skills(&workspace.root_path)
                 .await;
         }
-        self.state.engines.list_codex_skills(cwd).await
+        self.local_engine().await?.list_skills(cwd).await
     }
 
     async fn list_codex_apps(&self, context: &CliExecutionContext) -> Result<Vec<CodexAppDto>> {
@@ -888,7 +916,7 @@ impl CliTool for CodexCli {
                 .list_apps()
                 .await;
         }
-        self.state.engines.list_codex_apps().await
+        self.local_engine().await?.list_apps().await
     }
 
     async fn list_codex_plugins(
@@ -903,7 +931,7 @@ impl CliTool for CodexCli {
                 .list_plugins(&workspace.root_path)
                 .await;
         }
-        self.state.engines.list_codex_plugins(cwd).await
+        self.local_engine().await?.list_plugins(cwd).await
     }
 
     async fn get_opencode_runtime_catalog(
@@ -1157,9 +1185,9 @@ impl CliTool for CodexCli {
             "SSH 远端 Codex 暂未接入会话分支，当前不会调用本机 Codex 执行"
         );
         let forked = self
-            .state
-            .engines
-            .fork_codex_thread(engine_thread_id, cwd, model, sandbox)
+            .local_engine()
+            .await?
+            .fork_thread(engine_thread_id, cwd, model, sandbox)
             .await?;
         Ok(CliForkedThread {
             engine_thread_id: forked.engine_thread_id,
@@ -1182,9 +1210,9 @@ impl CliTool for CodexCli {
             context.location_kind == CliLocationKind::Local,
             "SSH 远端 Codex 暂未接入回滚，当前不会调用本机 Codex 执行"
         );
-        self.state
-            .engines
-            .rollback_codex_thread(engine_thread_id, num_turns)
+        self.local_engine()
+            .await?
+            .rollback_thread(engine_thread_id, num_turns)
             .await
     }
 
@@ -1198,9 +1226,9 @@ impl CliTool for CodexCli {
             context.location_kind == CliLocationKind::Local,
             "SSH 远端 Codex 暂未接入压缩，当前不会调用本机 Codex 执行"
         );
-        self.state
-            .engines
-            .compact_codex_thread(engine_thread_id)
+        self.local_engine()
+            .await?
+            .compact_thread(engine_thread_id)
             .await
     }
 
@@ -1229,9 +1257,9 @@ impl CliTool for CodexCli {
                 .map_err(|_| anyhow::anyhow!("代码审查会话接收方已关闭"))?;
             Ok::<(), anyhow::Error>(())
         });
-        self.state
-            .engines
-            .start_codex_review(
+        self.local_engine()
+            .await?
+            .start_review(
                 source_engine_thread_id,
                 target,
                 delivery,

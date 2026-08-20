@@ -18,11 +18,13 @@ use crate::{
     db,
     engines::{
         capabilities_for_engine, claude_remote::RemoteClaudeSessionNotFoundError,
-        map_engine_capabilities, map_model_info, ApprovalRequestRoute, CodexRuntimeEvent, Engine,
-        EngineCapabilities, EngineEvent, EngineSteerReceipt, EngineThread, ModelInfo,
-        SandboxPolicy, ThreadScope, ThreadSyncSnapshot, TurnInput,
+        claude_sidecar::ClaudeSidecarEngine, map_engine_capabilities, map_model_info,
+        map_provider_usage, ApprovalRequestRoute, CodexRuntimeEvent, Engine, EngineCapabilities,
+        EngineEvent, EngineSteerReceipt, EngineThread, ModelInfo, SandboxPolicy, ThreadScope,
+        ThreadSyncSnapshot, TurnInput,
     },
     extensions,
+    local_cli_service_lifecycle::{LocalCliHandle, LocalCliServiceLifecycle},
     models::{
         CachedExtensionCatalogDto, ChatProviderUsageDto, CodexAppDto, CodexPluginDto,
         CodexSkillDto, EngineHealthDto, EngineInfoDto, ExtensionActionResultDto,
@@ -57,6 +59,14 @@ impl ClaudeCodeCli {
             state,
             remote_turn_use: Arc::new(Mutex::new(None)),
             session_handles: shared_claude_code_session_handles(),
+        }
+    }
+
+    async fn local_engine(&self) -> Result<Arc<ClaudeSidecarEngine>> {
+        let service = LocalCliServiceLifecycle::get("claude").await?;
+        match service.handle() {
+            LocalCliHandle::Claude(engine) => Ok(engine.clone()),
+            _ => anyhow::bail!("本地 CLI 生命周期返回了错误的 Claude Code 句柄类型"),
         }
     }
 
@@ -428,13 +438,14 @@ impl CliTool for ClaudeCodeCli {
             });
         }
 
-        self.state
-            .engines
-            .list_actived_clis()
-            .await?
-            .into_iter()
-            .find(|engine| engine.id == "claude")
-            .ok_or_else(|| anyhow::anyhow!("Claude Code 不在当前可用 CLI 列表中"))
+        let engine = self.local_engine().await?;
+        let models = engine.list_models_runtime().await;
+        Ok(EngineInfoDto {
+            id: "claude".to_string(),
+            name: "Claude".to_string(),
+            models: models.into_iter().map(map_model_info).collect(),
+            capabilities: map_engine_capabilities(capabilities_for_engine("claude")),
+        })
     }
 
     async fn models_for_validation(
@@ -461,10 +472,15 @@ impl CliTool for ClaudeCodeCli {
                 .context("SSH 远端 Claude 未绑定连接")?;
             return remote_project_claude_runtime_service::model_infos(connection_id, None).await;
         }
-        self.state
-            .engines
-            .models_for_validation("claude", requested_model_id)
-            .await
+        let engine = self.local_engine().await?;
+        let cached_models = engine.runtime_model_fallback().await;
+        if cached_models
+            .iter()
+            .any(|model| model.id == requested_model_id)
+        {
+            return Ok(cached_models);
+        }
+        Ok(engine.list_models_runtime().await)
     }
 
     async fn get_chat_provider_usage(
@@ -480,19 +496,28 @@ impl CliTool for ClaudeCodeCli {
                 windows: Vec::new(),
             }));
         }
-        Ok(self
-            .state
-            .engines
-            .chat_provider_usage()
-            .await
-            .into_iter()
-            .find(|usage| usage.engine_id == "claude"))
+        let engine = self.local_engine().await?;
+        Ok(Some(map_provider_usage(
+            "claude",
+            "Claude",
+            engine.usage_limits_snapshot().await,
+        )))
     }
 
     async fn engine_health(&self, context: &CliExecutionContext) -> Result<EngineHealthDto> {
         let workspace = self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Local {
-            return self.state.engines.health("claude").await;
+            let report = self.local_engine().await?.health_report().await;
+            return Ok(EngineHealthDto {
+                id: "claude".to_string(),
+                available: report.available,
+                version: report.version,
+                details: Some(report.details),
+                warnings: report.warnings,
+                checks: report.checks,
+                fixes: report.fixes,
+                protocol_diagnostics: None,
+            });
         }
 
         let connection = self.remote_connection(&workspace).await?;
@@ -546,7 +571,7 @@ impl CliTool for ClaudeCodeCli {
                 .prewarm()
                 .await
         } else {
-            self.state.engines.prewarm("claude").await
+            self.local_engine().await?.prewarm().await
         }
     }
 
@@ -803,12 +828,16 @@ impl CliTool for ClaudeCodeCli {
             )
             .await;
         }
-        let engine_thread_id = self
-            .state
-            .engines
-            .ensure_engine_thread(thread, Some(model), scope, sandbox)
-            .await?;
-        Ok(EngineThread { engine_thread_id })
+        let engine = self.local_engine().await?;
+        engine.set_computer_control_service(self.state.computer_control_service.clone());
+        Engine::start_thread(
+            engine.as_ref(),
+            scope,
+            thread.engine_thread_id.as_deref(),
+            model,
+            sandbox,
+        )
+        .await
     }
 
     async fn send_message(
@@ -896,16 +925,22 @@ impl CliTool for ClaudeCodeCli {
                 return result;
             }
         }
-        self.state
-            .engines
-            .send_message(thread, engine_thread_id, input, event_tx, cancellation)
-            .await
+        let engine = self.local_engine().await?;
+        engine.set_computer_control_service(self.state.computer_control_service.clone());
+        Engine::send_message(
+            engine.as_ref(),
+            engine_thread_id,
+            input,
+            event_tx,
+            cancellation,
+        )
+        .await
     }
 
     async fn steer_message(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
+        _thread: &ThreadDto,
         engine_thread_id: &str,
         client_steer_id: &str,
         content: &str,
@@ -923,10 +958,14 @@ impl CliTool for ClaudeCodeCli {
             )
             .await;
         }
-        self.state
-            .engines
-            .steer_message(thread, engine_thread_id, client_steer_id, content, input)
-            .await
+        Engine::steer_message(
+            self.local_engine().await?.as_ref(),
+            engine_thread_id,
+            client_steer_id,
+            content,
+            input,
+        )
+        .await
     }
 
     async fn respond_to_approval(
@@ -944,10 +983,13 @@ impl CliTool for ClaudeCodeCli {
                 .await
                 .with_context(|| format!("SSH 远端 Claude 审批回复失败: thread_id={}", thread.id))
         } else {
-            self.state
-                .engines
-                .respond_to_approval(thread, approval_id, response, route)
-                .await
+            Engine::respond_to_approval(
+                self.local_engine().await?.as_ref(),
+                approval_id,
+                response,
+                route,
+            )
+            .await
         }
     }
 
@@ -974,15 +1016,16 @@ impl CliTool for ClaudeCodeCli {
                     .with_context(|| format!("SSH 远端 Claude 取消失败: thread_id={}", thread.id))
             }
         } else {
-            self.state.engines.interrupt(thread).await
+            let engine_thread_id = thread.engine_thread_id.as_deref().unwrap_or("default");
+            Engine::interrupt(self.local_engine().await?.as_ref(), engine_thread_id).await
         }
     }
 
     async fn archive_thread(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
-        _engine_thread_id: &str,
+        _thread: &ThreadDto,
+        engine_thread_id: &str,
     ) -> Result<()> {
         self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
@@ -991,21 +1034,21 @@ impl CliTool for ClaudeCodeCli {
             // `threads.archived_at`；不能在此处通过远端运行时发送归档请求。
             Ok(())
         } else {
-            self.state.engines.archive_thread(thread).await
+            Engine::archive_thread(self.local_engine().await?.as_ref(), engine_thread_id).await
         }
     }
 
     async fn unarchive_thread(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
-        _engine_thread_id: &str,
+        _thread: &ThreadDto,
+        engine_thread_id: &str,
     ) -> Result<()> {
         self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
             Ok(())
         } else {
-            self.state.engines.unarchive_thread(thread).await
+            Engine::unarchive_thread(self.local_engine().await?.as_ref(), engine_thread_id).await
         }
     }
 
@@ -1022,50 +1065,43 @@ impl CliTool for ClaudeCodeCli {
     async fn read_thread_preview(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
-        engine_thread_id: &str,
+        _thread: &ThreadDto,
+        _engine_thread_id: &str,
     ) -> Result<Option<String>> {
         self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
             Ok(None)
         } else {
-            Ok(self
-                .state
-                .engines
-                .read_thread_preview(thread, engine_thread_id)
-                .await)
+            Ok(None)
         }
     }
 
     async fn read_thread_sync_snapshot(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
+        _thread: &ThreadDto,
         _engine_thread_id: &str,
     ) -> Result<Option<ThreadSyncSnapshot>> {
         self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
             Ok(None)
         } else {
-            self.state.engines.read_thread_sync_snapshot(thread).await
+            Ok(None)
         }
     }
 
     async fn set_thread_name(
         &self,
         context: &CliExecutionContext,
-        thread: &ThreadDto,
-        engine_thread_id: &str,
-        name: &str,
+        _thread: &ThreadDto,
+        _engine_thread_id: &str,
+        _name: &str,
     ) -> Result<()> {
         self.load_workspace(context).await?;
         if context.location_kind == CliLocationKind::Ssh {
             Ok(())
         } else {
-            self.state
-                .engines
-                .set_thread_name(thread, engine_thread_id, name)
-                .await
+            Ok(())
         }
     }
 
