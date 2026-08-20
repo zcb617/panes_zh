@@ -161,7 +161,7 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
   const workspaceIds = useMemo(() => workspaces.map((workspace) => workspace.id), [workspaces]);
 
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() =>
-    normalizeSidebarCollapsedState(workspaceIds, null, {}, null),
+    normalizeSidebarCollapsedState(workspaceIds, null, {}, null, true),
   );
   const [showAll, setShowAll] = useState<Record<string, boolean>>({});
   const [archivedOpen, setArchivedOpen] = useState(false);
@@ -176,6 +176,7 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
   const [settingsMenuPos, setSettingsMenuPos] = useState({ top: 0, left: 0 });
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const settingsTriggerRef = useRef<HTMLButtonElement>(null);
+  const startupCollapsePendingRef = useRef(true);
 
   const closeSettingsMenu = useCallback(() => setSettingsMenuOpen(false), []);
 
@@ -223,14 +224,27 @@ function SidebarContent({ onPin }: { onPin?: () => void }) {
   }, []);
 
   useEffect(() => {
+    const startupCollapsePending = startupCollapsePendingRef.current;
     setCollapsed((prev) => {
-      const next = normalizeSidebarCollapsedState(workspaceIds, null, prev, null);
+      const next = normalizeSidebarCollapsedState(
+        workspaceIds,
+        null,
+        prev,
+        null,
+        startupCollapsePending,
+      );
 
-      // Expanding the newly active workspace must not collapse the rest of the tree.
-      return activeWorkspaceId && workspaceIds.includes(activeWorkspaceId)
-        ? { ...next, [activeWorkspaceId]: false }
-        : next;
+      // Do not expand the restored workspace during startup. After startup, preserve
+      // the existing behavior of showing the newly active workspace.
+      const shouldExpandActiveWorkspace =
+        !startupCollapsePending &&
+        activeWorkspaceId &&
+        workspaceIds.includes(activeWorkspaceId);
+      return shouldExpandActiveWorkspace ? { ...next, [activeWorkspaceId]: false } : next;
     });
+    if (workspaceIds.length > 0) {
+      startupCollapsePendingRef.current = false;
+    }
   }, [workspaceIds, activeWorkspaceId]);
 
   useEffect(() => {

@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { normalizeSidebarCollapsedState } from "./sidebarCollapseState";
 
 describe("normalizeSidebarCollapsedState", () => {
-  it("expands only the restored active workspace on startup", () => {
+  it("collapses every workspace during startup", () => {
     expect(
-      normalizeSidebarCollapsedState(["ws-a", "ws-b", "ws-c"], "ws-b", {}, null),
+      normalizeSidebarCollapsedState(["ws-a", "ws-b", "ws-c"], null, {}, null, true),
     ).toEqual({
       "ws-a": true,
-      "ws-b": false,
+      "ws-b": true,
       "ws-c": true,
     });
   });

@@ -3,6 +3,7 @@ export function normalizeSidebarCollapsedState(
   activeWorkspaceId: string | null,
   previousCollapsed: Record<string, boolean>,
   previousActiveWorkspaceId: string | null,
+  defaultCollapsed = false,
 ): Record<string, boolean> {
   const next: Record<string, boolean> = {};
   const activeWorkspaceChanged = activeWorkspaceId !== previousActiveWorkspaceId;
@@ -22,7 +23,7 @@ export function normalizeSidebarCollapsedState(
       continue;
     }
 
-    next[workspaceId] = hasActiveWorkspace ? workspaceId !== activeWorkspaceId : false;
+    next[workspaceId] = hasActiveWorkspace ? workspaceId !== activeWorkspaceId : defaultCollapsed;
   }
 
   return next;
