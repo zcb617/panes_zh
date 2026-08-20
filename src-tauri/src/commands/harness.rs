@@ -140,13 +140,12 @@ pub(crate) const HARNESSES: &[HarnessDef] = &[
 // check_harnesses
 // ---------------------------------------------------------------------------
 
-/*
 /// 本机 CLI 服务统一查询入口。
 ///
 /// 管理页和本机聊天工具列表都通过这里读取同一份安装检测结果。
-pub(crate) struct LocalCliServiceLifecycle;
+pub(crate) struct LocalCliInstallationDetector;
 
-impl LocalCliServiceLifecycle {
+impl LocalCliInstallationDetector {
     pub(crate) async fn list() -> Result<HarnessReport, String> {
         let mut harnesses = Vec::new();
 
@@ -175,11 +174,9 @@ impl LocalCliServiceLifecycle {
         })
     }
 }
-*/
-
 #[tauri::command]
 pub async fn check_harnesses() -> Result<HarnessReport, String> {
-    crate::local_cli_service_lifecycle::LocalCliServiceLifecycle::list_ready().await
+    LocalCliInstallationDetector::list().await
 }
 
 // ---------------------------------------------------------------------------
