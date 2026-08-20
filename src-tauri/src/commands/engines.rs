@@ -4,7 +4,7 @@ use anyhow::Context;
 use tauri::State;
 use tokio::process::Command;
 
-use crate::commands::harness::check_harnesses;
+use crate::local_cli_service_lifecycle::LocalCliServiceLifecycle;
 
 #[cfg(not(target_os = "windows"))]
 use crate::runtime_env;
@@ -280,7 +280,7 @@ pub async fn list_actived_clis(
     本机实际安装结果过滤：
     state.engines.list_actived_clis().await.map_err(err_to_string)
     */
-    let local_harnesses = check_harnesses().await?;
+    let local_harnesses = LocalCliServiceLifecycle::list_ready().await?;
     let engines = state
         .engines
         .list_actived_clis()
