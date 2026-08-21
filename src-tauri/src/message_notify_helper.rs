@@ -32,6 +32,16 @@ pub struct SshRemoteProjectSessionsRefreshedEvent {
     pub failed_cli_ids: Vec<String>,
 }
 
+/// 一次 CLI 健康检查对生命周期 MAP 的处理结果。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliHealthReconcileResult {
+    /// 本次检查是否已经成功增删至少一项生命周期登记。
+    pub changed: bool,
+    /// 阻止某项登记变化完成的异常；为空表示检查过程没有异常。
+    pub errors: Vec<String>,
+}
+
 /// CLI 生命周期 MAP 被健康检查 reconcile 后发送给前端的事件载荷。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +52,10 @@ pub struct CliServicesUpdatedEvent {
     pub connection_id: Option<String>,
     /// 单调递增的事件序号，前端用于识别乱序事件。
     pub revision: u64,
+    /// 本次健康检查是否已经成功改变生命周期 MAP。
+    pub changed: bool,
+    /// 健康检查异常的明确业务信号；为空表示检查过程没有异常。
+    pub errors: Vec<String>,
 }
 
 /// 向前端发送 CLI 目录更新事件。
@@ -120,5 +134,26 @@ mod tests {
 
         assert_eq!(payload["phase"], "connecting-ssh");
         assert_eq!(payload["message"], "正在建立 SSH 连接……");
+    }
+
+    #[test]
+    fn cli_services_updated_event_exposes_changes_and_health_errors() {
+        assert_eq!(CLI_SERVICES_UPDATED_EVENT, "cli-services-updated");
+
+        let payload = serde_json::to_value(CliServicesUpdatedEvent {
+            scope: "local".to_owned(),
+            connection_id: None,
+            revision: 7,
+            changed: false,
+            errors: vec!["Claude 服务启动失败".to_owned()],
+        })
+        .expect("CLI services event DTO should serialize");
+
+        assert_eq!(payload["scope"], "local");
+        assert_eq!(payload["connectionId"], serde_json::Value::Null);
+        assert_eq!(payload["revision"], 7);
+        assert_eq!(payload["changed"], false);
+        assert_eq!(payload["errors"][0], "Claude 服务启动失败");
+        assert!(payload.get("connection_id").is_none());
     }
 }

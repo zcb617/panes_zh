@@ -15,7 +15,9 @@ use tauri::AppHandle;
 use crate::{
     db::{self, Database},
     local_cli_service_lifecycle::LocalCliServiceLifecycle,
-    message_notify_helper::{notify_cli_services_updated, CliServicesUpdatedEvent},
+    message_notify_helper::{
+        notify_cli_services_updated, CliHealthReconcileResult, CliServicesUpdatedEvent,
+    },
     ssh::cli_service_lifecycle,
 };
 
@@ -32,7 +34,9 @@ static NEXT_EVENT_REVISION: AtomicU64 = AtomicU64::new(1);
 /// 事件——前端调用方在拿到返回后自行刷新 CLI 目录缓存，保证"转圈结束"发生在
 /// 新数据落地之后，事件路径无法保证这个顺序。
 #[tauri::command]
-pub async fn refresh_local_cli_health() -> Result<bool, String> {
+// 旧命令只返回 bool，前端会把异常导致的 false 当作正常无变化：
+// pub async fn refresh_local_cli_health() -> Result<bool, String> {
+pub async fn refresh_local_cli_health() -> Result<CliHealthReconcileResult, String> {
     Ok(LocalCliServiceLifecycle::reconcile_health().await)
 }
 
@@ -50,13 +54,16 @@ pub fn spawn_cli_service_health_scheduler(app: AppHandle, db: Database) {
 async fn run_local_health_loop(app: AppHandle) {
     loop {
         tokio::time::sleep(LOCAL_HEALTH_CHECK_INTERVAL).await;
-        if !LocalCliServiceLifecycle::reconcile_health().await {
+        let result = LocalCliServiceLifecycle::reconcile_health().await;
+        if !result.changed && result.errors.is_empty() {
             continue;
         }
         let event = CliServicesUpdatedEvent {
             scope: "local".to_string(),
             connection_id: None,
             revision: NEXT_EVENT_REVISION.fetch_add(1, Ordering::Relaxed),
+            changed: result.changed,
+            errors: result.errors,
         };
         if let Err(error) = notify_cli_services_updated(&app, event) {
             log::warn!("发送本机 CLI 目录更新事件失败: {error:#}");
@@ -72,18 +79,33 @@ async fn run_remote_health_loop(app: AppHandle, db: Database) {
             Ok(connection_ids) => connection_ids,
             Err(error) => {
                 log::warn!("健康检查读取 SSH 连接列表失败: {error:#}");
+                let event = CliServicesUpdatedEvent {
+                    scope: "ssh".to_string(),
+                    connection_id: None,
+                    revision: NEXT_EVENT_REVISION.fetch_add(1, Ordering::Relaxed),
+                    changed: false,
+                    errors: vec![format!(
+                        "Panes 无法读取需要健康检查的 SSH 连接列表：{error:#}"
+                    )],
+                };
+                if let Err(notify_error) = notify_cli_services_updated(&app, event) {
+                    log::warn!("发送 SSH 健康检查异常事件失败: {notify_error:#}");
+                }
                 continue;
             }
         };
 
         for connection_id in connection_ids {
-            if !cli_service_lifecycle::reconcile_health(&connection_id).await {
+            let result = cli_service_lifecycle::reconcile_health(&connection_id).await;
+            if !result.changed && result.errors.is_empty() {
                 continue;
             }
             let event = CliServicesUpdatedEvent {
                 scope: "ssh".to_string(),
                 connection_id: Some(connection_id.clone()),
                 revision: NEXT_EVENT_REVISION.fetch_add(1, Ordering::Relaxed),
+                changed: result.changed,
+                errors: result.errors,
             };
             if let Err(error) = notify_cli_services_updated(&app, event) {
                 log::warn!(

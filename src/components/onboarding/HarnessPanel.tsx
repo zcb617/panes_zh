@@ -263,9 +263,13 @@ export function HarnessPanel() {
     try {
       // 先等后端健康检查 reconcile 完生命周期 MAP，再刷新本机 CLI 目录缓存，
       // 保证转圈结束时 live 订阅读到的已经是新数据。
-      await ipc.refreshLocalCliHealth();
+      const result = await ipc.refreshLocalCliHealth();
       await applyCliServicesUpdated({ scope: "local", connectionId: null, revision: 0 });
       const { toast } = await import("../../stores/toastStore");
+      if (result.errors.length > 0) {
+        toast.error(result.errors.join("\n"));
+        return;
+      }
       toast.success(t("harnesses.refreshSynced"));
     } catch (error) {
       console.warn("本机 CLI 健康检查失败:", error);

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, LazyLock,
@@ -12,7 +13,10 @@ use tokio::sync::{Mutex, RwLock};
 use crate::engines::{
     claude_sidecar::ClaudeSidecarEngine, codex::CodexEngine, opencode::OpenCodeEngine,
 };
-use crate::{commands::harness::detect_via_login_shell, runtime_env};
+use crate::{
+    commands::harness::detect_via_login_shell, message_notify_helper::CliHealthReconcileResult,
+    runtime_env,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LocalCliServiceEntryState {
@@ -54,6 +58,7 @@ impl LocalCliService {
 #[derive(Default)]
 struct LocalCliServiceLifecycleRegistry {
     services: RwLock<HashMap<String, Arc<LocalCliService>>>,
+    resource_dir: RwLock<Option<PathBuf>>,
     mutation_lock: Mutex<()>,
 }
 
@@ -72,7 +77,11 @@ pub(crate) struct LocalCliServiceLifecycle;
 
 impl LocalCliServiceLifecycle {
     /// 探测本机三种聊天 CLI，并将已安装的 CLI 服务逐个登记到生命周期 MAP。
-    pub(crate) async fn init() -> anyhow::Result<()> {
+    // 旧入口没有接收 Tauri 实际解析出的安装包资源目录，Claude 生命周期只能回退到
+    // 编译期路径；该路径在安装后的用户机器上不存在：
+    // pub(crate) async fn init() -> anyhow::Result<()> {
+    pub(crate) async fn init(resource_dir: Option<PathBuf>) -> anyhow::Result<()> {
+        *LOCAL_CLI_SERVICES.resource_dir.write().await = resource_dir;
         for (cli_id, command) in LOCAL_CLI_COMMANDS {
             let found = runtime_env::resolve_executable(command).is_some()
                 || detect_via_login_shell(command, "--version").await.is_some();
@@ -93,13 +102,20 @@ impl LocalCliServiceLifecycle {
     ///
     /// 探测到但未登记的 CLI 立即登记（覆盖 Panes 运行期间新安装的情况）；
     /// 已登记但探测不到的 CLI 移除登记（覆盖运行期间被卸载的情况）。
-    /// 返回本次 reconcile 是否对 MAP 做过增删。
-    pub(crate) async fn reconcile_health() -> bool {
+    /// 返回本次 reconcile 是否对 MAP 做过增删，以及阻止某项增删完成的异常。
+    // 旧返回值只有 bool，登记失败与正常无变化都会返回 false，调用方无法区分：
+    // pub(crate) async fn reconcile_health() -> bool {
+    pub(crate) async fn reconcile_health() -> CliHealthReconcileResult {
         let mut changed = false;
+        let mut errors = Vec::new();
         for (cli_id, command) in LOCAL_CLI_COMMANDS {
             let found = runtime_env::resolve_executable(command).is_some()
                 || detect_via_login_shell(command, "--version").await.is_some();
-            let registered = LOCAL_CLI_SERVICES.services.read().await.contains_key(cli_id);
+            let registered = LOCAL_CLI_SERVICES
+                .services
+                .read()
+                .await
+                .contains_key(cli_id);
             if found == registered {
                 continue;
             }
@@ -112,21 +128,33 @@ impl LocalCliServiceLifecycle {
                     }
                     Err(error) => {
                         log::warn!("健康检查登记本机 CLI 失败: cli_id={cli_id} error={error:#}");
+                        errors.push(format!(
+                            "本机 {cli_id} CLI 已被探测到，但 Panes 无法启动并登记该服务：{error:#}"
+                        ));
                     }
                 }
             } else {
                 match Self::terminate(cli_id).await {
                     Ok(_) => {
                         changed = true;
-                        log::info!("健康检查发现本机 CLI 已不可用，已移除生命周期登记: cli_id={cli_id}");
+                        log::info!(
+                            "健康检查发现本机 CLI 已不可用，已移除生命周期登记: cli_id={cli_id}"
+                        );
                     }
                     Err(error) => {
-                        log::warn!("健康检查移除本机 CLI 登记失败: cli_id={cli_id} error={error:#}");
+                        log::warn!(
+                            "健康检查移除本机 CLI 登记失败: cli_id={cli_id} error={error:#}"
+                        );
+                        errors.push(format!(
+                            "本机 {cli_id} CLI 已不可用，但 Panes 无法移除该服务登记：{error:#}"
+                        ));
                     }
                 }
             }
         }
-        changed
+        // 旧实现只返回 changed，异常信息到日志为止：
+        // changed
+        CliHealthReconcileResult { changed, errors }
     }
 
     /// 取得已经由 Panes 启动阶段登记的本地 CLI 服务；该方法不会启动服务。
@@ -219,6 +247,13 @@ impl LocalCliServiceLifecycleRegistry {
             }
             "claude" => {
                 let engine = Arc::new(ClaudeSidecarEngine::default());
+                let resource_dir = self.resource_dir.read().await.clone();
+                let resource_engine = engine.clone();
+                tokio::task::spawn_blocking(move || {
+                    resource_engine.set_resource_dir(resource_dir);
+                })
+                .await
+                .context("向 Claude 本地 CLI 服务注入安装包资源目录失败")?;
                 engine.prewarm().await?;
                 LocalCliHandle::Claude(engine)
             }

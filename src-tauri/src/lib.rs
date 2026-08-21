@@ -168,6 +168,32 @@ pub fn run() {
         .manage(computer_control_sdk)
         .menu(move |handle| build_app_menu(handle, app_locale))
         .setup(|app| {
+            // 旧实现 `.ok()` 会吞掉 resource_dir 获取异常，后续 Claude 生命周期只能
+            // 使用安装后不存在的编译期路径：
+            // let resource_dir = app.path().resource_dir().ok();
+            let resource_dir = match app.path().resource_dir() {
+                Ok(resource_dir) => Some(resource_dir),
+                Err(error) => {
+                    log::error!("Panes 启动时获取 resource_dir 失败: {error:#}");
+                    let continue_startup = app
+                        .dialog()
+                        .message(format!(
+                            "Panes 无法获取安装包资源路径（resource_dir）。\n\n这会影响 Claude Code 的正常使用。\n\n错误详情：{error}\n\n是否仍要继续启动 Panes？"
+                        ))
+                        .title("Panes 启动错误")
+                        .kind(MessageDialogKind::Error)
+                        .buttons(MessageDialogButtons::OkCancelCustom(
+                            "继续启动".to_string(),
+                            "结束 Panes".to_string(),
+                        ))
+                        .blocking_show();
+                    if !continue_startup {
+                        app.handle().exit(1);
+                        return Ok(());
+                    }
+                    None
+                }
+            };
             let main_window = create_main_window(app.handle())?;
             #[cfg(not(target_os = "linux"))]
             let _ = &main_window;
@@ -201,7 +227,6 @@ pub fn run() {
             });
 
             let handle = app.handle().clone();
-            let resource_dir = app.path().resource_dir().ok();
             let state = app.state::<AppState>().inner().clone();
             let computer_control_sdk = app
                 .state::<Arc<computer_control_sdk::CuaDriverSdk>>()
@@ -229,9 +254,11 @@ pub fn run() {
             state
                 .engines
                 .set_computer_control_service(state.computer_control_service.clone());
-            state.engines.set_resource_dir(resource_dir);
+            // 旧调用会移动 resource_dir，导致本地 CLI 生命周期拿不到同一资源根目录：
+            // state.engines.set_resource_dir(resource_dir);
+            state.engines.set_resource_dir(resource_dir.clone());
             if let Err(error) = tauri::async_runtime::block_on(
-                local_cli_service_lifecycle::LocalCliServiceLifecycle::init(),
+                local_cli_service_lifecycle::LocalCliServiceLifecycle::init(resource_dir),
             ) {
                 log::warn!("Panes 启动时初始化本地 CLI 服务失败: {error:#}");
             }

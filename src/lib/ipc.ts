@@ -939,7 +939,10 @@ export const ipc = {
     invoke<Record<string, string>>("get_harness_launch_args"),
   setHarnessLaunchArgs: (harnessId: string, args: string) =>
     invoke<string>("set_harness_launch_args", { harnessId, args }),
-  refreshLocalCliHealth: () => invoke<boolean>("refresh_local_cli_health"),
+  // 旧契约只有 boolean，无法区分“正常无变化”和“异常导致未变化”：
+  // refreshLocalCliHealth: () => invoke<boolean>("refresh_local_cli_health"),
+  refreshLocalCliHealth: () =>
+    invoke<CliHealthReconcileResult>("refresh_local_cli_health"),
   getDefaultAutonomyPreset: () =>
     invoke<string | null>("get_default_autonomy_preset"),
   setDefaultAutonomyPreset: (preset: string | null) =>
@@ -1036,6 +1039,13 @@ export async function listenSshRemoteProjectSessionsRefreshed(
 
 export const CLI_SERVICES_UPDATED_EVENT = "cli-services-updated";
 
+export interface CliHealthReconcileResult {
+  /** 本次检查是否已经成功改变 CLI 生命周期登记。 */
+  changed: boolean;
+  /** 阻止某项生命周期登记变化完成的异常；空数组表示没有异常。 */
+  errors: string[];
+}
+
 export interface CliServicesUpdatedEvent {
   /** 发生变化的范围：local 表示本机，ssh 表示指定远端连接。 */
   scope: "local" | "ssh";
@@ -1043,6 +1053,10 @@ export interface CliServicesUpdatedEvent {
   connectionId: string | null;
   /** 单调递增的事件序号，用于识别乱序事件。 */
   revision: number;
+  /** 本次检查是否已经成功改变 CLI 生命周期登记。 */
+  changed: boolean;
+  /** 健康检查异常的明确业务信号。 */
+  errors: string[];
 }
 
 export async function listenCliServicesUpdated(

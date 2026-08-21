@@ -647,7 +647,9 @@ interface EngineState {
   error?: string;
   load: (workspaceId?: string | null) => Promise<void>;
   preloadCatalogs: () => Promise<void>;
-  applyCliServicesUpdated: (event: CliServicesUpdatedEvent) => Promise<void>;
+  applyCliServicesUpdated: (
+    event: Pick<CliServicesUpdatedEvent, "scope" | "connectionId" | "revision">,
+  ) => Promise<void>;
   refreshEngineCatalog: (engineId: string) => Promise<EngineInfo | null>;
   ensureHealth: (
     engineId: string,

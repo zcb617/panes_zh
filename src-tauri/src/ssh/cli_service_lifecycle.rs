@@ -12,7 +12,10 @@ use std::{
 use anyhow::Context;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::ssh::cli_tunnel_registry::{self, SshCliTunnel};
+use crate::{
+    message_notify_helper::CliHealthReconcileResult,
+    ssh::cli_tunnel_registry::{self, SshCliTunnel},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SshCliServiceEntryState {
@@ -177,9 +180,13 @@ pub async fn terminate(connection_id: &str, cli_id: &str) -> anyhow::Result<bool
 ///
 /// 已登记但连续两次探活失败的服务移除登记；隧道和远端服务都存活但未登记的
 /// 服务补登记。隧道的断线恢复由 `cli_tunnel_registry` 负责，本函数只观测远端
-/// 服务进程并 reconcile MAP。返回本次 reconcile 是否对 MAP 做过增删。
-pub async fn reconcile_health(connection_id: &str) -> bool {
+/// 服务进程并 reconcile MAP。返回本次 reconcile 是否对 MAP 做过增删，以及阻止
+/// 某项增删完成的异常。
+// 旧返回值只有 bool，远端登记异常与正常无变化同样无法区分：
+// pub async fn reconcile_health(connection_id: &str) -> bool {
+pub async fn reconcile_health(connection_id: &str) -> CliHealthReconcileResult {
     let mut changed = false;
+    let mut errors = Vec::new();
 
     let registered = {
         let services = SSH_CLI_SERVICES.services.read().await;
@@ -214,6 +221,9 @@ pub async fn reconcile_health(connection_id: &str) -> bool {
                 log::warn!(
                     "健康检查移除 SSH 远端 CLI 登记失败: connection_id={connection_id} cli_id={cli_id} error={error:#}"
                 );
+                errors.push(format!(
+                    "SSH 连接 {connection_id} 的 {cli_id} CLI 已不可用，但 Panes 无法移除该服务登记：{error:#}"
+                ));
             }
         }
     }
@@ -244,11 +254,16 @@ pub async fn reconcile_health(connection_id: &str) -> bool {
                 log::warn!(
                     "健康检查补登记 SSH 远端 CLI 服务失败: connection_id={connection_id} cli_id={cli_id} error={error:#}"
                 );
+                errors.push(format!(
+                    "SSH 连接 {connection_id} 的 {cli_id} CLI 服务仍在运行，但 Panes 无法补充生命周期登记：{error:#}"
+                ));
             }
         }
     }
 
-    changed
+    // 旧实现只返回 changed，异常信息到日志为止：
+    // changed
+    CliHealthReconcileResult { changed, errors }
 }
 
 /// 终止当前应用已登记的全部远端 CLI 服务。

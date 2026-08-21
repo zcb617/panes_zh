@@ -410,7 +410,12 @@ export function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listenCliServicesUpdated((event) => {
-      void applyCliServicesUpdated(event);
+      if (event.errors.length > 0) {
+        toast.error(event.errors.join("\n"));
+      }
+      if (event.changed) {
+        void applyCliServicesUpdated(event);
+      }
     }).then((fn) => {
       if (disposed) {
         fn();
