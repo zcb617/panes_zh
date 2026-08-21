@@ -578,6 +578,9 @@ pub async fn attach_opencode_remote_session(
     let repo_id =
         resolve_codex_remote_thread_repo_id(&workspace.root_path, &repos, &remote_session.cwd)?;
     let title = build_opencode_remote_session_title(&remote_session);
+    // 只有远端返回并成功解析的更新时间才覆盖本地活动时间，避免写入 Unix epoch。
+    let remote_last_activity_at = (remote_session.updated_at > 0)
+        .then(|| codex_remote_thread_timestamp_to_rfc3339(remote_session.updated_at));
 
     if let Some(existing) = existing_local_thread {
         let metadata = build_opencode_remote_session_metadata(
@@ -585,18 +588,25 @@ pub async fn attach_opencode_remote_session(
             &remote_session,
             &normalized_model_id,
         );
+        let existing_last_activity_at = remote_last_activity_at.clone();
         return run_db(db, move |db| {
             let thread = match db::threads::restore_thread(db, &existing.id) {
                 Ok(restored) => restored,
                 Err(_) => existing,
             };
-            db::threads::update_thread_runtime_snapshot(
+            let updated = db::threads::update_thread_runtime_snapshot(
                 db,
                 &thread.id,
                 Some(&title),
                 Some(ThreadStatusDto::Idle),
                 Some(&metadata),
-            )
+            )?;
+            match existing_last_activity_at.as_deref() {
+                Some(last_activity_at) => {
+                    db::threads::update_thread_last_activity(db, &updated.id, last_activity_at)
+                }
+                None => Ok(updated),
+            }
         })
         .await;
     }
@@ -613,13 +623,19 @@ pub async fn attach_opencode_remote_session(
             &title,
         )?;
         db::threads::set_engine_thread_id(db, &created.id, &engine_thread_id)?;
-        db::threads::update_thread_runtime_snapshot(
+        let updated = db::threads::update_thread_runtime_snapshot(
             db,
             &created.id,
             Some(&title),
             Some(ThreadStatusDto::Idle),
             Some(&metadata),
-        )
+        )?;
+        match remote_last_activity_at.as_deref() {
+            Some(last_activity_at) => {
+                db::threads::update_thread_last_activity(db, &updated.id, last_activity_at)
+            }
+            None => Ok(updated),
+        }
     })
     .await
 }
