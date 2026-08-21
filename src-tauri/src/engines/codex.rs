@@ -5344,7 +5344,7 @@ fn thread_runtime_from_start_response(
     fallback_permission_profile: Option<serde_json::Value>,
     fallback_approvals_reviewer: Option<String>,
     fallback_sandbox_policy: &serde_json::Value,
-    fallback_reasoning_effort: Option<String>,
+    requested_reasoning_effort: Option<String>,
     fallback_service_tier: Option<String>,
     fallback_personality: Option<String>,
     fallback_output_schema: Option<serde_json::Value>,
@@ -5374,16 +5374,20 @@ fn thread_runtime_from_start_response(
             .cloned()
             .filter(|value| !value.is_null())
             .unwrap_or_else(|| fallback_sandbox_policy.clone()),
-        reasoning_effort: extract_any_string(response, &["reasoningEffort", "reasoning_effort"]),
+        // Codex thread/start and thread/fork responses expose the model default effort.
+        // The requested Panes effort is authoritative for the subsequent turn/start.
+        // reasoning_effort: extract_any_string(response, &["reasoningEffort", "reasoning_effort"]),
+        reasoning_effort: requested_reasoning_effort.clone(),
         service_tier: extract_any_string(response, &["serviceTier", "service_tier"]),
         personality: extract_any_string(response, &["personality"]),
         output_schema: fallback_output_schema,
         native_plan_mode_active: false,
     };
 
-    if runtime.reasoning_effort.is_none() {
-        runtime.reasoning_effort = fallback_reasoning_effort;
-    }
+    // 旧逻辑保留在注释中：线程创建响应返回值不能覆盖 Panes 本轮请求值。
+    // if runtime.reasoning_effort.is_none() {
+    //     runtime.reasoning_effort = fallback_reasoning_effort;
+    // }
     if runtime.service_tier.is_none() {
         runtime.service_tier = fallback_service_tier;
     }
@@ -8698,7 +8702,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_runtime_uses_effective_values_from_start_response() {
+    fn thread_runtime_preserves_requested_reasoning_effort_from_start_response() {
         let response = json!({
             "cwd": "/tmp/effective",
             "model": "gpt-5.3-codex",
@@ -8734,7 +8738,9 @@ mod tests {
                 "networkAccess": "restricted"
             })
         );
-        assert_eq!(runtime.reasoning_effort.as_deref(), Some("high"));
+        // 旧错误断言保留在注释中：
+        // assert_eq!(runtime.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(runtime.reasoning_effort.as_deref(), Some("medium"));
         assert_eq!(runtime.service_tier.as_deref(), Some("flex"));
         assert_eq!(runtime.personality.as_deref(), Some("friendly"));
         assert_eq!(runtime.output_schema, Some(json!({"type":"object"})));
@@ -8768,6 +8774,91 @@ mod tests {
         assert_eq!(runtime.service_tier.as_deref(), Some("fast"));
         assert_eq!(runtime.personality.as_deref(), Some("pragmatic"));
         assert_eq!(runtime.output_schema, Some(json!(true)));
+    }
+
+    #[test]
+    fn thread_runtime_keeps_requested_none_when_start_response_has_default_effort() {
+        let response = json!({
+            "reasoningEffort": "medium"
+        });
+        let runtime = thread_runtime_from_start_response(
+            &response,
+            "/tmp/fallback",
+            "gpt-5",
+            &json!("on-request"),
+            None,
+            None,
+            &json!({"type":"workspaceWrite"}),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(runtime.reasoning_effort, None);
+    }
+
+    #[tokio::test]
+    async fn build_turn_start_params_uses_requested_effort_after_start_response_default() {
+        let response = json!({
+            "reasoningEffort": "medium"
+        });
+        let runtime = thread_runtime_from_start_response(
+            &response,
+            "/tmp/workspace",
+            "gpt-5.4",
+            &json!("on-request"),
+            None,
+            None,
+            &json!({"type":"workspaceWrite"}),
+            Some("high".to_string()),
+            None,
+            None,
+            None,
+        );
+        let input = TurnInput {
+            message: "Inspect the repo".to_string(),
+            attachments: Vec::new(),
+            plan_mode: false,
+            input_items: vec![TurnInputItem::Text {
+                text: "Inspect the repo".to_string(),
+            }],
+        };
+
+        let params = build_turn_start_params(
+            "thread-123",
+            Some(&runtime),
+            &input,
+            PlanModeActivation::Disabled,
+        )
+        .await
+        .expect("turn/start params");
+
+        assert_eq!(params.get("effort"), Some(&json!("high")));
+
+        let runtime_without_requested_effort = thread_runtime_from_start_response(
+            &response,
+            "/tmp/workspace",
+            "gpt-5.4",
+            &json!("on-request"),
+            None,
+            None,
+            &json!({"type":"workspaceWrite"}),
+            None,
+            None,
+            None,
+            None,
+        );
+        let params_without_requested_effort = build_turn_start_params(
+            "thread-123",
+            Some(&runtime_without_requested_effort),
+            &input,
+            PlanModeActivation::Disabled,
+        )
+        .await
+        .expect("turn/start params without effort");
+
+        assert!(!params_without_requested_effort.as_object().unwrap().contains_key("effort"));
     }
 
     #[test]

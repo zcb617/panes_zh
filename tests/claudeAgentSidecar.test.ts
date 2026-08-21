@@ -344,6 +344,236 @@ describe("claude-agent-sdk-server sidecar", () => {
     });
   });
 
+  it("updates the model and effort before sending the next persistent-session message", async () => {
+    const harness = await spawnHarness({
+      persistentInput: true,
+      emitPersistentRuntimeState: true,
+      sessionId: "persistent-runtime-session",
+    });
+
+    harness.send({
+      id: "create-runtime-session",
+      method: "create_session_handle",
+      params: {
+        threadId: "thread-runtime",
+        handleId: "handle-runtime",
+        prompt: "first message",
+        cwd: repoRoot,
+        model: "model-a",
+        reasoningEffort: "high",
+      },
+    });
+    await harness.waitFor(
+      (event) => event.id === "create-runtime-session" && event.type === "session_handle_created",
+    );
+    await harness.waitFor(
+      (event) => event.id === "create-runtime-session" && event.type === "turn_completed",
+    );
+
+    harness.send({
+      id: "send-runtime-session",
+      method: "send_session_message",
+      params: {
+        threadId: "thread-runtime",
+        prompt: "second message",
+        cwd: repoRoot,
+        model: "model-b",
+        reasoningEffort: "low",
+      },
+    });
+    await harness.waitFor(
+      (event) => event.id === "send-runtime-session" && event.type === "session_message_accepted",
+    );
+    const secondText = await harness.waitFor(
+      (event) => {
+        if (event.id !== "create-runtime-session" || event.type !== "text_delta") {
+          return false;
+        }
+        try {
+          const state = JSON.parse(String(event.content)) as { text?: string };
+          return state.text === "second message";
+        } catch {
+          return false;
+        }
+      },
+    );
+    const state = JSON.parse(String(secondText.content)) as {
+      text: string;
+      currentModel: string | null;
+      currentEffort: string | null;
+      runtimeControlCalls: Array<{ type: string; value: string | null }>;
+    };
+
+    expect(state).toMatchObject({
+      text: "second message",
+      currentModel: "model-b",
+      currentEffort: "low",
+    });
+    expect(state.runtimeControlCalls).toEqual([
+      { type: "set_model", value: "model-b" },
+      { type: "apply_flag_settings", value: "low" },
+    ]);
+  });
+
+  it("clears the previous persistent-session effort when the next value is None", async () => {
+    const harness = await spawnHarness({
+      persistentInput: true,
+      emitPersistentRuntimeState: true,
+      sessionId: "persistent-clear-effort-session",
+    });
+
+    harness.send({
+      id: "create-clear-effort-session",
+      method: "create_session_handle",
+      params: {
+        threadId: "thread-clear-effort",
+        handleId: "handle-clear-effort",
+        prompt: "first message",
+        cwd: repoRoot,
+        model: "model-a",
+        reasoningEffort: "high",
+      },
+    });
+    await harness.waitFor(
+      (event) => event.id === "create-clear-effort-session" && event.type === "session_handle_created",
+    );
+    await harness.waitFor(
+      (event) => event.id === "create-clear-effort-session" && event.type === "turn_completed",
+    );
+
+    harness.send({
+      id: "send-clear-effort-session",
+      method: "send_session_message",
+      params: {
+        threadId: "thread-clear-effort",
+        prompt: "second message",
+        cwd: repoRoot,
+        model: "model-a",
+        reasoningEffort: null,
+      },
+    });
+    await harness.waitFor(
+      (event) => event.id === "send-clear-effort-session" && event.type === "session_message_accepted",
+    );
+    const secondText = await harness.waitFor(
+      (event) => {
+        if (event.id !== "create-clear-effort-session" || event.type !== "text_delta") {
+          return false;
+        }
+        try {
+          const state = JSON.parse(String(event.content)) as { text?: string };
+          return state.text === "second message";
+        } catch {
+          return false;
+        }
+      },
+    );
+    const state = JSON.parse(String(secondText.content)) as {
+      currentEffort: string | null;
+      runtimeControlCalls: Array<{ type: string; value: string | null }>;
+    };
+
+    expect(state.currentEffort).toBeNull();
+    expect(state.runtimeControlCalls).toEqual([
+      { type: "set_model", value: "model-a" },
+      { type: "apply_flag_settings", value: null },
+    ]);
+  });
+
+  it("does not accept a persistent message when setModel fails", async () => {
+    const harness = await spawnHarness({
+      persistentInput: true,
+      failSetModel: true,
+      sessionId: "persistent-set-model-failure-session",
+    });
+
+    harness.send({
+      id: "create-set-model-failure-session",
+      method: "create_session_handle",
+      params: {
+        threadId: "thread-set-model-failure",
+        handleId: "handle-set-model-failure",
+        prompt: "first message",
+        cwd: repoRoot,
+      },
+    });
+    await harness.waitFor(
+      (event) => event.id === "create-set-model-failure-session" && event.type === "session_handle_created",
+    );
+    await harness.waitFor(
+      (event) => event.id === "create-set-model-failure-session" && event.type === "turn_completed",
+    );
+    const eventCountBeforeSend = harness.events.length;
+
+    harness.send({
+      id: "send-set-model-failure-session",
+      method: "send_session_message",
+      params: {
+        threadId: "thread-set-model-failure",
+        prompt: "second message",
+        cwd: repoRoot,
+        model: "model-b",
+        reasoningEffort: "low",
+      },
+    });
+    await expect(
+      harness.waitFor(
+        (event) => event.id === "send-set-model-failure-session" && event.type === "error",
+      ),
+    ).resolves.toMatchObject({ message: "Mock Claude query setModel failed." });
+
+    const newEvents = harness.events.slice(eventCountBeforeSend);
+    expect(newEvents.some((event) => event.type === "session_message_accepted")).toBe(false);
+    expect(newEvents.some((event) => event.type === "text_delta")).toBe(false);
+  });
+
+  it("does not accept a persistent message when applyFlagSettings fails", async () => {
+    const harness = await spawnHarness({
+      persistentInput: true,
+      failApplyFlagSettings: true,
+      sessionId: "persistent-effort-failure-session",
+    });
+
+    harness.send({
+      id: "create-effort-failure-session",
+      method: "create_session_handle",
+      params: {
+        threadId: "thread-effort-failure",
+        handleId: "handle-effort-failure",
+        prompt: "first message",
+        cwd: repoRoot,
+      },
+    });
+    await harness.waitFor(
+      (event) => event.id === "create-effort-failure-session" && event.type === "session_handle_created",
+    );
+    await harness.waitFor(
+      (event) => event.id === "create-effort-failure-session" && event.type === "turn_completed",
+    );
+    const eventCountBeforeSend = harness.events.length;
+
+    harness.send({
+      id: "send-effort-failure-session",
+      method: "send_session_message",
+      params: {
+        threadId: "thread-effort-failure",
+        prompt: "second message",
+        cwd: repoRoot,
+        model: "model-b",
+        reasoningEffort: "low",
+      },
+    });
+    await expect(
+      harness.waitFor(
+        (event) => event.id === "send-effort-failure-session" && event.type === "error",
+      ),
+    ).resolves.toMatchObject({ message: "Mock Claude query applyFlagSettings failed." });
+
+    const newEvents = harness.events.slice(eventCountBeforeSend);
+    expect(newEvents.some((event) => event.type === "session_message_accepted")).toBe(false);
+    expect(newEvents.some((event) => event.type === "text_delta")).toBe(false);
+  });
+
   it("denies Write in read-only mode even when writableRoots are present", async () => {
     const harness = await spawnHarness({
       steps: [

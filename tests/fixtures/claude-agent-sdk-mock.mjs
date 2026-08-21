@@ -51,6 +51,10 @@ async function runHooks(options, hookName, input) {
 export function query({ prompt, options }) {
   const scenario = parseScenario();
   let closed = false;
+  // 模拟 Claude query 当前运行配置，供复用会话测试验证每轮更新。
+  let currentModel = options?.model;
+  let currentEffort = options?.effort ?? null;
+  const runtimeControlCalls = [];
 
   const iterator = (async function* () {
     const observations = [];
@@ -78,8 +82,16 @@ export function query({ prompt, options }) {
                 .map((block) => block.text)
                 .join("")
             : "";
+        const result = scenario.emitPersistentRuntimeState === true
+          ? JSON.stringify({
+              text,
+              currentModel: currentModel ?? null,
+              currentEffort,
+              runtimeControlCalls: clone(runtimeControlCalls),
+            })
+          : text;
         yield defaultResult({
-          result: text,
+          result,
           session_id: scenario.sessionId ?? "mock-session",
         });
       }
@@ -172,6 +184,21 @@ export function query({ prompt, options }) {
 
   iterator.close = () => {
     closed = true;
+  };
+  iterator.setModel = async (model) => {
+    if (scenario.failSetModel === true) {
+      throw new Error("Mock Claude query setModel failed.");
+    }
+    runtimeControlCalls.push({ type: "set_model", value: model ?? null });
+    currentModel = model;
+  };
+  iterator.applyFlagSettings = async (settings) => {
+    if (scenario.failApplyFlagSettings === true) {
+      throw new Error("Mock Claude query applyFlagSettings failed.");
+    }
+    const effortLevel = settings?.effortLevel ?? null;
+    runtimeControlCalls.push({ type: "apply_flag_settings", value: effortLevel });
+    currentEffort = effortLevel;
   };
   iterator.interrupt = async () => undefined;
   iterator.streamInput = async (stream) => {
