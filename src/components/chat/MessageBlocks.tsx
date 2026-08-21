@@ -370,20 +370,72 @@ function getActionCardAnchorId(
   return getMessageBlockKey(segment.block, segment.index, safeBlocks);
 }
 
-export function buildBlockSegments(blocks: ContentBlock[], isStreaming?: boolean): BlockSegment[] {
+export function buildBlockSegments(
+  blocks: ContentBlock[],
+  isStreaming?: boolean,
+  engineId?: string,
+): BlockSegment[] {
+  type DisplayBlock = {
+    /** 展示时使用的内容块。 */
+    block: ContentBlock;
+    /** 内容块在原始 blocks 数组中的索引。 */
+    index: number;
+  };
+
+  // Codex 按回复边界重排 Hook，确保同一回复段的工具调用保持连续。
+  const indexedBlocks: DisplayBlock[] = blocks.map((block, index) => ({
+    block,
+    index,
+  }));
+  const displayBlocks: DisplayBlock[] = [];
+  const firstTextIndex = indexedBlocks.findIndex((entry) => entry.block.type === "text");
+  if (engineId !== "codex" || firstTextIndex < 0) {
+    displayBlocks.push(...indexedBlocks);
+  } else {
+    displayBlocks.push(...indexedBlocks.slice(0, firstTextIndex));
+    let textIndex = firstTextIndex;
+    while (textIndex < indexedBlocks.length) {
+      displayBlocks.push(indexedBlocks[textIndex]);
+      let nextTextIndex = textIndex + 1;
+      while (
+        nextTextIndex < indexedBlocks.length &&
+        indexedBlocks[nextTextIndex].block.type !== "text"
+      ) {
+        nextTextIndex++;
+      }
+
+      const sectionHooks: DisplayBlock[] = [];
+      const sectionOtherBlocks: DisplayBlock[] = [];
+      for (const entry of indexedBlocks.slice(textIndex + 1, nextTextIndex)) {
+        if (
+          entry.block.type === "notice" &&
+          (entry.block.kind.startsWith("hook_") ||
+            entry.block.kind.startsWith("codex_hook_"))
+        ) {
+          sectionHooks.push(entry);
+        } else {
+          sectionOtherBlocks.push(entry);
+        }
+      }
+      displayBlocks.push(...sectionHooks, ...sectionOtherBlocks);
+      textIndex = nextTextIndex;
+    }
+  }
+
   // Phase 1: build flat inner segments
   const flat: BlockSegment[] = [];
   let i = 0;
-  while (i < blocks.length) {
-    const block = blocks[i];
+  while (i < displayBlocks.length) {
+    const displayBlock = displayBlocks[i];
+    const block = displayBlock.block;
     if (
       block.type === "notice" &&
       (block.kind.startsWith("hook_") || block.kind.startsWith("codex_hook_"))
     ) {
       const hookBlocks: NoticeBlock[] = [];
       const indices: number[] = [];
-      while (i < blocks.length) {
-        const hookBlock = blocks[i];
+      while (i < displayBlocks.length) {
+        const hookBlock = displayBlocks[i].block;
         if (
           hookBlock.type !== "notice" ||
           (!hookBlock.kind.startsWith("hook_") &&
@@ -392,21 +444,21 @@ export function buildBlockSegments(blocks: ContentBlock[], isStreaming?: boolean
           break;
         }
         hookBlocks.push(hookBlock);
-        indices.push(i);
+        indices.push(displayBlocks[i].index);
         i++;
       }
       flat.push({ kind: "hook-group", blocks: hookBlocks, indices });
       continue;
     }
     if (block.type !== "action") {
-      flat.push({ kind: "single", block, index: i });
+      flat.push({ kind: "single", block, index: displayBlock.index });
       i++;
       continue;
     }
 
     // Collect consecutive action blocks
     const runStart = i;
-    while (i < blocks.length && blocks[i].type === "action") {
+    while (i < displayBlocks.length && displayBlocks[i].block.type === "action") {
       i++;
     }
     const runEnd = i; // exclusive
@@ -415,9 +467,13 @@ export function buildBlockSegments(blocks: ContentBlock[], isStreaming?: boolean
     // completed sub-runs of 3+ become groups
     let subStart = runStart;
     while (subStart < runEnd) {
-      const actionBlock = blocks[subStart] as ActionBlock;
+      const actionBlock = displayBlocks[subStart].block as ActionBlock;
       if (actionBlock.status === "running" || actionBlock.status === "pending") {
-        flat.push({ kind: "single", block: actionBlock, index: subStart });
+        flat.push({
+          kind: "single",
+          block: actionBlock,
+          index: displayBlocks[subStart].index,
+        });
         subStart++;
         continue;
       }
@@ -425,19 +481,27 @@ export function buildBlockSegments(blocks: ContentBlock[], isStreaming?: boolean
       // Collect consecutive completed/error actions
       let subEnd = subStart;
       while (subEnd < runEnd) {
-        const ab = blocks[subEnd] as ActionBlock;
+        const ab = displayBlocks[subEnd].block as ActionBlock;
         if (ab.status === "running" || ab.status === "pending") break;
         subEnd++;
       }
 
       const count = subEnd - subStart;
       if (!isStreaming && count >= ACTION_GROUP_MIN_SIZE) {
-        const groupBlocks = blocks.slice(subStart, subEnd) as ActionBlock[];
-        const indices = Array.from({ length: count }, (_, k) => subStart + k);
+        const groupBlocks = displayBlocks
+          .slice(subStart, subEnd)
+          .map((entry) => entry.block) as ActionBlock[];
+        const indices = displayBlocks
+          .slice(subStart, subEnd)
+          .map((entry) => entry.index);
         flat.push({ kind: "action-group", blocks: groupBlocks, indices });
       } else {
         for (let j = subStart; j < subEnd; j++) {
-          flat.push({ kind: "single", block: blocks[j], index: j });
+          flat.push({
+            kind: "single",
+            block: displayBlocks[j].block,
+            index: displayBlocks[j].index,
+          });
         }
       }
       subStart = subEnd;
@@ -1803,8 +1867,8 @@ function MessageBlocksView({
 
   const isStreaming = status === "streaming";
   const blockSegments = useMemo(
-    () => buildBlockSegments(safeBlocks, isStreaming),
-    [safeBlocks, isStreaming],
+    () => buildBlockSegments(safeBlocks, isStreaming, engineId),
+    [safeBlocks, isStreaming, engineId],
   );
 
   return (

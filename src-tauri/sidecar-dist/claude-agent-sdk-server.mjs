@@ -2035,6 +2035,18 @@ async function sendPersistentSessionMessage(req) {
       sessionCwd,
       entry.context.sessionId || params.sessionId || params.resume || "",
     );
+
+    // 每个复用会话轮次都以 Panes 当前配置更新仍在运行的 Claude query。
+    // 模型必须先更新，思考强度的合法范围取决于当前模型。
+    const nextModel = typeof params.model === "string" && params.model.trim()
+      ? params.model.trim()
+      : undefined;
+    await entry.query.setModel(nextModel);
+    const nextReasoningEffort = typeof params.reasoningEffort === "string" && params.reasoningEffort.trim()
+      ? params.reasoningEffort.trim()
+      : null;
+    await entry.query.applyFlagSettings({ effortLevel: nextReasoningEffort });
+
     entry.context.cancelled = false;
     entry.context.turnCompleted = false;
     entry.context.tokenUsage = null;
