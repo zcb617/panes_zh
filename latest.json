@@ -1,0 +1,31 @@
+{
+  "version": "0.71.2",
+  "notes": "",
+  "pub_date": "2026-08-21T16:32:21Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTM1pWQ2U4YWE4TXJLZHlEUnF2bit3THFpTy9iQmxJRG9SQVhYME1uaEJLYzY2MTEzMHM1bmpWWUNSc0hmRlVCcWlnbU1iNmxSbjArU1VkQVc5VjhMVFBvMVl4dUJWQ3dzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MzMwNTE3CWZpbGU6UGFuZXMuYXBwLnRhci5negp0dGM2OUhuL2F6UzRLZ085RnZHS3k3MStYbW5IVC9LZm1iWWhKUWdYc015dmhqTDk1RmlpZ2cvQ013TVdQU3VRT2pLSmE2dDJXK1hEcm4wQnlwaEZBUT09Cg==",
+      "url": "https://github.com/zcb617/panes_zh/releases/download/v0.71.2/Panes.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTM1pWQ2U4YWE4TXJLZHlEUnF2bit3THFpTy9iQmxJRG9SQVhYME1uaEJLYzY2MTEzMHM1bmpWWUNSc0hmRlVCcWlnbU1iNmxSbjArU1VkQVc5VjhMVFBvMVl4dUJWQ3dzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MzMwNTE3CWZpbGU6UGFuZXMuYXBwLnRhci5negp0dGM2OUhuL2F6UzRLZ085RnZHS3k3MStYbW5IVC9LZm1iWWhKUWdYc015dmhqTDk1RmlpZ2cvQ013TVdQU3VRT2pLSmE2dDJXK1hEcm4wQnlwaEZBUT09Cg==",
+      "url": "https://github.com/zcb617/panes_zh/releases/download/v0.71.2/Panes.app.tar.gz"
+    },
+    "linux-x86_64-appimage": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTM1pWQ2U4YWE4TWhiUHlDQzMyakRSV21QejVqd0FaZlUwN2lUa0xZOGpzMStwZVVyQ0VlbG9nYytGQzRWWUloUHhvMUVRajllUDc4ZUh1eFNldHZjSGZvbnp5MVNHRWdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MzI5OTI1CWZpbGU6UGFuZXNfMC43MS4yX2FtZDY0LkFwcEltYWdlCklaVlA4VFdYZHp5ZVRGdWJFWXA2SDRFNnpvRWgzVXM3czhpaXdaQTBYdkNuYjVnck4wcVRpOERsUWJ3L2poTmQ5Q2oyelp1K0RzVy8zYmJSOTErQkJBPT0K",
+      "url": "https://github.com/zcb617/panes_zh/releases/download/v0.71.2/Panes_0.71.2_amd64.AppImage"
+    },
+    "linux-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTM1pWQ2U4YWE4TWhiUHlDQzMyakRSV21QejVqd0FaZlUwN2lUa0xZOGpzMStwZVVyQ0VlbG9nYytGQzRWWUloUHhvMUVRajllUDc4ZUh1eFNldHZjSGZvbnp5MVNHRWdZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MzI5OTI1CWZpbGU6UGFuZXNfMC43MS4yX2FtZDY0LkFwcEltYWdlCklaVlA4VFdYZHp5ZVRGdWJFWXA2SDRFNnpvRWgzVXM3czhpaXdaQTBYdkNuYjVnck4wcVRpOERsUWJ3L2poTmQ5Q2oyelp1K0RzVy8zYmJSOTErQkJBPT0K",
+      "url": "https://github.com/zcb617/panes_zh/releases/download/v0.71.2/Panes_0.71.2_amd64.AppImage"
+    },
+    "linux-x86_64-deb": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTM1pWQ2U4YWE4TWtxQjBBS2VlZEd0bFk4d2lteUphYlJJc09tMzR4NUZOR29aQktCNDRkcnNNWnlTcWtQeEcyVmFlTWhObXdLU3lVZWE4VzZQclNua3RQa3Q2R2NtOEFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MzI5OTI1CWZpbGU6UGFuZXNfMC43MS4yX2FtZDY0LmRlYgpXVCt5Y0hpL3VybUNYYWV1Q1ZnUXExM0NGM0FCUGJwTjdRYWdzZ0MvOFhEeVFxcU05Q0VmVGlVWTBSZ0FoVE9oMTcydXRkUlVKK0doWEQ2VVdWVFdCZz09Cg==",
+      "url": "https://github.com/zcb617/panes_zh/releases/download/v0.71.2/Panes_0.71.2_amd64.deb"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTM1pWQ2U4YWE4TXRFZ2RBcFg0Nlk0UGlQQk1ta1NtYW5aTFl2dEE4NlJCNENIYnhxTEJpVG9zWEhCTGJsQUxwRUpiak5TakptWmkxMEt0THVROWp6SC9BRnlqSkZTeXdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3MzMwMjg5CWZpbGU6UGFuZXNfMC43MS4yX3g2NC1zZXR1cC5leGUKRzExR05JNzhkcTQ4YmJrS0IzTElycDR1Z21iNnc0Q0luRUFTYTVqWCtlZmk0c1A4cFI5L3k4S2duVkpseUR0RGw0N1RMZEVOeUhBRGpHOU11R2RxQUE9PQo=",
+      "url": "https://github.com/zcb617/panes_zh/releases/download/v0.71.2/Panes_0.71.2_x64-setup.exe"
+    }
+  }
+}
