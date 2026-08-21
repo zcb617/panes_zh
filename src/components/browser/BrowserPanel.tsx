@@ -13,7 +13,10 @@ import {
 import { nextBrowserAnnotationNumber } from "../../lib/browserAnnotationNumber";
 import { ipc } from "../../lib/ipc";
 import { useChatStore } from "../../stores/chatStore";
-import { useChatComposerStore } from "../../stores/chatComposerStore";
+import {
+  getChatComposerSessionKey,
+  useChatComposerStore,
+} from "../../stores/chatComposerStore";
 import { useDisplayScaleStore } from "../../stores/displayScaleStore";
 import { toast } from "../../stores/toastStore";
 import { useThreadStore } from "../../stores/threadStore";
@@ -102,16 +105,41 @@ export function BrowserPanel({ visible = true }: BrowserPanelProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const annotationScopeRef = useRef<string | null>(null);
   const annotationWorkspaceRef = useRef<string | null>(null);
+  // 保存上一次已绑定 annotationScope 的聊天附件快照，切换 scope 时用于保存旧 scope。
+  const composerAttachmentsSnapshotRef = useRef<ChatAttachment[]>([]);
   const browserScopeTransferRef = useRef<BrowserScopeTransfer | null>(null);
   const displayScale = useDisplayScaleStore((state) => state.displayScale);
   const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
-  const activeThreadId = useThreadStore((state) => state.activeThreadId);
-  const setWorkspaceAttachments = useChatComposerStore(
-    (state) => state.setWorkspaceAttachments,
+  /*
+   * 旧项目级浏览器附件读取代码保留如下，不参与编译；当前实现交叉确认线程归属，
+   * 并通过 composerSessionKey 读取会话附件：
+   *
+   * const activeThreadId = useThreadStore((state) => state.activeThreadId);
+   * const setWorkspaceAttachments = useChatComposerStore(
+   *   (state) => state.setWorkspaceAttachments,
+   * );
+   * const composerAttachments = useChatComposerStore((state) =>
+   *   activeWorkspaceId
+   *     ? state.attachmentsByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_ATTACHMENTS
+   *     : EMPTY_CHAT_ATTACHMENTS,
+   * );
+   */
+  const activeThread = useThreadStore((state) =>
+    state.threads.find((thread) => thread.id === state.activeThreadId) ?? null,
+  );
+  const activeThreadId = activeThread?.id ?? null;
+  const composerSessionKey = activeWorkspaceId
+    ? getChatComposerSessionKey(
+        activeWorkspaceId,
+        activeThread?.workspaceId === activeWorkspaceId ? activeThread.id : null,
+      )
+    : null;
+  const setSessionAttachments = useChatComposerStore(
+    (state) => state.setSessionAttachments,
   );
   const composerAttachments = useChatComposerStore((state) =>
-    activeWorkspaceId
-      ? state.attachmentsByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_ATTACHMENTS
+    composerSessionKey
+      ? state.attachmentsBySession[composerSessionKey] ?? EMPTY_CHAT_ATTACHMENTS
       : EMPTY_CHAT_ATTACHMENTS,
   );
   const [address, setAddress] = useState(DEFAULT_BROWSER_URL);
@@ -124,6 +152,7 @@ export function BrowserPanel({ visible = true }: BrowserPanelProps) {
 
   useEffect(() => {
     if (!activeWorkspaceId || !annotationScope) {
+      composerAttachmentsSnapshotRef.current = [...composerAttachments];
       annotationScopeRef.current = null;
       annotationWorkspaceRef.current = null;
       return;
@@ -135,7 +164,10 @@ export function BrowserPanel({ visible = true }: BrowserPanelProps) {
 
     if (previousScope && previousScope !== annotationScope) {
       if (previousWorkspaceId === activeWorkspaceId) {
-        browserAnnotationAttachmentsByScope.set(previousScope, visibleBrowserAttachments);
+        browserAnnotationAttachmentsByScope.set(
+          previousScope,
+          composerAttachmentsSnapshotRef.current.filter(isBrowserAnnotation),
+        );
       }
 
       const transfersDraftBrowser =
@@ -181,8 +213,16 @@ export function BrowserPanel({ visible = true }: BrowserPanelProps) {
       ...composerAttachments.filter((attachment) => !isBrowserAnnotation(attachment)),
       ...scopedBrowserAttachments,
     ];
-    if (!sameAttachments(composerAttachments, nextComposerAttachments)) {
-      setWorkspaceAttachments(activeWorkspaceId, nextComposerAttachments);
+    /*
+     * 旧项目级 effect 写入完整代码保留如下，不参与编译：
+     * if (!sameAttachments(composerAttachments, nextComposerAttachments)) {
+     *   setWorkspaceAttachments(activeWorkspaceId, nextComposerAttachments);
+     * }
+     * 当前写入必须绑定 composerSessionKey。
+     */
+    if (composerSessionKey && !sameAttachments(composerAttachments, nextComposerAttachments)) {
+      // 旧项目级附件写入已改为当前聊天会话范围，避免浏览器标注跨会话串入。
+      setSessionAttachments(composerSessionKey, nextComposerAttachments);
     }
 
     annotationScopeRef.current = annotationScope;
@@ -190,7 +230,14 @@ export function BrowserPanel({ visible = true }: BrowserPanelProps) {
     const targetUrl = browserAddressByScope.get(annotationScope) ?? DEFAULT_BROWSER_URL;
     setAddress(targetUrl);
     setAnnotationEnabled(browserAnnotationModeByScope.get(annotationScope) ?? false);
-  }, [activeWorkspaceId, annotationScope, composerAttachments, setWorkspaceAttachments]);
+    composerAttachmentsSnapshotRef.current = [...composerAttachments];
+  }, [
+    activeWorkspaceId,
+    annotationScope,
+    composerAttachments,
+    composerSessionKey,
+    setSessionAttachments,
+  ]);
 
   useEffect(() => {
     if (!annotationScope) {
@@ -359,7 +406,18 @@ export function BrowserPanel({ visible = true }: BrowserPanelProps) {
     setSaving(true);
     try {
       const composer = useChatComposerStore.getState();
-      const current = composer.attachmentsByWorkspace[activeWorkspaceId] ?? [];
+      /*
+       * 旧项目级 saveAnnotation 读取和写入完整代码保留如下，不参与编译：
+       * const current = composer.attachmentsByWorkspace[activeWorkspaceId] ?? [];
+       * setWorkspaceAttachments(activeWorkspaceId, [
+       *   ...current.filter((item) => !isBrowserAnnotation(item)),
+       *   ...nextPendingAttachments,
+       * ]);
+       * 当前实现使用 composerSessionKey，浏览器 scope 与 IPC 保持不变。
+       */
+      const current = composerSessionKey
+        ? composer.attachmentsBySession[composerSessionKey] ?? []
+        : [];
       const pendingAttachments =
         browserAnnotationAttachmentsByScope.get(annotationScope) ??
         current.filter(isBrowserAnnotation);
@@ -385,10 +443,13 @@ export function BrowserPanel({ visible = true }: BrowserPanelProps) {
       };
       const nextPendingAttachments = [...pendingAttachments, attachment];
       browserAnnotationAttachmentsByScope.set(annotationScope, nextPendingAttachments);
-      setWorkspaceAttachments(activeWorkspaceId, [
-        ...current.filter((item) => !isBrowserAnnotation(item)),
-        ...nextPendingAttachments,
-      ]);
+      if (composerSessionKey) {
+        // 旧项目级附件写入已改为当前聊天会话范围，保留浏览器 scope 的原有语义。
+        setSessionAttachments(composerSessionKey, [
+          ...current.filter((item) => !isBrowserAnnotation(item)),
+          ...nextPendingAttachments,
+        ]);
+      }
       browserAnnotationModeByScope.set(annotationScope, false);
       setAnnotationEnabled(false);
       toast.success("浏览器标注已作为附件加入当前对话。");
@@ -398,7 +459,14 @@ export function BrowserPanel({ visible = true }: BrowserPanelProps) {
     } finally {
       setSaving(false);
     }
-  }, [activeThreadId, activeWorkspaceId, annotationScope, saving, setWorkspaceAttachments]);
+  }, [
+    activeThreadId,
+    activeWorkspaceId,
+    annotationScope,
+    composerSessionKey,
+    saving,
+    setSessionAttachments,
+  ]);
 
   useEffect(() => {
     if (!isTauri()) {

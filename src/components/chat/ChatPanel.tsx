@@ -54,7 +54,10 @@ import {
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import { useChatStore } from "../../stores/chatStore";
-import { useChatComposerStore } from "../../stores/chatComposerStore";
+import {
+  getChatComposerSessionKey,
+  useChatComposerStore,
+} from "../../stores/chatComposerStore";
 import type { PendingFlexibleMessage } from "../../stores/chatComposerStore";
 import { useEngineStore } from "../../stores/engineStore";
 import { useFileStore } from "../../stores/fileStore";
@@ -2001,39 +2004,149 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     })),
   );
   const activeChatSessionId = activeThread?.id ?? threadId ?? null;
+  const composerSessionKey = activeWorkspaceId
+    ? getChatComposerSessionKey(
+        activeWorkspaceId,
+        activeThread?.workspaceId === activeWorkspaceId ? activeThread.id : null,
+      )
+    : null;
   const flexibleMessageSessionKey = activeChatSessionId
     ? `thread:${activeChatSessionId}`
     : activeWorkspaceId
       ? `new:${activeWorkspaceId}`
       : null;
   const gitStatus = useGitStore((s) => s.status);
+  /*
+   * 旧项目级读取、getter 和 setter 的完整代码保留如下，不参与编译；它们已由
+   * composerSessionKey 对应的会话级 API 替代，避免同一工作区不同会话共用输入内容。
+   *
+   * const input = useChatComposerStore((state) =>
+   *   activeWorkspaceId ? state.draftByWorkspace[activeWorkspaceId] ?? "" : "",
+   * );
+   * const setWorkspaceDraft = useChatComposerStore((state) => state.setWorkspaceDraft);
+   * const attachments = useChatComposerStore((state) =>
+   *   activeWorkspaceId
+   *     ? state.attachmentsByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_ATTACHMENTS
+   *     : EMPTY_CHAT_ATTACHMENTS,
+   * );
+   * const setWorkspaceAttachments = useChatComposerStore(
+   *   (state) => state.setWorkspaceAttachments,
+   * );
+   * const textAnnotations = useChatComposerStore((state) =>
+   *   activeWorkspaceId
+   *     ? state.textAnnotationsByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_TEXT_ANNOTATIONS
+   *     : EMPTY_CHAT_TEXT_ANNOTATIONS,
+   * );
+   * const setWorkspaceTextAnnotations = useChatComposerStore(
+   *   (state) => state.setWorkspaceTextAnnotations,
+   * );
+   * const references = useChatComposerStore((state) =>
+   *   activeWorkspaceId
+   *     ? state.referencesByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_INPUT_REFERENCES
+   *     : EMPTY_CHAT_INPUT_REFERENCES,
+   * );
+   * const setWorkspaceReferences = useChatComposerStore(
+   *   (state) => state.setWorkspaceReferences,
+   * );
+   * const setInput = useCallback(
+   *   (draft: string) => {
+   *     if (activeWorkspaceId) {
+   *       setWorkspaceDraft(activeWorkspaceId, draft);
+   *     }
+   *   },
+   *   [activeWorkspaceId, setWorkspaceDraft],
+   * );
+   * const setAttachments = useCallback(
+   *   (
+   *     nextAttachments:
+   *       | ChatAttachment[]
+   *       | ((currentAttachments: ChatAttachment[]) => ChatAttachment[]),
+   *   ) => {
+   *     if (!activeWorkspaceId) {
+   *       return;
+   *     }
+   *     const currentAttachments =
+   *       useChatComposerStore.getState().attachmentsByWorkspace[activeWorkspaceId] ??
+   *       EMPTY_CHAT_ATTACHMENTS;
+   *     setWorkspaceAttachments(
+   *       activeWorkspaceId,
+   *       typeof nextAttachments === "function"
+   *         ? nextAttachments(currentAttachments)
+   *         : nextAttachments,
+   *     );
+   *   },
+   *   [activeWorkspaceId, setWorkspaceAttachments],
+   * );
+   * const setTextAnnotations = useCallback(
+   *   (
+   *     nextAnnotations:
+   *       | ChatTextAnnotation[]
+   *       | ((currentAnnotations: ChatTextAnnotation[]) => ChatTextAnnotation[]),
+   *   ) => {
+   *     if (!activeWorkspaceId) {
+   *       return;
+   *     }
+   *     const currentAnnotations =
+   *       useChatComposerStore.getState().textAnnotationsByWorkspace[activeWorkspaceId] ??
+   *       EMPTY_CHAT_TEXT_ANNOTATIONS;
+   *     setWorkspaceTextAnnotations(
+   *       activeWorkspaceId,
+   *       typeof nextAnnotations === "function"
+   *         ? nextAnnotations(currentAnnotations)
+   *         : nextAnnotations,
+   *     );
+   *   },
+   *   [activeWorkspaceId, setWorkspaceTextAnnotations],
+   * );
+   * const setReferences = useCallback(
+   *   (
+   *     nextReferences:
+   *       | ChatInputReference[]
+   *       | ((currentReferences: ChatInputReference[]) => ChatInputReference[]),
+   *   ) => {
+   *     if (!activeWorkspaceId) {
+   *       return;
+   *     }
+   *     const currentReferences =
+   *       useChatComposerStore.getState().referencesByWorkspace[activeWorkspaceId] ??
+   *       EMPTY_CHAT_INPUT_REFERENCES;
+   *     setWorkspaceReferences(
+   *       activeWorkspaceId,
+   *       typeof nextReferences === "function"
+   *         ? nextReferences(currentReferences)
+   *         : nextReferences,
+   *     );
+   *   },
+   *   [activeWorkspaceId, setWorkspaceReferences],
+   * );
+   */
   const input = useChatComposerStore((state) =>
-    activeWorkspaceId ? state.draftByWorkspace[activeWorkspaceId] ?? "" : "",
+    composerSessionKey ? state.draftBySession[composerSessionKey] ?? "" : "",
   );
-  const setWorkspaceDraft = useChatComposerStore((state) => state.setWorkspaceDraft);
+  const setSessionDraft = useChatComposerStore((state) => state.setSessionDraft);
   const attachments = useChatComposerStore((state) =>
-    activeWorkspaceId
-      ? state.attachmentsByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_ATTACHMENTS
+    composerSessionKey
+      ? state.attachmentsBySession[composerSessionKey] ?? EMPTY_CHAT_ATTACHMENTS
       : EMPTY_CHAT_ATTACHMENTS,
   );
-  const setWorkspaceAttachments = useChatComposerStore(
-    (state) => state.setWorkspaceAttachments,
+  const setSessionAttachments = useChatComposerStore(
+    (state) => state.setSessionAttachments,
   );
   const textAnnotations = useChatComposerStore((state) =>
-    activeWorkspaceId
-      ? state.textAnnotationsByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_TEXT_ANNOTATIONS
+    composerSessionKey
+      ? state.textAnnotationsBySession[composerSessionKey] ?? EMPTY_CHAT_TEXT_ANNOTATIONS
       : EMPTY_CHAT_TEXT_ANNOTATIONS,
   );
-  const setWorkspaceTextAnnotations = useChatComposerStore(
-    (state) => state.setWorkspaceTextAnnotations,
+  const setSessionTextAnnotations = useChatComposerStore(
+    (state) => state.setSessionTextAnnotations,
   );
   const references = useChatComposerStore((state) =>
-    activeWorkspaceId
-      ? state.referencesByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_INPUT_REFERENCES
+    composerSessionKey
+      ? state.referencesBySession[composerSessionKey] ?? EMPTY_CHAT_INPUT_REFERENCES
       : EMPTY_CHAT_INPUT_REFERENCES,
   );
-  const setWorkspaceReferences = useChatComposerStore(
-    (state) => state.setWorkspaceReferences,
+  const setSessionReferences = useChatComposerStore(
+    (state) => state.setSessionReferences,
   );
   const canSubmitComposer = Boolean(
     input.trim() || textAnnotations.length > 0 || hasImageAttachmentAnnotations(attachments),
@@ -2079,11 +2192,11 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const clearComposerRuntime = useChatComposerStore((state) => state.clearWorkspaceRuntime);
   const setInput = useCallback(
     (draft: string) => {
-      if (activeWorkspaceId) {
-        setWorkspaceDraft(activeWorkspaceId, draft);
+      if (composerSessionKey) {
+        setSessionDraft(composerSessionKey, draft);
       }
     },
-    [activeWorkspaceId, setWorkspaceDraft],
+    [composerSessionKey, setSessionDraft],
   );
   const setAttachments = useCallback(
     (
@@ -2091,21 +2204,21 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         | ChatAttachment[]
         | ((currentAttachments: ChatAttachment[]) => ChatAttachment[]),
     ) => {
-      if (!activeWorkspaceId) {
+      if (!composerSessionKey) {
         return;
       }
 
       const currentAttachments =
-        useChatComposerStore.getState().attachmentsByWorkspace[activeWorkspaceId] ??
+        useChatComposerStore.getState().attachmentsBySession[composerSessionKey] ??
         EMPTY_CHAT_ATTACHMENTS;
-      setWorkspaceAttachments(
-        activeWorkspaceId,
+      setSessionAttachments(
+        composerSessionKey,
         typeof nextAttachments === "function"
           ? nextAttachments(currentAttachments)
           : nextAttachments,
       );
     },
-    [activeWorkspaceId, setWorkspaceAttachments],
+    [composerSessionKey, setSessionAttachments],
   );
   const setTextAnnotations = useCallback(
     (
@@ -2113,21 +2226,21 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         | ChatTextAnnotation[]
         | ((currentAnnotations: ChatTextAnnotation[]) => ChatTextAnnotation[]),
     ) => {
-      if (!activeWorkspaceId) {
+      if (!composerSessionKey) {
         return;
       }
 
       const currentAnnotations =
-        useChatComposerStore.getState().textAnnotationsByWorkspace[activeWorkspaceId] ??
+        useChatComposerStore.getState().textAnnotationsBySession[composerSessionKey] ??
         EMPTY_CHAT_TEXT_ANNOTATIONS;
-      setWorkspaceTextAnnotations(
-        activeWorkspaceId,
+      setSessionTextAnnotations(
+        composerSessionKey,
         typeof nextAnnotations === "function"
           ? nextAnnotations(currentAnnotations)
           : nextAnnotations,
       );
     },
-    [activeWorkspaceId, setWorkspaceTextAnnotations],
+    [composerSessionKey, setSessionTextAnnotations],
   );
   const setReferences = useCallback(
     (
@@ -2137,22 +2250,108 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
             currentReferences: ChatInputReference[],
           ) => ChatInputReference[]),
     ) => {
-      if (!activeWorkspaceId) {
+      if (!composerSessionKey) {
         return;
       }
 
       const currentReferences =
-        useChatComposerStore.getState().referencesByWorkspace[activeWorkspaceId] ??
+        useChatComposerStore.getState().referencesBySession[composerSessionKey] ??
         EMPTY_CHAT_INPUT_REFERENCES;
-      setWorkspaceReferences(
-        activeWorkspaceId,
+      setSessionReferences(
+        composerSessionKey,
         typeof nextReferences === "function"
           ? nextReferences(currentReferences)
           : nextReferences,
       );
     },
-    [activeWorkspaceId, setWorkspaceReferences],
+    [composerSessionKey, setSessionReferences],
   );
+  const restoreComposerContent = useCallback(
+    (
+      sessionKey: string,
+      draft: string,
+      nextAttachments: ChatAttachment[],
+      nextAnnotations: ChatTextAnnotation[],
+      nextReferences: ChatInputReference[],
+    ) => {
+      // 失败恢复必须写回提交产生时绑定的会话，避免用户切换会话后写错目标。
+      setSessionDraft(sessionKey, draft);
+      setSessionAttachments(sessionKey, nextAttachments);
+      setSessionTextAnnotations(sessionKey, nextAnnotations);
+      setSessionReferences(sessionKey, nextReferences);
+    },
+    [setSessionAttachments, setSessionDraft, setSessionReferences, setSessionTextAnnotations],
+  );
+  /*
+   * 旧项目级恢复调用完整保留如下，不参与编译；当前统一由
+   * restoreComposerContent(sessionKey, ...) 按提交来源会话执行：
+   *
+   * if (!accepted) {
+   *   setInput(submittedText);
+   *   setAttachments(submittedAttachments);
+   *   setTextAnnotations(submittedTextAnnotations);
+   *   setReferences(submittedReferences);
+   * }
+   *
+   * catch (error) {
+   *   setInput(submittedText);
+   *   setAttachments(submittedAttachments);
+   *   setTextAnnotations(submittedTextAnnotations);
+   *   setReferences(submittedReferences);
+   *   throw error;
+   * }
+   *
+   * if (!(await applyCodexConfigToThread(prompt.threadId, {
+   *   engineId: prompt.engineId,
+   *   personality: prompt.personality,
+   *   serviceTier: prompt.serviceTier,
+   *   outputSchemaText: prompt.outputSchemaText,
+   *   customApprovalPolicyText: prompt.customApprovalPolicyText,
+   * }))) {
+   *   setInput(prompt.draftText);
+   *   setAttachments(prompt.attachments);
+   *   setTextAnnotations(prompt.textAnnotations);
+   *   setReferences(prompt.references);
+   *   return;
+   * }
+   * if (!(await applyOpenCodeConfigToThread(prompt.threadId, {
+   *   engineId: prompt.engineId,
+   *   agent: prompt.openCodeAgent,
+   * }))) {
+   *   setInput(prompt.draftText);
+   *   setAttachments(prompt.attachments);
+   *   setTextAnnotations(prompt.textAnnotations);
+   *   setReferences(prompt.references);
+   *   return;
+   * }
+   * if (!sent) {
+   *   setInput(prompt.draftText);
+   *   setAttachments(prompt.attachments);
+   *   setTextAnnotations(prompt.textAnnotations);
+   *   setReferences(prompt.references);
+   *   return;
+   * }
+   *
+   * catch {
+   *   setInput(prompt.draftText);
+   *   setAttachments(prompt.attachments);
+   *   setTextAnnotations(prompt.textAnnotations);
+   *   setReferences(prompt.references);
+   * }
+   *
+   * pendingPlanImplementationThreadIdRef.current = promptPlanMode ? prompt.threadId : null;
+   * setInput("");
+   * setAttachments([]);
+   * setTextAnnotations([]);
+   * setReferences([]);
+   *
+   * if (prompt) {
+   *   setInput(prompt.draftText);
+   *   setAttachments(prompt.attachments);
+   *   setTextAnnotations(prompt.textAnnotations);
+   *   setReferences(prompt.references);
+   * }
+   */
   const withdrawFlexibleMessage = useCallback(
     (message: PendingFlexibleMessage) => {
       if (!activeWorkspaceId || !flexibleMessageSessionKey) {
@@ -2189,6 +2388,8 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const annotationCommentInputRef = useRef<HTMLInputElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const effortSyncKeyRef = useRef<string | null>(null);
+  // 记录普通提交开始时的会话范围，异步失败时按该范围恢复。
+  const activeSubmissionSessionKeyRef = useRef<string | null>(null);
   const manuallyOverrodeThreadSelectionRef = useRef(false);
   const manualThreadBindTargetRef = useRef<string | null>(null);
   const lastSyncedThreadIdRef = useRef<string | null>(null);
@@ -5174,6 +5375,11 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         return false;
       }
       targetThreadId = createdThreadId;
+      // 新线程创建成功后，失败恢复目标从临时范围转为正式线程范围。
+      activeSubmissionSessionKeyRef.current = getChatComposerSessionKey(
+        activeWorkspaceId,
+        targetThreadId,
+      );
       createdThread = true;
       manualThreadBindTargetRef.current = createdThreadId;
       try {
@@ -5359,6 +5565,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
 
     isSubmittingRef.current = true;
     setIsSubmitting(true);
+    activeSubmissionSessionKeyRef.current = composerSessionKey;
     // const submission = submitMessage();
     const submission = submitMessage(
       submittedText,
@@ -5374,19 +5581,32 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     try {
       const accepted = await submission;
       if (!accepted) {
-        setInput(submittedText);
-        setAttachments(submittedAttachments);
-        setTextAnnotations(submittedTextAnnotations);
-        setReferences(submittedReferences);
+        const restoreSessionKey = activeSubmissionSessionKeyRef.current;
+        if (restoreSessionKey) {
+          restoreComposerContent(
+            restoreSessionKey,
+            submittedText,
+            submittedAttachments,
+            submittedTextAnnotations,
+            submittedReferences,
+          );
+        }
       }
     } catch (error) {
-      setInput(submittedText);
-      setAttachments(submittedAttachments);
-      setTextAnnotations(submittedTextAnnotations);
-      setReferences(submittedReferences);
+      const restoreSessionKey = activeSubmissionSessionKeyRef.current;
+      if (restoreSessionKey) {
+        restoreComposerContent(
+          restoreSessionKey,
+          submittedText,
+          submittedAttachments,
+          submittedTextAnnotations,
+          submittedReferences,
+        );
+      }
       throw error;
     } finally {
       setPendingSubmission(null);
+      activeSubmissionSessionKeyRef.current = null;
       isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
@@ -5445,6 +5665,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   async function executeWorkspaceOptInSend() {
     const prompt = workspaceOptInPrompt;
     if (!prompt) return;
+    const promptSessionKey = getChatComposerSessionKey(prompt.workspaceId, prompt.threadId);
     setPendingSubmission(
       createPendingSubmissionMessage(
         prompt.threadId,
@@ -5470,20 +5691,26 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         outputSchemaText: prompt.outputSchemaText,
         customApprovalPolicyText: prompt.customApprovalPolicyText,
       }))) {
-        setInput(prompt.draftText);
-        setAttachments(prompt.attachments);
-        setTextAnnotations(prompt.textAnnotations);
-        setReferences(prompt.references);
+        restoreComposerContent(
+          promptSessionKey,
+          prompt.draftText,
+          prompt.attachments,
+          prompt.textAnnotations,
+          prompt.references,
+        );
         return;
       }
       if (!(await applyOpenCodeConfigToThread(prompt.threadId, {
         engineId: prompt.engineId,
         agent: prompt.openCodeAgent,
       }))) {
-        setInput(prompt.draftText);
-        setAttachments(prompt.attachments);
-        setTextAnnotations(prompt.textAnnotations);
-        setReferences(prompt.references);
+        restoreComposerContent(
+          promptSessionKey,
+          prompt.draftText,
+          prompt.attachments,
+          prompt.textAnnotations,
+          prompt.references,
+        );
         return;
       }
       setThreadLastModelLocal(prompt.threadId, prompt.modelId);
@@ -5502,25 +5729,28 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         planMode: promptPlanMode,
       });
       if (!sent) {
-        setInput(prompt.draftText);
-        setAttachments(prompt.attachments);
-        setTextAnnotations(prompt.textAnnotations);
-        setReferences(prompt.references);
+        restoreComposerContent(
+          promptSessionKey,
+          prompt.draftText,
+          prompt.attachments,
+          prompt.textAnnotations,
+          prompt.references,
+        );
         return;
       }
 
       pendingPlanImplementationThreadIdRef.current = promptPlanMode ? prompt.threadId : null;
-      setInput("");
-      setAttachments([]);
-      setTextAnnotations([]);
-      setReferences([]);
+      restoreComposerContent(promptSessionKey, "", [], [], []);
 
       await refreshThreads(prompt.workspaceId);
     } catch {
-      setInput(prompt.draftText);
-      setAttachments(prompt.attachments);
-      setTextAnnotations(prompt.textAnnotations);
-      setReferences(prompt.references);
+      restoreComposerContent(
+        promptSessionKey,
+        prompt.draftText,
+        prompt.attachments,
+        prompt.textAnnotations,
+        prompt.references,
+      );
     } finally {
       setPendingSubmission(null);
     }
@@ -5655,10 +5885,13 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       setPlanMode(true);
     }
     if (prompt) {
-      setInput(prompt.draftText);
-      setAttachments(prompt.attachments);
-      setTextAnnotations(prompt.textAnnotations);
-      setReferences(prompt.references);
+      restoreComposerContent(
+        getChatComposerSessionKey(prompt.workspaceId, prompt.threadId),
+        prompt.draftText,
+        prompt.attachments,
+        prompt.textAnnotations,
+        prompt.references,
+      );
     }
     setPendingSubmission(null);
     setWorkspaceOptInPrompt(null);

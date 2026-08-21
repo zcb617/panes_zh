@@ -39,6 +39,18 @@ export interface PendingFlexibleMessage {
   attachments: ChatAttachment[];
   references: ChatInputReference[];
 }
+
+/**
+ * 计算聊天输入内容的会话范围键。
+ * 正式会话使用 thread:<threadId>，尚未创建正式会话时使用 new:<workspaceId>。
+ */
+export function getChatComposerSessionKey(
+  workspaceId: string,
+  threadId: string | null | undefined,
+): string {
+  return threadId ? `thread:${threadId}` : `new:${workspaceId}`;
+}
+
 function readChatInputSendShortcut(): ChatInputSendShortcut {
   try {
     const stored = localStorage.getItem(CHAT_INPUT_SEND_SHORTCUT_STORAGE_KEY);
@@ -152,10 +164,14 @@ function persistLinkOpenGesture(linkOpenGesture: LinkOpenGesture): void {
 
 interface ChatComposerState {
   runtimeByWorkspace: Record<string, ComposerRuntimeSnapshot>;
-  draftByWorkspace: Record<string, string>;
-  attachmentsByWorkspace: Record<string, ChatAttachment[]>;
-  textAnnotationsByWorkspace: Record<string, ChatTextAnnotation[]>;
-  referencesByWorkspace: Record<string, ChatInputReference[]>;
+  /** 当前会话的未发送文字草稿。 */
+  draftBySession: Record<string, string>;
+  /** 当前会话的未发送附件。 */
+  attachmentsBySession: Record<string, ChatAttachment[]>;
+  /** 当前会话的未发送文本标注。 */
+  textAnnotationsBySession: Record<string, ChatTextAnnotation[]>;
+  /** 当前会话的未发送引用。 */
+  referencesBySession: Record<string, ChatInputReference[]>;
   pendingFlexibleMessagesBySession: Record<string, PendingFlexibleMessage[]>;
   pendingMessageSendModeByWorkspace: Record<string, MessageSendMode>;
   sendShortcut: ChatInputSendShortcut;
@@ -168,20 +184,28 @@ interface ChatComposerState {
     runtime: ComposerRuntimeSnapshot,
   ) => void;
   clearWorkspaceRuntime: (workspaceId: string) => void;
-  setWorkspaceDraft: (workspaceId: string, draft: string) => void;
-  clearWorkspaceDraft: (workspaceId: string) => void;
-  setWorkspaceAttachments: (workspaceId: string, attachments: ChatAttachment[]) => void;
-  clearWorkspaceAttachments: (workspaceId: string) => void;
-  setWorkspaceTextAnnotations: (
-    workspaceId: string,
+  /** 写入或清除指定会话范围的未发送文字。 */
+  setSessionDraft: (sessionKey: string, draft: string) => void;
+  /** 清除指定会话范围的未发送文字。 */
+  clearSessionDraft: (sessionKey: string) => void;
+  /** 写入或清除指定会话范围的未发送附件。 */
+  setSessionAttachments: (sessionKey: string, attachments: ChatAttachment[]) => void;
+  /** 清除指定会话范围的未发送附件。 */
+  clearSessionAttachments: (sessionKey: string) => void;
+  /** 写入或清除指定会话范围的未发送文本标注。 */
+  setSessionTextAnnotations: (
+    sessionKey: string,
     annotations: ChatTextAnnotation[],
   ) => void;
-  clearWorkspaceTextAnnotations: (workspaceId: string) => void;
-  setWorkspaceReferences: (
-    workspaceId: string,
+  /** 清除指定会话范围的未发送文本标注。 */
+  clearSessionTextAnnotations: (sessionKey: string) => void;
+  /** 写入或清除指定会话范围的未发送引用。 */
+  setSessionReferences: (
+    sessionKey: string,
     references: ChatInputReference[],
   ) => void;
-  clearWorkspaceReferences: (workspaceId: string) => void;
+  /** 清除指定会话范围的未发送引用。 */
+  clearSessionReferences: (sessionKey: string) => void;
   addPendingFlexibleMessage: (
     sessionKey: string,
     message: PendingFlexibleMessage,
@@ -197,12 +221,117 @@ interface ChatComposerState {
   setLinkOpenGesture: (linkOpenGesture: LinkOpenGesture) => void;
 }
 
+/*
+ * 旧项目级输入实现已由会话级实现替代，完整旧代码保留在此注释中，不参与编译：
+ *
+ * interface ChatComposerState {
+ *   draftByWorkspace: Record<string, string>;
+ *   attachmentsByWorkspace: Record<string, ChatAttachment[]>;
+ *   textAnnotationsByWorkspace: Record<string, ChatTextAnnotation[]>;
+ *   referencesByWorkspace: Record<string, ChatInputReference[]>;
+ *   setWorkspaceDraft: (workspaceId: string, draft: string) => void;
+ *   clearWorkspaceDraft: (workspaceId: string) => void;
+ *   setWorkspaceAttachments: (workspaceId: string, attachments: ChatAttachment[]) => void;
+ *   clearWorkspaceAttachments: (workspaceId: string) => void;
+ *   setWorkspaceTextAnnotations: (
+ *     workspaceId: string,
+ *     annotations: ChatTextAnnotation[],
+ *   ) => void;
+ *   clearWorkspaceTextAnnotations: (workspaceId: string) => void;
+ *   setWorkspaceReferences: (
+ *     workspaceId: string,
+ *     references: ChatInputReference[],
+ *   ) => void;
+ *   clearWorkspaceReferences: (workspaceId: string) => void;
+ * }
+ *
+ * draftByWorkspace: {},
+ * attachmentsByWorkspace: {},
+ * textAnnotationsByWorkspace: {},
+ * referencesByWorkspace: {},
+ * setWorkspaceDraft: (workspaceId, draft) =>
+ *   set((state) => {
+ *     if (!draft) {
+ *       const { [workspaceId]: _removed, ...rest } = state.draftByWorkspace;
+ *       return { draftByWorkspace: rest };
+ *     }
+ *     return {
+ *       draftByWorkspace: {
+ *         ...state.draftByWorkspace,
+ *         [workspaceId]: draft,
+ *       },
+ *     };
+ *   }),
+ * clearWorkspaceDraft: (workspaceId) =>
+ *   set((state) => {
+ *     const { [workspaceId]: _removed, ...rest } = state.draftByWorkspace;
+ *     return { draftByWorkspace: rest };
+ *   }),
+ * setWorkspaceAttachments: (workspaceId, attachments) =>
+ *   set((state) => {
+ *     if (attachments.length === 0) {
+ *       const { [workspaceId]: _removed, ...rest } = state.attachmentsByWorkspace;
+ *       return { attachmentsByWorkspace: rest };
+ *     }
+ *     return {
+ *       attachmentsByWorkspace: {
+ *         ...state.attachmentsByWorkspace,
+ *         [workspaceId]: [...attachments],
+ *       },
+ *     };
+ *   }),
+ * clearWorkspaceAttachments: (workspaceId) =>
+ *   set((state) => {
+ *     const { [workspaceId]: _removed, ...rest } = state.attachmentsByWorkspace;
+ *     return { attachmentsByWorkspace: rest };
+ *   }),
+ * setWorkspaceTextAnnotations: (workspaceId, annotations) =>
+ *   set((state) => {
+ *     if (annotations.length === 0) {
+ *       const { [workspaceId]: _removed, ...rest } = state.textAnnotationsByWorkspace;
+ *       return { textAnnotationsByWorkspace: rest };
+ *     }
+ *     return {
+ *       textAnnotationsByWorkspace: {
+ *         ...state.textAnnotationsByWorkspace,
+ *         [workspaceId]: [...annotations],
+ *       },
+ *     };
+ *   }),
+ * clearWorkspaceTextAnnotations: (workspaceId) =>
+ *   set((state) => {
+ *     const { [workspaceId]: _removed, ...rest } = state.textAnnotationsByWorkspace;
+ *     return { textAnnotationsByWorkspace: rest };
+ *   }),
+ * setWorkspaceReferences: (workspaceId, references) =>
+ *   set((state) => {
+ *     if (references.length === 0) {
+ *       const { [workspaceId]: _removed, ...rest } = state.referencesByWorkspace;
+ *       return { referencesByWorkspace: rest };
+ *     }
+ *     return {
+ *       referencesByWorkspace: {
+ *         ...state.referencesByWorkspace,
+ *         [workspaceId]: [...references],
+ *       },
+ *     };
+ *   }),
+ * clearWorkspaceReferences: (workspaceId) =>
+ *   set((state) => {
+ *     const { [workspaceId]: _removed, ...rest } = state.referencesByWorkspace;
+ *     return { referencesByWorkspace: rest };
+ *   }),
+ *
+ * 新实现统一使用 getChatComposerSessionKey(workspaceId, threadId) 生成 sessionKey，
+ * 从而保证同一工作区的不同会话互不覆盖。
+ */
+
 export const useChatComposerStore = create<ChatComposerState>((set) => ({
   runtimeByWorkspace: {},
-  draftByWorkspace: {},
-  attachmentsByWorkspace: {},
-  textAnnotationsByWorkspace: {},
-  referencesByWorkspace: {},
+  draftBySession: {},
+  attachmentsBySession: {},
+  textAnnotationsBySession: {},
+  referencesBySession: {},
   pendingFlexibleMessagesBySession: {},
   pendingMessageSendModeByWorkspace: {},
   sendShortcut: readChatInputSendShortcut(),
@@ -224,77 +353,77 @@ export const useChatComposerStore = create<ChatComposerState>((set) => ({
         runtimeByWorkspace: rest,
       };
     }),
-  setWorkspaceDraft: (workspaceId, draft) =>
+  setSessionDraft: (sessionKey, draft) =>
     set((state) => {
       if (!draft) {
-        const { [workspaceId]: _removed, ...rest } = state.draftByWorkspace;
-        return { draftByWorkspace: rest };
+        const { [sessionKey]: _removed, ...rest } = state.draftBySession;
+        return { draftBySession: rest };
       }
       return {
-        draftByWorkspace: {
-          ...state.draftByWorkspace,
-          [workspaceId]: draft,
+        draftBySession: {
+          ...state.draftBySession,
+          [sessionKey]: draft,
         },
       };
     }),
-  clearWorkspaceDraft: (workspaceId) =>
+  clearSessionDraft: (sessionKey) =>
     set((state) => {
-      const { [workspaceId]: _removed, ...rest } = state.draftByWorkspace;
-      return { draftByWorkspace: rest };
+      const { [sessionKey]: _removed, ...rest } = state.draftBySession;
+      return { draftBySession: rest };
     }),
-  setWorkspaceAttachments: (workspaceId, attachments) =>
+  setSessionAttachments: (sessionKey, attachments) =>
     set((state) => {
       if (attachments.length === 0) {
-        const { [workspaceId]: _removed, ...rest } = state.attachmentsByWorkspace;
-        return { attachmentsByWorkspace: rest };
+        const { [sessionKey]: _removed, ...rest } = state.attachmentsBySession;
+        return { attachmentsBySession: rest };
       }
       return {
-        attachmentsByWorkspace: {
-          ...state.attachmentsByWorkspace,
-          [workspaceId]: [...attachments],
+        attachmentsBySession: {
+          ...state.attachmentsBySession,
+          [sessionKey]: [...attachments],
         },
       };
     }),
-  clearWorkspaceAttachments: (workspaceId) =>
+  clearSessionAttachments: (sessionKey) =>
     set((state) => {
-      const { [workspaceId]: _removed, ...rest } = state.attachmentsByWorkspace;
-      return { attachmentsByWorkspace: rest };
+      const { [sessionKey]: _removed, ...rest } = state.attachmentsBySession;
+      return { attachmentsBySession: rest };
     }),
-  setWorkspaceTextAnnotations: (workspaceId, annotations) =>
+  setSessionTextAnnotations: (sessionKey, annotations) =>
     set((state) => {
       if (annotations.length === 0) {
-        const { [workspaceId]: _removed, ...rest } = state.textAnnotationsByWorkspace;
-        return { textAnnotationsByWorkspace: rest };
+        const { [sessionKey]: _removed, ...rest } = state.textAnnotationsBySession;
+        return { textAnnotationsBySession: rest };
       }
       return {
-        textAnnotationsByWorkspace: {
-          ...state.textAnnotationsByWorkspace,
-          [workspaceId]: [...annotations],
+        textAnnotationsBySession: {
+          ...state.textAnnotationsBySession,
+          [sessionKey]: [...annotations],
         },
       };
     }),
-  clearWorkspaceTextAnnotations: (workspaceId) =>
+  clearSessionTextAnnotations: (sessionKey) =>
     set((state) => {
-      const { [workspaceId]: _removed, ...rest } = state.textAnnotationsByWorkspace;
-      return { textAnnotationsByWorkspace: rest };
+      const { [sessionKey]: _removed, ...rest } = state.textAnnotationsBySession;
+      return { textAnnotationsBySession: rest };
     }),
-  setWorkspaceReferences: (workspaceId, references) =>
+  setSessionReferences: (sessionKey, references) =>
     set((state) => {
       if (references.length === 0) {
-        const { [workspaceId]: _removed, ...rest } = state.referencesByWorkspace;
-        return { referencesByWorkspace: rest };
+        const { [sessionKey]: _removed, ...rest } = state.referencesBySession;
+        return { referencesBySession: rest };
       }
       return {
-        referencesByWorkspace: {
-          ...state.referencesByWorkspace,
-          [workspaceId]: [...references],
+        referencesBySession: {
+          ...state.referencesBySession,
+          [sessionKey]: [...references],
         },
       };
     }),
-  clearWorkspaceReferences: (workspaceId) =>
+  clearSessionReferences: (sessionKey) =>
     set((state) => {
-      const { [workspaceId]: _removed, ...rest } = state.referencesByWorkspace;
-      return { referencesByWorkspace: rest };
+      const { [sessionKey]: _removed, ...rest } = state.referencesBySession;
+      return { referencesBySession: rest };
     }),
   addPendingFlexibleMessage: (sessionKey, message) =>
     set((state) => ({

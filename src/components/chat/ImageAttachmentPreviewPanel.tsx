@@ -8,7 +8,11 @@ import {
 import { Check, Crosshair, Loader2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { ipc } from "../../lib/ipc";
-import { useChatComposerStore } from "../../stores/chatComposerStore";
+import {
+  getChatComposerSessionKey,
+  useChatComposerStore,
+} from "../../stores/chatComposerStore";
+import { useThreadStore } from "../../stores/threadStore";
 import { useUiStore } from "../../stores/uiStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import type { ChatAttachment, ImageAttachmentAnnotation } from "../../types";
@@ -39,14 +43,34 @@ interface AnnotationEditorState {
 export function ImageAttachmentPreviewPanel() {
   const { t } = useTranslation("chat");
   const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
+  /*
+   * 旧项目级图片附件读取代码保留如下，不参与编译；当前实现按聊天会话范围读取：
+   * const attachments = useChatComposerStore((state) =>
+   *   activeWorkspaceId
+   *     ? state.attachmentsByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_ATTACHMENTS
+   *     : EMPTY_CHAT_ATTACHMENTS,
+   * );
+   * const setWorkspaceAttachments = useChatComposerStore(
+   *   (state) => state.setWorkspaceAttachments,
+   * );
+   */
+  const activeThread = useThreadStore((state) =>
+    state.threads.find((thread) => thread.id === state.activeThreadId) ?? null,
+  );
+  const composerSessionKey = activeWorkspaceId
+    ? getChatComposerSessionKey(
+        activeWorkspaceId,
+        activeThread?.workspaceId === activeWorkspaceId ? activeThread.id : null,
+      )
+    : null;
   const previewTarget = useUiStore((state) => state.imageAttachmentPreview);
   const attachments = useChatComposerStore((state) =>
-    activeWorkspaceId
-      ? state.attachmentsByWorkspace[activeWorkspaceId] ?? EMPTY_CHAT_ATTACHMENTS
+    composerSessionKey
+      ? state.attachmentsBySession[composerSessionKey] ?? EMPTY_CHAT_ATTACHMENTS
       : EMPTY_CHAT_ATTACHMENTS,
   );
-  const setWorkspaceAttachments = useChatComposerStore(
-    (state) => state.setWorkspaceAttachments,
+  const setSessionAttachments = useChatComposerStore(
+    (state) => state.setSessionAttachments,
   );
   const attachment = previewTarget?.workspaceId === activeWorkspaceId
     ? attachments.find((candidate) => candidate.id === previewTarget.attachmentId) ?? null
@@ -167,9 +191,43 @@ export function ImageAttachmentPreviewPanel() {
       setAnnotationEditor(null);
       return;
     }
-    const currentAttachments = useChatComposerStore.getState().attachmentsByWorkspace[activeWorkspaceId] ?? [];
-    setWorkspaceAttachments(
-      activeWorkspaceId,
+    if (!composerSessionKey) {
+      return;
+    }
+    /*
+     * 旧项目级图片标注读写完整代码保留如下，不参与编译：
+     * const currentAttachments =
+     *   useChatComposerStore.getState().attachmentsByWorkspace[activeWorkspaceId] ?? [];
+     * setWorkspaceAttachments(
+     *   activeWorkspaceId,
+     *   currentAttachments.map((candidate) => {
+     *     if (candidate.id !== attachment.id) {
+     *       return candidate;
+     *     }
+     *     const currentAnnotations = candidate.imageAnnotations ?? [];
+     *     const nextAnnotation: ImageAttachmentAnnotation = {
+     *       id: annotationEditor.annotationId ?? crypto.randomUUID(),
+     *       number: annotationEditor.number,
+     *       xPercent: annotationEditor.xPercent,
+     *       yPercent: annotationEditor.yPercent,
+     *       comment,
+     *     };
+     *     return {
+     *       ...candidate,
+     *       imageAnnotations: annotationEditor.annotationId
+     *         ? currentAnnotations.map((annotation) =>
+     *             annotation.id === annotationEditor.annotationId ? nextAnnotation : annotation,
+     *           )
+     *         : [...currentAnnotations, nextAnnotation],
+     *     };
+     *   }),
+     * );
+     */
+    const currentAttachments =
+      useChatComposerStore.getState().attachmentsBySession[composerSessionKey] ?? [];
+    // 旧项目级附件读写已改为当前聊天会话范围，图片标注仍保持原有数据结构。
+    setSessionAttachments(
+      composerSessionKey,
       currentAttachments.map((candidate) => {
         if (candidate.id !== attachment.id) {
           return candidate;
