@@ -3,7 +3,8 @@ use std::{
     collections::HashMap,
     collections::VecDeque,
     env,
-    ffi::OsString,
+    // 旧 codex_augmented_path 实现保留在注释中：
+    // ffi::OsString,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -4095,6 +4096,8 @@ fn app_path_preview(path: Option<&str>) -> String {
         .to_string()
 }
 
+/*
+旧 codex_augmented_path 实现由 runtime_env::get 接替，保留代码以便追溯：
 fn codex_augmented_path(executable: &Path) -> Option<OsString> {
     runtime_env::augmented_path_with_prepend(
         executable
@@ -4103,14 +4106,17 @@ fn codex_augmented_path(executable: &Path) -> Option<OsString> {
             .map(|value| value.to_path_buf()),
     )
 }
+*/
 
 async fn codex_command(executable: &Path) -> Command {
     let mut command = Command::new(executable);
     process_utils::configure_tokio_command(&mut command);
-    runtime_env::apply_missing_login_shell_env(&mut command).await;
-    if let Some(augmented_path) = codex_augmented_path(executable) {
-        command.env("PATH", augmented_path);
-    }
+    // 旧登录 Shell 环境导入和手工 PATH 处理由 runtime_env::get 接替：
+    // runtime_env::apply_missing_login_shell_env(&mut command).await;
+    // if let Some(augmented_path) = codex_augmented_path(executable) {
+    //     command.env("PATH", augmented_path);
+    // }
+    command.envs(runtime_env::get(executable).await);
     command
 }
 

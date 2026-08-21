@@ -172,6 +172,109 @@ pub fn resolve_executable(binary: &str) -> Option<PathBuf> {
     which::which_in(binary, Some(augmented_path), cwd).ok()
 }
 
+/// 获取 CLI 子进程使用的默认运行环境。
+///
+/// 先复制当前进程的完整环境，再补充登录 Shell 中缺失且允许导入的变量，
+/// 最后使用统一的 PATH 规则生成 PATH；PATH 生成失败时保留快照中的原值。
+pub async fn get(executable: &Path) -> HashMap<OsString, OsString> {
+    let mut values: HashMap<OsString, OsString> = env::vars_os().collect();
+    let shell_env = login_shell_environment().await;
+
+    for (key, value) in shell_env {
+        if should_import_login_shell_env_var(key) && !values.contains_key(key) {
+            values.insert(key.clone(), value.clone());
+        }
+    }
+
+    let prepend = executable
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .into_iter()
+        .map(Path::to_path_buf);
+    if let Some(path) = augmented_path_with_prepend(prepend) {
+        values.insert(OsString::from("PATH"), path);
+    }
+
+    values
+}
+
+/// 获取 OpenCode 子进程的完整运行环境。
+///
+/// 先调用 [`get`] 获取默认环境，再覆盖 OpenCode 服务密码和隔离配置目录。
+pub async fn get_opencode_env(
+    executable: &Path,
+    password: &str,
+    run_dir: &Path,
+) -> HashMap<OsString, OsString> {
+    let mut values = get(executable).await;
+    values.insert(
+        OsString::from("OPENCODE_SERVER_PASSWORD"),
+        OsString::from(password),
+    );
+    values.insert(
+        OsString::from("OPENCODE_CONFIG_DIR"),
+        run_dir.join(".opencode").into_os_string(),
+    );
+    values.insert(
+        OsString::from("XDG_CONFIG_HOME"),
+        run_dir.as_os_str().to_os_string(),
+    );
+    values
+}
+
+/// 获取 Claude Code 子进程的完整运行环境。
+///
+/// 先调用 [`get`] 获取默认环境，仅在调用方提供对应值时增加 Claude Code 专用变量。
+pub async fn get_claude_env(
+    node_executable: &Path,
+    sdk_module_specifier: Option<&str>,
+    claude_executable: Option<&Path>,
+) -> HashMap<OsString, OsString> {
+    let mut values = get(node_executable).await;
+    if let Some(sdk_module_specifier) = sdk_module_specifier {
+        values.insert(
+            OsString::from("CLAUDE_AGENT_SDK_MODULE"),
+            OsString::from(sdk_module_specifier),
+        );
+    }
+    if let Some(claude_executable) = claude_executable {
+        values.insert(
+            OsString::from("PANES_CLAUDE_CODE_EXECUTABLE"),
+            claude_executable.as_os_str().to_os_string(),
+        );
+    }
+    values
+}
+
+/// 使用 POSIX Shell 单引号安全转义一个值。
+pub fn quote_posix(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// 生成远端 OpenCode 服务密码环境变量的导出片段。
+pub fn get_remote_opencode_env(password: &str) -> String {
+    format!("export OPENCODE_SERVER_PASSWORD={};", quote_posix(password))
+}
+
+/// 生成远端 Claude Code 可执行文件环境变量的导出片段。
+///
+/// 仅接受 ASCII Shell 变量名，避免把未经校验的 Shell 表达式拼接进远端命令。
+pub fn get_remote_claude_env(shell_variable: &str) -> anyhow::Result<String> {
+    let mut chars = shell_variable.chars();
+    let Some(first) = chars.next() else {
+        anyhow::bail!("remote shell variable name must not be empty");
+    };
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        anyhow::bail!("invalid remote shell variable name");
+    }
+
+    Ok(format!(
+        "export PANES_CLAUDE_CODE_EXECUTABLE=\"${{{shell_variable}}}\";"
+    ))
+}
+
 pub async fn apply_missing_login_shell_env(command: &mut Command) {
     let shell_env = login_shell_environment().await;
     for (key, value) in shell_env {
@@ -1108,6 +1211,137 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&self.temp_dir);
         }
+    }
+
+    struct EnvironmentVariableGuard {
+        /// 被保护的进程环境变量名称。
+        name: &'static str,
+        /// 测试开始前该环境变量的原始值。
+        original: Option<OsString>,
+    }
+
+    impl Drop for EnvironmentVariableGuard {
+        fn drop(&mut self) {
+            match self.original.as_ref() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    fn environment_variable_guard(name: &'static str) -> EnvironmentVariableGuard {
+        EnvironmentVariableGuard {
+            name,
+            original: std::env::var_os(name),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_preserves_current_environment_and_prepends_executable_parent() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        let variable_name = "PANES_RUNTIME_ENV_DEFAULT_TEST";
+        let _variable_guard = environment_variable_guard(variable_name);
+        std::env::set_var(variable_name, "current-value");
+
+        let executable = std::env::temp_dir()
+            .join("panes-runtime-env-bin")
+            .join("cli");
+        let executable_parent = executable
+            .parent()
+            .expect("executable parent")
+            .to_path_buf();
+        let values = get(&executable).await;
+
+        assert_eq!(
+            values.get(OsStr::new(variable_name)),
+            Some(&OsString::from("current-value"))
+        );
+        let path = values.get(OsStr::new("PATH")).expect("PATH should exist");
+        assert_eq!(
+            env::split_paths(path).next(),
+            Some(executable_parent),
+            "executable parent should be the first PATH entry"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_opencode_env_overrides_all_special_values() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        let _password_guard = environment_variable_guard("OPENCODE_SERVER_PASSWORD");
+        let _config_guard = environment_variable_guard("OPENCODE_CONFIG_DIR");
+        let _xdg_guard = environment_variable_guard("XDG_CONFIG_HOME");
+        std::env::set_var("OPENCODE_SERVER_PASSWORD", "old-password");
+        std::env::set_var("OPENCODE_CONFIG_DIR", "old-config");
+        std::env::set_var("XDG_CONFIG_HOME", "old-xdg");
+
+        let executable = std::env::temp_dir().join("opencode");
+        let run_dir = std::env::temp_dir().join("panes-opencode-run");
+        let values = get_opencode_env(&executable, "new-password", &run_dir).await;
+
+        assert_eq!(
+            values.get(OsStr::new("OPENCODE_SERVER_PASSWORD")),
+            Some(&OsString::from("new-password"))
+        );
+        assert_eq!(
+            values.get(OsStr::new("OPENCODE_CONFIG_DIR")),
+            Some(&run_dir.join(".opencode").into_os_string())
+        );
+        assert_eq!(
+            values.get(OsStr::new("XDG_CONFIG_HOME")),
+            Some(&run_dir.clone().into_os_string())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_claude_env_adds_provided_values_and_preserves_defaults_for_none() {
+        let _env_guard = env_lock().lock().expect("env lock poisoned");
+        let _sdk_guard = environment_variable_guard("CLAUDE_AGENT_SDK_MODULE");
+        let _executable_guard = environment_variable_guard("PANES_CLAUDE_CODE_EXECUTABLE");
+        std::env::set_var("CLAUDE_AGENT_SDK_MODULE", "old-sdk");
+        std::env::set_var("PANES_CLAUDE_CODE_EXECUTABLE", "old-executable");
+
+        let runtime_executable = std::env::temp_dir().join("runtime");
+        let claude_executable = PathBuf::from("/opt/claude/bin/claude");
+        let values = get_claude_env(
+            &runtime_executable,
+            Some("/opt/claude/sdk"),
+            Some(&claude_executable),
+        )
+        .await;
+        assert_eq!(
+            values.get(OsStr::new("CLAUDE_AGENT_SDK_MODULE")),
+            Some(&OsString::from("/opt/claude/sdk"))
+        );
+        assert_eq!(
+            values.get(OsStr::new("PANES_CLAUDE_CODE_EXECUTABLE")),
+            Some(&claude_executable.clone().into_os_string())
+        );
+
+        std::env::set_var("CLAUDE_AGENT_SDK_MODULE", "parent-sdk");
+        std::env::set_var("PANES_CLAUDE_CODE_EXECUTABLE", "parent-executable");
+        let values = get_claude_env(&runtime_executable, None, None).await;
+        assert_eq!(
+            values.get(OsStr::new("CLAUDE_AGENT_SDK_MODULE")),
+            Some(&OsString::from("parent-sdk"))
+        );
+        assert_eq!(
+            values.get(OsStr::new("PANES_CLAUDE_CODE_EXECUTABLE")),
+            Some(&OsString::from("parent-executable"))
+        );
+    }
+
+    #[test]
+    fn remote_environment_helpers_quote_and_validate_values() {
+        assert_eq!(
+            get_remote_opencode_env("pa'ss"),
+            "export OPENCODE_SERVER_PASSWORD='pa'\\''ss';"
+        );
+        assert_eq!(
+            get_remote_claude_env("claude_path").expect("valid shell variable"),
+            "export PANES_CLAUDE_CODE_EXECUTABLE=\"${claude_path}\";"
+        );
+        assert!(get_remote_claude_env("a-b").is_err());
+        assert!(get_remote_claude_env("").is_err());
     }
 
     #[test]

@@ -36,7 +36,8 @@ async fn run(
 
     let mut command = Command::new(&executable);
     process_utils::configure_tokio_command(&mut command);
-    runtime_env::apply_missing_login_shell_env(&mut command).await;
+    // 旧登录 Shell 环境导入由 runtime_env::get 接替：
+    // runtime_env::apply_missing_login_shell_env(&mut command).await;
     command.args(args).kill_on_drop(true);
 
     if let Some(cwd) = cwd.map(str::trim).filter(|value| !value.is_empty()) {
@@ -46,14 +47,16 @@ async fn run(
         }
     }
 
-    if let Some(path) = runtime_env::augmented_path_with_prepend(
-        executable
-            .parent()
-            .into_iter()
-            .map(|value| value.to_path_buf()),
-    ) {
-        command.env("PATH", path);
-    }
+    // 旧手工 PATH 处理由 runtime_env::get 接替：
+    // if let Some(path) = runtime_env::augmented_path_with_prepend(
+    //     executable
+    //         .parent()
+    //         .into_iter()
+    //         .map(|value| value.to_path_buf()),
+    // ) {
+    //     command.env("PATH", path);
+    // }
+    command.envs(runtime_env::get(&executable).await);
 
     let output = timeout(duration, command.output())
         .await

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
 use anyhow::Context;
 use tauri::State;
@@ -6,7 +6,6 @@ use tokio::process::Command;
 
 use crate::local_cli_service_lifecycle::LocalCliServiceLifecycle;
 
-#[cfg(not(target_os = "windows"))]
 use crate::runtime_env;
 use crate::{
     cli_tools::{factory::CliToolFactory, CliExecutionContext, CliLocationKind, CliTool},
@@ -1011,6 +1010,7 @@ async fn execute_engine_check_command(command: &str) -> anyhow::Result<EngineChe
     let started = Instant::now();
 
     let output = build_shell_command(command)
+        .await
         .output()
         .await
         .with_context(|| format!("failed to execute check command: `{command}`"))?;
@@ -1028,27 +1028,30 @@ async fn execute_engine_check_command(command: &str) -> anyhow::Result<EngineChe
 }
 
 #[cfg(target_os = "windows")]
-fn build_shell_command(command: &str) -> Command {
+async fn build_shell_command(command: &str) -> Command {
     let mut cmd = Command::new("cmd");
     process_utils::configure_tokio_command(&mut cmd);
     cmd.arg("/C").arg(command);
+    cmd.envs(runtime_env::get(Path::new("cmd")).await);
     cmd
 }
 
 #[cfg(not(target_os = "windows"))]
-fn build_shell_command(command: &str) -> Command {
+async fn build_shell_command(command: &str) -> Command {
     let spec = runtime_env::command_shell_for_string(command);
     let mut cmd = Command::new(&spec.program);
     process_utils::configure_tokio_command(&mut cmd);
     cmd.args(&spec.args);
-    if let Some(augmented_path) = runtime_env::augmented_path_with_prepend(
-        spec.program
-            .parent()
-            .into_iter()
-            .map(|value| value.to_path_buf()),
-    ) {
-        cmd.env("PATH", augmented_path);
-    }
+    // 旧手工 PATH 处理由 runtime_env::get 接替：
+    // if let Some(augmented_path) = runtime_env::augmented_path_with_prepend(
+    //     spec.program
+    //         .parent()
+    //         .into_iter()
+    //         .map(|value| value.to_path_buf()),
+    // ) {
+    //     cmd.env("PATH", augmented_path);
+    // }
+    cmd.envs(runtime_env::get(&spec.program).await);
     cmd
 }
 

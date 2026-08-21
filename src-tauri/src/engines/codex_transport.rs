@@ -1,6 +1,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{
-    collections::HashMap, ffi::OsString, path::Path, process::Stdio, sync::Arc, time::Duration,
+    collections::HashMap,
+    // 旧 codex_augmented_path 实现保留在注释中：
+    // ffi::OsString,
+    path::Path,
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -98,10 +104,12 @@ impl CodexTransport {
     pub async fn spawn(codex_executable: &str) -> anyhow::Result<Self> {
         let mut command = Command::new(codex_executable);
         process_utils::configure_tokio_command(&mut command);
-        runtime_env::apply_missing_login_shell_env(&mut command).await;
-        if let Some(augmented_path) = codex_augmented_path(codex_executable) {
-            command.env("PATH", augmented_path);
-        }
+        // 旧登录 Shell 环境导入和手工 PATH 处理由 runtime_env::get 接替：
+        // runtime_env::apply_missing_login_shell_env(&mut command).await;
+        // if let Some(augmented_path) = codex_augmented_path(codex_executable) {
+        //     command.env("PATH", augmented_path);
+        // }
+        command.envs(runtime_env::get(Path::new(codex_executable)).await);
 
         let mut child = command
             .arg("app-server")
@@ -992,9 +1000,12 @@ fn method_signature(method: &str) -> String {
         .collect()
 }
 
+/*
+旧 codex_augmented_path 实现由 runtime_env::get 接替，保留代码以便追溯：
 fn codex_augmented_path(executable: &str) -> Option<OsString> {
     runtime_env::augmented_path_with_prepend([Path::new(executable).parent()?.to_path_buf()])
 }
+*/
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
-    ffi::OsString,
+    // 旧 executable_augmented_path 实现由 runtime_env::get 接替：
+    // ffi::OsString,
     net::TcpListener,
     path::{Path, PathBuf},
     sync::{
@@ -2929,7 +2930,8 @@ async fn start_server(
 
     let mut command = Command::new(&executable);
     process_utils::configure_tokio_command(&mut command);
-    runtime_env::apply_missing_login_shell_env(&mut command).await;
+    // 旧实现由 runtime_env::get_opencode_env 接替：
+    // runtime_env::apply_missing_login_shell_env(&mut command).await;
     command
         .arg("serve")
         .arg("--hostname")
@@ -2937,16 +2939,18 @@ async fn start_server(
         .arg("--port")
         .arg(port.to_string())
         .current_dir(cwd)
-        .env("OPENCODE_SERVER_PASSWORD", &password)
-        .env("OPENCODE_CONFIG_DIR", run_dir.join(".opencode"))
-        .env("XDG_CONFIG_HOME", &run_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    if let Some(path) = executable_augmented_path(&executable) {
-        command.env("PATH", path);
-    }
+    // 旧 OpenCode 专用环境变量链和手工 PATH 处理由 runtime_env 统一接替：
+    // command.env("OPENCODE_SERVER_PASSWORD", &password)
+    //     .env("OPENCODE_CONFIG_DIR", run_dir.join(".opencode"))
+    //     .env("XDG_CONFIG_HOME", &run_dir);
+    // if let Some(path) = executable_augmented_path(&executable) {
+    //     command.env("PATH", path);
+    // }
+    command.envs(runtime_env::get_opencode_env(&executable, &password, &run_dir).await);
 
     let mut child = command.spawn().with_context(|| {
         format!(
@@ -3170,11 +3174,13 @@ fn resolve_opencode_executable() -> Option<PathBuf> {
 async fn run_opencode_command(executable: &Path, args: &[&str]) -> Result<String> {
     let mut command = Command::new(executable);
     process_utils::configure_tokio_command(&mut command);
-    runtime_env::apply_missing_login_shell_env(&mut command).await;
+    // 旧登录 Shell 环境导入和手工 PATH 处理由 runtime_env::get 接替：
+    // runtime_env::apply_missing_login_shell_env(&mut command).await;
     command.args(args);
-    if let Some(path) = executable_augmented_path(executable) {
-        command.env("PATH", path);
-    }
+    // if let Some(path) = executable_augmented_path(executable) {
+    //     command.env("PATH", path);
+    // }
+    command.envs(runtime_env::get(executable).await);
 
     let output = timeout(OPENCODE_COMMAND_TIMEOUT, command.output())
         .await
@@ -3264,6 +3270,8 @@ fn parse_verbose_model_records(output: &str) -> Result<Vec<OpenCodeVerboseModel>
     Ok(records)
 }
 
+/*
+旧 executable_augmented_path 实现由 runtime_env::get 接替，保留代码以便追溯：
 fn executable_augmented_path(executable: &Path) -> Option<OsString> {
     runtime_env::augmented_path_with_prepend(
         executable
@@ -3272,6 +3280,7 @@ fn executable_augmented_path(executable: &Path) -> Option<OsString> {
             .map(|value| value.to_path_buf()),
     )
 }
+*/
 
 fn event_matches_session(event: &OpenCodeBusEvent, session_id: &str) -> bool {
     event

@@ -1,4 +1,6 @@
-use std::{ffi::OsString, path::Path};
+use std::path::Path;
+// 旧 executable_augmented_path 实现保留在注释中：
+// use std::ffi::OsString;
 
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -206,14 +208,16 @@ async fn run_install_process(
     let mut command = Command::new(program);
     process_utils::configure_tokio_command(&mut command);
     command.args(args);
-    if let Some(augmented_path) = runtime_env::augmented_path_with_prepend(
-        Path::new(program)
-            .parent()
-            .into_iter()
-            .map(|value| value.to_path_buf()),
-    ) {
-        command.env("PATH", augmented_path);
-    }
+    // 旧手工 PATH 处理由 runtime_env::get 接替：
+    // if let Some(augmented_path) = runtime_env::augmented_path_with_prepend(
+    //     Path::new(program)
+    //         .parent()
+    //         .into_iter()
+    //         .map(|value| value.to_path_buf()),
+    // ) {
+    //     command.env("PATH", augmented_path);
+    // }
+    command.envs(runtime_env::get(Path::new(program)).await);
 
     let mut child = command
         .stdout(std::process::Stdio::piped())
@@ -296,6 +300,7 @@ async fn run_install_process(
 async fn get_command_version(path: &Path, args: &[&str]) -> Option<String> {
     let mut command = Command::new(path);
     process_utils::configure_tokio_command(&mut command);
+    command.envs(runtime_env::get(path).await);
     let output = command.args(args).output().await.ok()?;
     if !output.status.success() {
         return None;
@@ -311,9 +316,11 @@ async fn get_command_version(path: &Path, args: &[&str]) -> Option<String> {
 async fn get_command_version_with_augmented_path(path: &Path, args: &[&str]) -> Option<String> {
     let mut command = Command::new(path);
     process_utils::configure_tokio_command(&mut command);
-    if let Some(augmented_path) = executable_augmented_path(path) {
-        command.env("PATH", augmented_path);
-    }
+    // 旧手工 PATH 处理由 runtime_env::get 接替：
+    // if let Some(augmented_path) = executable_augmented_path(path) {
+    //     command.env("PATH", augmented_path);
+    // }
+    command.envs(runtime_env::get(path).await);
     let output = command.args(args).output().await.ok()?;
     if !output.status.success() {
         return None;
@@ -326,6 +333,8 @@ async fn get_command_version_with_augmented_path(path: &Path, args: &[&str]) -> 
     }
 }
 
+/*
+旧 executable_augmented_path 实现由 runtime_env::get 接替，保留代码以便追溯：
 fn executable_augmented_path(executable: &Path) -> Option<OsString> {
     runtime_env::augmented_path_with_prepend(
         executable
@@ -334,6 +343,7 @@ fn executable_augmented_path(executable: &Path) -> Option<OsString> {
             .map(|value| value.to_path_buf()),
     )
 }
+*/
 
 #[cfg(not(target_os = "windows"))]
 async fn detect_via_login_shell(command: &str, version_flag: &str) -> Option<(String, String)> {

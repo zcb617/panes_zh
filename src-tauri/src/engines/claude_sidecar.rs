@@ -1,7 +1,8 @@
 use std::{
     collections::HashMap,
     env,
-    ffi::OsString,
+    // 旧 executable_augmented_path 实现保留在注释中：
+    // ffi::OsString,
     fs::{self, File},
     path::{Path, PathBuf},
     sync::Arc,
@@ -288,24 +289,36 @@ impl ClaudeTransport {
             .unwrap_or_else(|| PathBuf::from("."));
         let sdk_module_specifier = Self::prepare_bundled_sdk_module_specifier(&sidecar_dir).await?;
 
-        let mut command = Command::new(&node);
-        process_utils::configure_tokio_command(&mut command);
-        runtime_env::apply_missing_login_shell_env(&mut command).await;
-        if let Some(augmented_path) = executable_augmented_path(&node) {
-            command.env("PATH", augmented_path);
-        }
-        if let Some(module_specifier) = sdk_module_specifier {
-            command.env("CLAUDE_AGENT_SDK_MODULE", module_specifier);
-        }
-        if let Some(claude_executable) = resolve_system_claude_executable() {
+        let claude_executable = resolve_system_claude_executable();
+        if let Some(claude_executable) = claude_executable.as_ref() {
             log::info!(
                 "claude sidecar: using system Claude Code runtime at {}",
                 claude_executable.display()
             );
-            command.env("PANES_CLAUDE_CODE_EXECUTABLE", claude_executable);
         } else {
             log::info!("claude sidecar: system Claude Code not found, using bundled runtime");
         }
+        let mut command = Command::new(&node);
+        process_utils::configure_tokio_command(&mut command);
+        // 旧登录 Shell 环境、PATH 和 Claude 专用变量设置由 runtime_env::get_claude_env 接替：
+        // runtime_env::apply_missing_login_shell_env(&mut command).await;
+        // if let Some(augmented_path) = executable_augmented_path(&node) {
+        //     command.env("PATH", augmented_path);
+        // }
+        // if let Some(module_specifier) = sdk_module_specifier {
+        //     command.env("CLAUDE_AGENT_SDK_MODULE", module_specifier);
+        // }
+        // if let Some(claude_executable) = claude_executable.as_ref() {
+        //     command.env("PANES_CLAUDE_CODE_EXECUTABLE", claude_executable);
+        // }
+        command.envs(
+            runtime_env::get_claude_env(
+                &node,
+                sdk_module_specifier.as_deref(),
+                claude_executable.as_deref(),
+            )
+            .await,
+        );
         let mut child = command
             .arg(&sidecar_path)
             .current_dir(&sidecar_dir)
@@ -1366,6 +1379,8 @@ fn trim_sidecar_event_for_buffer(mut event: SidecarEvent) -> SidecarEvent {
     event
 }
 
+/*
+旧 executable_augmented_path 实现由 runtime_env::get_claude_env 接替，保留代码以便追溯：
 fn executable_augmented_path(executable: &Path) -> Option<OsString> {
     runtime_env::augmented_path_with_prepend(
         executable
@@ -1374,6 +1389,7 @@ fn executable_augmented_path(executable: &Path) -> Option<OsString> {
             .map(|value| value.to_path_buf()),
     )
 }
+*/
 
 fn paths_match(left: &Path, right: &Path) -> bool {
     if left == right {

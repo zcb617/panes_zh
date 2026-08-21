@@ -459,14 +459,16 @@ async fn run_harness_install(
     let mut command = Command::new(program);
     process_utils::configure_tokio_command(&mut command);
     command.args(args);
-    if let Some(augmented_path) = runtime_env::augmented_path_with_prepend(
-        Path::new(program)
-            .parent()
-            .into_iter()
-            .map(|value| value.to_path_buf()),
-    ) {
-        command.env("PATH", augmented_path);
-    }
+    // 旧手工 PATH 处理由 runtime_env::get 接替：
+    // if let Some(augmented_path) = runtime_env::augmented_path_with_prepend(
+    //     Path::new(program)
+    //         .parent()
+    //         .into_iter()
+    //         .map(|value| value.to_path_buf()),
+    // ) {
+    //     command.env("PATH", augmented_path);
+    // }
+    command.envs(runtime_env::get(Path::new(program)).await);
 
     let mut child = command
         .stdout(std::process::Stdio::piped())
@@ -567,14 +569,16 @@ async fn run_harness_install_script(
     let mut command = Command::new(&spec.program);
     process_utils::configure_tokio_command(&mut command);
     command.args(&spec.args);
-    if let Some(augmented_path) = runtime_env::augmented_path_with_prepend(
-        spec.program
-            .parent()
-            .into_iter()
-            .map(|value| value.to_path_buf()),
-    ) {
-        command.env("PATH", augmented_path);
-    }
+    // 旧手工 PATH 处理由 runtime_env::get 接替：
+    // if let Some(augmented_path) = runtime_env::augmented_path_with_prepend(
+    //     spec.program
+    //         .parent()
+    //         .into_iter()
+    //         .map(|value| value.to_path_buf()),
+    // ) {
+    //     command.env("PATH", augmented_path);
+    // }
+    command.envs(runtime_env::get(&spec.program).await);
 
     let mut child = command
         .stdout(std::process::Stdio::piped())

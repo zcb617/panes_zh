@@ -19,11 +19,9 @@ use uuid::Uuid;
 use crate::{
     db::ssh_connections::SshConnectionRecord,
     message_notify_helper::notify_app_startup_progress,
+    runtime_env,
     // ssh::{gateway, runtime::quote_posix},
-    ssh::{
-        gateway,
-        runtime::{quote_posix, wrap_remote_login_shell_command},
-    },
+    ssh::{gateway, runtime::wrap_remote_login_shell_command},
 };
 
 pub struct SshCliTunnel {
@@ -833,23 +831,25 @@ fn build_remote_service_start_command(tunnel: &SshCliTunnel) -> anyhow::Result<S
             "exec env codex app-server --listen ws://127.0.0.1:{}",
             tunnel.remote_port()
         ),
-        "opencode" => format!(
-            // "export OPENCODE_SERVER_PASSWORD={}; exec opencode serve --hostname 127.0.0.1 --port {}",
-            "export OPENCODE_SERVER_PASSWORD={}; exec env opencode serve --hostname 127.0.0.1 --port {}",
-            quote_posix(
-                tunnel
-                    .remote_service_secret()
-                    .context("OpenCode 远端服务密码不存在")?
-            ),
-            tunnel.remote_port()
-        ),
-        "claude" => format!(
-            // "claude_path=$(type -P claude) || exit 44; export PANES_CLAUDE_CODE_EXECUTABLE=\"$claude_path\"; exec no{} {}/claude-remote-session-server.mjs --host 127.0.0.1 --port {}",
-            "claude_path=$(type -P claude) || {{ echo 'Claude Code executable not found' >&2; exit 44; }}; export PANES_CLAUDE_CODE_EXECUTABLE=\"$claude_path\"; exec env no{} {}/claude-remote-session-server.mjs --host 127.0.0.1 --port {}",
-            "de",
-            claude_runtime_remote_root(),
-            tunnel.remote_port(),
-        ),
+        "opencode" => {
+            let secret = tunnel
+                .remote_service_secret()
+                .context("OpenCode 远端服务密码不存在")?;
+            let opencode_env = runtime_env::get_remote_opencode_env(secret);
+            format!(
+                "{opencode_env}exec env opencode serve --hostname 127.0.0.1 --port {}",
+                tunnel.remote_port()
+            )
+        }
+        "claude" => {
+            let claude_env = runtime_env::get_remote_claude_env("claude_path")?;
+            format!(
+                "claude_path=$(type -P claude) || {{ echo 'Claude Code executable not found' >&2; exit 44; }}; {claude_env}exec env no{} {}/claude-remote-session-server.mjs --host 127.0.0.1 --port {}",
+                "de",
+                claude_runtime_remote_root(),
+                tunnel.remote_port(),
+            )
+        }
         other => anyhow::bail!("当前未实现该 SSH 远端 CLI 服务启动: {other}"),
     };
     let launch_command = wrap_remote_login_shell_command(&launch_command);
@@ -1269,7 +1269,12 @@ mod tests {
     fn build_opencode_remote_service_start_command_uses_password_and_remote_port() {
         let command =
             build_remote_service_start_command(&tunnel("host-a", "opencode", 41002)).unwrap();
-        assert!(command.contains("OPENCODE_SERVER_PASSWORD"));
+        let opencode_env = runtime_env::get_remote_opencode_env("");
+        let opencode_env_prefix = opencode_env
+            .split('=')
+            .next()
+            .expect("OpenCode environment prefix");
+        assert!(command.contains(opencode_env_prefix));
         assert!(command.contains("opencode serve --hostname 127.0.0.1 --port 41002"));
         assert!(command.contains("\"${SHELL:-/bin/sh}\" -lic"));
         assert!(command.contains("exec env opencode serve"));
@@ -1286,7 +1291,13 @@ mod tests {
         assert!(!command.contains("'$HOME/.cache/panes/runtime/claude/"));
         assert!(command.contains("--host 127.0.0.1 --port 41003"));
         assert!(command.contains("type -P claude"));
-        assert!(command.contains("PANES_CLAUDE_CODE_EXECUTABLE"));
+        let claude_env =
+            runtime_env::get_remote_claude_env("claude_path").expect("Claude environment prefix");
+        let claude_env_prefix = claude_env
+            .split('=')
+            .next()
+            .expect("Claude environment prefix");
+        assert!(command.contains(claude_env_prefix));
         assert!(command.contains("pid=$(cat \"$pid_file\"); kill \"$pid\""));
     }
 

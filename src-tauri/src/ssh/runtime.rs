@@ -139,7 +139,11 @@ pub fn validate_remote_relative_path(path: &str, allow_empty: bool) -> anyhow::R
 }
 
 pub fn quote_posix(value: &str) -> String {
+    /*
+    旧 POSIX 引号实现由 runtime_env 的公共方法接替，保留代码以便追溯：
     format!("'{}'", value.replace('\'', "'\\''"))
+    */
+    crate::runtime_env::quote_posix(value)
 }
 
 /// 使用远端账号自己的登录交互式 shell 执行命令，让 CLI 解析规则与用户登录后保持一致。
