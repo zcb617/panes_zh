@@ -292,6 +292,28 @@ pub fn set_engine_thread_id(
     Ok(())
 }
 
+/// 持久化调用方已经验证并格式化的线程最后活动时间。
+pub fn update_thread_last_activity(
+    db: &Database,
+    thread_id: &str,
+    last_activity_at: &str,
+) -> anyhow::Result<ThreadDto> {
+    let conn = db.connect()?;
+    let affected = conn
+        .execute(
+            "UPDATE threads SET last_activity_at = ?1 WHERE id = ?2",
+            params![last_activity_at, thread_id],
+        )
+        .context("failed to update thread last activity")?;
+
+    if affected == 0 {
+        anyhow::bail!("thread not found: {thread_id}");
+    }
+
+    get_thread(db, thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("thread not found after last activity update: {thread_id}"))
+}
+
 /// 重新配置尚未启动的会话运行时。
 ///
 /// 仅允许未建立远端会话、没有消息计数且消息表中也没有记录的会话切换 CLI。
@@ -723,6 +745,34 @@ mod tests {
                 .and_then(serde_json::Value::as_bool),
             Some(true)
         );
+    }
+
+    #[test]
+    fn update_thread_last_activity_persists_exact_timestamp() {
+        let db = test_db();
+        let thread = test_thread(&db, "Timestamp");
+        let expected_last_activity_at = "2026-08-19T12:33:53+00:00";
+
+        let updated =
+            update_thread_last_activity(&db, &thread.id, expected_last_activity_at).unwrap();
+
+        assert_eq!(updated.last_activity_at, expected_last_activity_at);
+        assert_eq!(updated.created_at, thread.created_at);
+
+        let persisted = get_thread(&db, &thread.id).unwrap().unwrap();
+        assert_eq!(persisted.last_activity_at, expected_last_activity_at);
+        assert_eq!(persisted.created_at, thread.created_at);
+    }
+
+    #[test]
+    fn update_thread_last_activity_rejects_missing_thread() {
+        let db = test_db();
+        let error = update_thread_last_activity(&db, "missing-thread", "2026-08-19T12:33:53+00:00")
+            .expect_err("missing thread must not update successfully");
+
+        assert!(error
+            .to_string()
+            .contains("thread not found: missing-thread"));
     }
 
     #[test]

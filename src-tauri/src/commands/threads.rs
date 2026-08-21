@@ -338,14 +338,18 @@ pub async fn attach_codex_remote_thread(
         &normalized_model_id,
         validated_reasoning_effort.as_deref(),
     );
+    // 只有远端返回并成功解析的更新时间才覆盖本地活动时间，避免写入 Unix epoch。
+    let remote_last_activity_at = (remote_thread.updated_at > 0)
+        .then(|| codex_remote_thread_timestamp_to_rfc3339(remote_thread.updated_at));
 
+    let existing_last_activity_at = remote_last_activity_at.clone();
     if let Some(existing) = existing_local_thread {
         return run_db(db, move |db| {
             let thread = match db::threads::restore_thread(db, &existing.id) {
                 Ok(restored) => restored,
                 Err(_) => existing,
             };
-            db::threads::update_thread_runtime_snapshot(
+            let updated = db::threads::update_thread_runtime_snapshot(
                 db,
                 &thread.id,
                 Some(&title),
@@ -355,7 +359,13 @@ pub async fn attach_codex_remote_thread(
                     false,
                 ),
                 Some(&metadata),
-            )
+            )?;
+            match existing_last_activity_at.as_deref() {
+                Some(last_activity_at) => {
+                    db::threads::update_thread_last_activity(db, &updated.id, last_activity_at)
+                }
+                None => Ok(updated),
+            }
         })
         .await;
     }
@@ -370,7 +380,7 @@ pub async fn attach_codex_remote_thread(
             &title,
         )?;
         db::threads::set_engine_thread_id(db, &created.id, &engine_thread_id)?;
-        db::threads::update_thread_runtime_snapshot(
+        let updated = db::threads::update_thread_runtime_snapshot(
             db,
             &created.id,
             Some(&title),
@@ -380,7 +390,13 @@ pub async fn attach_codex_remote_thread(
                 false,
             ),
             Some(&metadata),
-        )
+        )?;
+        match remote_last_activity_at.as_deref() {
+            Some(last_activity_at) => {
+                db::threads::update_thread_last_activity(db, &updated.id, last_activity_at)
+            }
+            None => Ok(updated),
+        }
     })
     .await
 }
