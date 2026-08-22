@@ -444,7 +444,8 @@ export function buildBlockSegments(
         nextTextIndex++;
       }
 
-      const sectionHooks: DisplayBlock[] = [];
+      const sectionParentHooks: DisplayBlock[] = [];
+      const sectionSubagentHooks: DisplayBlock[] = [];
       const sectionOtherBlocks: DisplayBlock[] = [];
       for (const entry of indexedBlocks.slice(textIndex + 1, nextTextIndex)) {
         if (
@@ -452,12 +453,16 @@ export function buildBlockSegments(
           (entry.block.kind.startsWith("hook_") ||
             entry.block.kind.startsWith("codex_hook_"))
         ) {
-          sectionHooks.push(entry);
+          if (getSubagentThreadId(entry.block)) {
+            sectionSubagentHooks.push(entry);
+          } else {
+            sectionParentHooks.push(entry);
+          }
         } else {
           sectionOtherBlocks.push(entry);
         }
       }
-      displayBlocks.push(...sectionHooks, ...sectionOtherBlocks);
+      displayBlocks.push(...sectionParentHooks, ...sectionSubagentHooks, ...sectionOtherBlocks);
       textIndex = nextTextIndex;
     }
   }

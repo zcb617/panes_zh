@@ -257,7 +257,7 @@ describe("buildBlockSegments", () => {
     });
   });
 
-  it("keeps a subagent activity card when an ordinary hook precedes its marked hook", () => {
+  it("merges parent hooks around a subagent source hook and keeps the subagent card", () => {
     const blocks: ContentBlock[] = [
       { type: "text", content: "主代理进度" },
       {
@@ -283,6 +283,13 @@ describe("buildBlockSegments", () => {
         outputChunks: [],
         status: "done",
       },
+      {
+        type: "notice",
+        kind: "hook_completed_regular",
+        level: "info",
+        title: "Hook completed",
+        message: "普通 Hook",
+      },
       { type: "text", content: "主代理完成" },
     ];
 
@@ -294,10 +301,11 @@ describe("buildBlockSegments", () => {
       "subagent-card",
       "single",
     ]);
+    expect(segments.filter((segment) => segment.kind === "hook-group")).toHaveLength(1);
     expect(segments[1]).toMatchObject({
       kind: "hook-group",
-      indices: [1],
-      blocks: [{ kind: "hook_started_regular" }],
+      indices: [1, 4],
+      blocks: [{ kind: "hook_started_regular" }, { kind: "hook_completed_regular" }],
     });
     expect(segments[2]).toMatchObject({
       kind: "subagent-card",
