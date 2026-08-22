@@ -203,6 +203,13 @@ impl CodexTransport {
                                     .await;
                                 }
                                 Ok(other) => {
+                                    // 在缓冲裁剪前保留子代理协议事件的完整参数，供后续确认真实任务标题字段。
+                                    if let Some(record) =
+                                        subagent_protocol_log_record(&other, sequence, "stdio")
+                                    {
+                                        crate::engines::codex::append_codex_transport_log(&record)
+                                            .await;
+                                    }
                                     let mut diagnostics = diagnostics_for_message(&other);
                                     diagnostics.sequence = sequence;
                                     record_last_event(&last_event, diagnostics.clone()).await;
@@ -802,6 +809,10 @@ async fn dispatch_websocket_line(
             }
         }
         Ok(message) => {
+            // WebSocket 与 stdio 共用同一筛选函数，且必须在消息裁剪前记录原始参数。
+            if let Some(record) = subagent_protocol_log_record(&message, sequence, "websocket") {
+                crate::engines::codex::append_codex_transport_log(&record).await;
+            }
             let mut diagnostics = diagnostics_for_message(&message);
             diagnostics.sequence = sequence;
             record_last_event(last_event, diagnostics).await;
@@ -874,6 +885,47 @@ async fn publish_transport_message(
         "send_result": if send_result.is_ok() { "published" } else { "no_receivers" },
     }))
     .await;
+}
+
+/// 从入站通知中筛选子代理生命周期事件，并保留完整参数用于协议排查。
+fn subagent_protocol_log_record(
+    message: &IncomingMessage,
+    sequence: u64,
+    source: &str,
+) -> Option<serde_json::Value> {
+    let IncomingMessage::Notification { method, params } = message else {
+        return None;
+    };
+
+    let method_signature = method_signature(method);
+    if method_signature != "itemstarted" && method_signature != "itemcompleted" {
+        return None;
+    }
+
+    let params_value = serde_json::from_str::<serde_json::Value>(params.get()).ok()?;
+    let item_type = params_value
+        .get("item")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|item| item.get("type"))
+        .and_then(serde_json::Value::as_str)?;
+    if item_type != "collabAgentToolCall" && item_type != "subAgentActivity" {
+        return None;
+    }
+
+    Some(serde_json::json!({
+        // 记录生成时间，便于与现有 transport 日志按时间交叉查询。
+        "at": Utc::now().to_rfc3339(),
+        // 固定事件名，便于从混合 transport 日志中筛选。
+        "event": "codex_subagent_protocol_item",
+        // 记录实际接收通道，stdio 与 websocket 保持相同字段结构。
+        "source": source,
+        // 记录入站序号，便于恢复协议事件顺序。
+        "sequence": sequence,
+        // 保留协议原始方法名，不使用规范化后的签名。
+        "method": method,
+        // 保留完整参数对象，包括当前实现尚未识别的字段。
+        "params": params_value,
+    }))
 }
 
 fn diagnostics_for_message(message: &IncomingMessage) -> CodexTransportEventDiagnostics {
@@ -1019,6 +1071,99 @@ mod tests {
             INCOMING_EVENT_BUFFER_CAPACITY <= 6400,
             "Codex incoming events are live fan-out only; raising this can retain large protocol payloads while idle"
         );
+    }
+
+    #[test]
+    fn subagent_protocol_log_record_preserves_collab_agent_params() {
+        let params = serde_json::json!({
+            "item": {
+                "type": "collabAgentToolCall",
+                "prompt": "Inspect the child agent activity",
+                "agentPath": "/root/archive_logging",
+                "futureTitleField": {
+                    "label": "Fix child card hook order finished"
+                }
+            }
+        });
+        let message = IncomingMessage::Notification {
+            method: "item/started".to_string(),
+            params: serde_json::value::to_raw_value(&params).expect("valid params"),
+        };
+
+        let record = subagent_protocol_log_record(&message, 17, "stdio")
+            .expect("collab agent item should be logged");
+
+        assert_eq!(
+            record.get("event"),
+            Some(&serde_json::json!("codex_subagent_protocol_item"))
+        );
+        assert_eq!(record.get("source"), Some(&serde_json::json!("stdio")));
+        assert_eq!(record.get("sequence"), Some(&serde_json::json!(17)));
+        assert_eq!(
+            record.get("method"),
+            Some(&serde_json::json!("item/started"))
+        );
+        assert_eq!(record.get("params"), Some(&params));
+    }
+
+    #[test]
+    fn subagent_protocol_log_record_preserves_subagent_activity_params() {
+        let params = serde_json::json!({
+            "item": {
+                "type": "subAgentActivity",
+                "agentPath": "/root/archive_logging",
+                "unknownTitleCandidate": "Fix child card hook order finished"
+            },
+            "metadata": {
+                "source": "codex"
+            }
+        });
+        let message = IncomingMessage::Notification {
+            method: "item/completed".to_string(),
+            params: serde_json::value::to_raw_value(&params).expect("valid params"),
+        };
+
+        let record = subagent_protocol_log_record(&message, 23, "websocket")
+            .expect("subagent activity item should be logged");
+
+        assert_eq!(record.get("source"), Some(&serde_json::json!("websocket")));
+        assert_eq!(record.get("sequence"), Some(&serde_json::json!(23)));
+        assert_eq!(
+            record.get("method"),
+            Some(&serde_json::json!("item/completed"))
+        );
+        assert_eq!(record.get("params"), Some(&params));
+    }
+
+    #[test]
+    fn subagent_protocol_log_record_excludes_non_subagent_messages() {
+        let command_execution = IncomingMessage::Notification {
+            method: "item/started".to_string(),
+            params: serde_json::value::to_raw_value(&serde_json::json!({
+                "item": {
+                    "type": "commandExecution"
+                }
+            }))
+            .expect("valid params"),
+        };
+        let non_item_method = IncomingMessage::Notification {
+            method: "turn/started".to_string(),
+            params: serde_json::value::to_raw_value(&serde_json::json!({
+                "item": {
+                    "type": "collabAgentToolCall"
+                }
+            }))
+            .expect("valid params"),
+        };
+        let response = IncomingMessage::Response(RpcResponse {
+            id: "response-1".to_string(),
+            result: Some(serde_json::json!({})),
+            error: None,
+        });
+
+        assert!(subagent_protocol_log_record(&command_execution, 1, "stdio").is_none());
+        assert!(subagent_protocol_log_record(&non_item_method, 2, "stdio").is_none());
+        assert!(subagent_protocol_log_record(&response, 3, "stdio").is_none());
     }
 
     #[tokio::test]
