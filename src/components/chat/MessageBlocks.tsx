@@ -553,9 +553,13 @@ export function buildBlockSegments(
       continue;
     }
 
-    // Collect consecutive action blocks
+    // 连续收集父代理 action；带合法子代理线程号的 action 是父代理工具卡边界。
     const runStart = i;
-    while (i < displayBlocks.length && displayBlocks[i].block.type === "action") {
+    while (
+      i < displayBlocks.length &&
+      displayBlocks[i].block.type === "action" &&
+      getSubagentThreadId(displayBlocks[i].block) === null
+    ) {
       i++;
     }
     const runEnd = i; // exclusive

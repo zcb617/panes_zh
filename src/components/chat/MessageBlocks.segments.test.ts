@@ -257,6 +257,170 @@ describe("buildBlockSegments", () => {
     });
   });
 
+  it("keeps a started subagent after completed parent actions in its activity card", () => {
+    const blocks: ContentBlock[] = [
+      { type: "text", content: "主代理进度" },
+      {
+        type: "action",
+        actionId: "parent-1",
+        actionType: "other",
+        summary: "父代理动作 1",
+        details: {},
+        outputChunks: [],
+        status: "done",
+      },
+      {
+        type: "action",
+        actionId: "parent-2",
+        actionType: "other",
+        summary: "父代理动作 2",
+        details: {},
+        outputChunks: [],
+        status: "done",
+      },
+      {
+        type: "action",
+        actionId: "parent-3",
+        actionType: "other",
+        summary: "父代理动作 3",
+        details: {},
+        outputChunks: [],
+        status: "done",
+      },
+      {
+        type: "action",
+        actionId: "parent-4",
+        actionType: "other",
+        summary: "父代理动作 4",
+        details: {},
+        outputChunks: [],
+        status: "done",
+      },
+      {
+        type: "action",
+        actionId: "activity-child-1",
+        actionType: "other",
+        summary: "子代理已开始",
+        details: {
+          subagentThreadId: "child-1",
+          subagentActivity: "started",
+          agentPath: "/root/implement_codex_thread_timestamp_sync",
+        },
+        outputChunks: [],
+        status: "running",
+      },
+      {
+        type: "action",
+        actionId: "command-child-1",
+        actionType: "command",
+        summary: "echo test",
+        details: { subagentThreadId: "child-1" },
+        outputChunks: [],
+        status: "done",
+      },
+      {
+        type: "action",
+        actionId: "file-child-1",
+        actionType: "file_edit",
+        summary: "修改文件",
+        details: { subagentThreadId: "child-1" },
+        outputChunks: [],
+        status: "done",
+      },
+    ];
+
+    const segments = buildBlockSegments(blocks, false, "codex");
+    const subagentCards = segments.filter((segment) => segment.kind === "subagent-card");
+    expect(subagentCards).toHaveLength(1);
+    expect(subagentCards[0]).toMatchObject({
+      kind: "subagent-card",
+      threadId: "child-1",
+      blocks: [
+        { actionId: "activity-child-1" },
+        { actionId: "command-child-1" },
+        { actionId: "file-child-1" },
+      ],
+    });
+
+    const parentActionIds = segments.flatMap((segment) => {
+      if (segment.kind !== "action-card") {
+        return [];
+      }
+      return segment.segments.flatMap((innerSegment) => {
+        if (innerSegment.kind === "action-group") {
+          return innerSegment.blocks.map((block) => block.actionId);
+        }
+        if (innerSegment.kind === "single" && innerSegment.block.type === "action") {
+          return [innerSegment.block.actionId];
+        }
+        return [];
+      });
+    });
+    expect(parentActionIds).toEqual(["parent-1", "parent-2", "parent-3", "parent-4"]);
+  });
+
+  it("keeps a started subagent out of a streaming parent action card", () => {
+    const blocks: ContentBlock[] = [
+      { type: "text", content: "主代理进度" },
+      {
+        type: "action",
+        actionId: "parent-running",
+        actionType: "other",
+        summary: "父代理运行动作",
+        details: {},
+        outputChunks: [],
+        status: "running",
+      },
+      {
+        type: "action",
+        actionId: "activity-child-running",
+        actionType: "other",
+        summary: "子代理已开始",
+        details: {
+          subagentThreadId: "child-running",
+          subagentActivity: "started",
+          agentPath: "/root/implement_codex_thread_timestamp_sync",
+        },
+        outputChunks: [],
+        status: "running",
+      },
+      {
+        type: "action",
+        actionId: "command-child-running",
+        actionType: "command",
+        summary: "echo streaming",
+        details: { subagentThreadId: "child-running" },
+        outputChunks: [],
+        status: "done",
+      },
+    ];
+
+    const segments = buildBlockSegments(blocks, true, "codex");
+    const subagentCards = segments.filter((segment) => segment.kind === "subagent-card");
+    expect(subagentCards).toHaveLength(1);
+    expect(subagentCards[0]).toMatchObject({
+      kind: "subagent-card",
+      threadId: "child-running",
+      blocks: [{ actionId: "activity-child-running" }, { actionId: "command-child-running" }],
+    });
+
+    const parentActionIds = segments.flatMap((segment) => {
+      if (segment.kind !== "action-card") {
+        return [];
+      }
+      return segment.segments.flatMap((innerSegment) => {
+        if (innerSegment.kind === "action-group") {
+          return innerSegment.blocks.map((block) => block.actionId);
+        }
+        if (innerSegment.kind === "single" && innerSegment.block.type === "action") {
+          return [innerSegment.block.actionId];
+        }
+        return [];
+      });
+    });
+    expect(parentActionIds).toEqual(["parent-running"]);
+  });
+
   it("merges parent hooks around a subagent source hook and keeps the subagent card", () => {
     const blocks: ContentBlock[] = [
       { type: "text", content: "主代理进度" },
