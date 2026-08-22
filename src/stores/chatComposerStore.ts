@@ -8,6 +8,7 @@ import {
   type ChatInputSendShortcut,
 } from "../lib/chatInputSettings";
 import {
+  DEFAULT_MESSAGE_SEND_MODE,
   isMessageSendMode,
   type MessageSendMode,
 } from "../lib/chatInputSettings";
@@ -92,9 +93,9 @@ function persistChatInputMode(chatInputMode: ChatInputMode): void {
 function readMessageSendMode(): MessageSendMode {
   try {
     const stored = localStorage.getItem(MESSAGE_SEND_MODE_STORAGE_KEY);
-    return stored && isMessageSendMode(stored) ? stored : "classic";
+    return stored && isMessageSendMode(stored) ? stored : DEFAULT_MESSAGE_SEND_MODE;
   } catch {
-    return "classic";
+    return DEFAULT_MESSAGE_SEND_MODE;
   }
 }
 

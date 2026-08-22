@@ -12,7 +12,7 @@ export const CHAT_INPUT_MODES = ["default", "classic"] as const;
 
 export type ChatInputMode = (typeof CHAT_INPUT_MODES)[number];
 
-export const DEFAULT_CHAT_INPUT_MODE: ChatInputMode = "default";
+export const DEFAULT_CHAT_INPUT_MODE: ChatInputMode = "classic";
 
 export function isChatInputMode(value: string): value is ChatInputMode {
   return (CHAT_INPUT_MODES as readonly string[]).includes(value);
@@ -22,7 +22,7 @@ export const MESSAGE_SEND_MODES = ["classic", "flexible"] as const;
 
 export type MessageSendMode = (typeof MESSAGE_SEND_MODES)[number];
 
-export const DEFAULT_MESSAGE_SEND_MODE: MessageSendMode = "classic";
+export const DEFAULT_MESSAGE_SEND_MODE: MessageSendMode = "flexible";
 
 export function isMessageSendMode(value: string): value is MessageSendMode {
   return (MESSAGE_SEND_MODES as readonly string[]).includes(value);

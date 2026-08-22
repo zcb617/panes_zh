@@ -11,6 +11,13 @@ import {
 import { DEFAULT_LINK_OPEN_GESTURE } from "../lib/linkOpenSettings";
 
 describe("chatComposerStore", () => {
+  it("uses the defaults configured for the chat settings", () => {
+    expect(DEFAULT_CHAT_INPUT_SEND_SHORTCUT).toBe("shift-enter");
+    expect(DEFAULT_CHAT_INPUT_MODE).toBe("classic");
+    expect(DEFAULT_MESSAGE_SEND_MODE).toBe("flexible");
+    expect(DEFAULT_LINK_OPEN_GESTURE).toBe("click");
+  });
+
   beforeEach(() => {
     useChatComposerStore.setState({
       runtimeByWorkspace: {},
