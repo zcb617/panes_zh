@@ -5,7 +5,7 @@ use std::{
     // ffi::OsString,
     fs::{self, File},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -673,9 +673,10 @@ struct ThreadConfig {
 #[derive(Default)]
 struct ClaudeState {
     transport: Option<Arc<ClaudeTransport>>,
-    computer_control_service: Option<Arc<ComputerControlService>>,
-    /// Panes 本地会话读取工具服务。
-    panes_thread_mcp_service: Option<Arc<PanesThreadMcpService>>,
+    // 旧字段保留迁移留痕，服务引用已迁移到 ClaudeSidecarEngine 的独立同步锁。
+    // computer_control_service: Option<Arc<ComputerControlService>>,
+    // /// Panes 本地会话读取工具服务。
+    // panes_thread_mcp_service: Option<Arc<PanesThreadMcpService>>,
     threads: HashMap<String, ThreadConfig>,
     resource_dir: Option<PathBuf>,
     runtime_model_cache: Option<Vec<ModelInfo>>,
@@ -684,7 +685,12 @@ struct ClaudeState {
 
 #[derive(Default)]
 pub struct ClaudeSidecarEngine {
+    /// Claude sidecar 的异步运行状态。
     state: Arc<Mutex<ClaudeState>>,
+    /// 当前 Claude 会话使用的电脑操作服务引用。
+    computer_control_service: Arc<StdMutex<Option<Arc<ComputerControlService>>>>,
+    /// 当前 Claude 会话使用的 Panes 本地会话读取工具服务引用。
+    panes_thread_mcp_service: Arc<StdMutex<Option<Arc<PanesThreadMcpService>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -712,14 +718,22 @@ struct NodeRuntimeProbe {
 
 impl ClaudeSidecarEngine {
     pub fn set_computer_control_service(&self, service: Arc<ComputerControlService>) {
-        let mut state = self.state.blocking_lock();
-        state.computer_control_service = Some(service);
+        // 旧实现保留迁移留痕：异步运行线程内不能使用 blocking_lock。
+        // let mut state = self.state.blocking_lock();
+        // state.computer_control_service = Some(service);
+        if let Ok(mut current) = self.computer_control_service.lock() {
+            *current = Some(service);
+        }
     }
 
     /// 设置 Panes 本地会话读取工具服务。
     pub fn set_panes_thread_mcp_service(&self, service: Arc<PanesThreadMcpService>) {
-        let mut state = self.state.blocking_lock();
-        state.panes_thread_mcp_service = Some(service);
+        // 旧实现保留迁移留痕：异步运行线程内不能使用 blocking_lock。
+        // let mut state = self.state.blocking_lock();
+        // state.panes_thread_mcp_service = Some(service);
+        if let Ok(mut current) = self.panes_thread_mcp_service.lock() {
+            *current = Some(service);
+        }
     }
 
     pub fn set_resource_dir(&self, resource_dir: Option<PathBuf>) {
@@ -1870,13 +1884,24 @@ impl Engine for ClaudeSidecarEngine {
                 .cloned()
                 .context("no thread config found — was start_thread called?")?
         };
-        let (computer_control_service, panes_thread_mcp_service) = {
-            let state = self.state.lock().await;
-            (
-                state.computer_control_service.clone(),
-                state.panes_thread_mcp_service.clone(),
-            )
-        };
+        // 旧实现保留迁移留痕：服务引用已从 ClaudeState 分离到独立同步锁。
+        // let (computer_control_service, panes_thread_mcp_service) = {
+        //     let state = self.state.lock().await;
+        //     (
+        //         state.computer_control_service.clone(),
+        //         state.panes_thread_mcp_service.clone(),
+        //     )
+        // };
+        let computer_control_service = self
+            .computer_control_service
+            .lock()
+            .ok()
+            .and_then(|service| service.clone());
+        let panes_thread_mcp_service = self
+            .panes_thread_mcp_service
+            .lock()
+            .ok()
+            .and_then(|service| service.clone());
         let computer_control_tools = match computer_control_service.as_ref() {
             Some(service) => service.sdk_tool_specs().map_err(anyhow::Error::msg)?,
             None => Vec::new(),
@@ -1935,6 +1960,7 @@ impl Engine for ClaudeSidecarEngine {
             "threadId": engine_thread_id,
             "computerControlTools": computer_control_tools,
             "panesThreadTools": panes_thread_tools,
+            "settingSources": ["user", "project"],
         });
 
         if let Some(ref session_id) = thread_config.agent_session_id {
@@ -2458,6 +2484,37 @@ impl Engine for ClaudeSidecarEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn service_setters_are_safe_inside_tokio_runtime() {
+        let engine = ClaudeSidecarEngine::default();
+        engine.set_computer_control_service(Arc::new(ComputerControlService::default()));
+
+        let db_path = std::env::temp_dir().join(format!(
+            "claude-sidecar-services-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::Database::open(db_path).expect("test database");
+        engine.set_panes_thread_mcp_service(Arc::new(PanesThreadMcpService::new(db)));
+
+        let computer_control_service = engine
+            .computer_control_service
+            .lock()
+            .expect("computer control service mutex should not be poisoned");
+        assert!(
+            computer_control_service.is_some(),
+            "computer control service should be saved"
+        );
+
+        let panes_thread_mcp_service = engine
+            .panes_thread_mcp_service
+            .lock()
+            .expect("Panes thread MCP service mutex should not be poisoned");
+        assert!(
+            panes_thread_mcp_service.is_some(),
+            "Panes thread MCP service should be saved"
+        );
+    }
 
     #[test]
     fn deserializes_action_output_delta_events() {

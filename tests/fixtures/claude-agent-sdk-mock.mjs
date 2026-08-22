@@ -14,6 +14,20 @@ function clone(value) {
 }
 
 export function tool(name, description, inputSchema, handler) {
+  const isZodSchema =
+    inputSchema && typeof inputSchema.safeParse === "function";
+  const isZodRawShape =
+    inputSchema &&
+    typeof inputSchema === "object" &&
+    !Array.isArray(inputSchema) &&
+    Object.values(inputSchema).every(
+      (field) => field && typeof field.safeParse === "function",
+    );
+  if (!isZodSchema && !isZodRawShape) {
+    throw new Error(
+      "inputSchema must be a Zod schema or raw shape, received an unrecognized object",
+    );
+  }
   return { name, description, inputSchema, handler };
 }
 
@@ -104,6 +118,8 @@ export function query({ prompt, options }) {
         result: clone({
           permissionMode: options?.permissionMode,
           settings: options?.settings,
+          sandbox: clone(options?.sandbox),
+          settingSources: clone(options?.settingSources),
           allowedTools: options?.allowedTools,
           mcpServers: Object.fromEntries(
             Object.entries(options?.mcpServers ?? {}).map(([name, server]) => [
@@ -206,8 +222,8 @@ export function query({ prompt, options }) {
       if (closed) break;
     }
   };
-  iterator.supportedModels = async () => clone(
-    scenario.models ?? [
+  iterator.supportedModels = async () => {
+    const models = scenario.models ?? [
       {
         value: "default",
         displayName: "Default (recommended)",
@@ -215,8 +231,18 @@ export function query({ prompt, options }) {
         supportsEffort: true,
         supportedEffortLevels: ["low", "medium", "high"],
       },
-    ],
-  );
+    ];
+    if (Array.isArray(scenario.expectedSupportedModelsSettingSources)) {
+      const expected = scenario.expectedSupportedModelsSettingSources;
+      const actual = options?.settingSources;
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        throw new Error(
+          `Unexpected supportedModels settingSources: expected ${JSON.stringify(expected)}, actual ${JSON.stringify(actual)}`,
+        );
+      }
+    }
+    return clone(models);
+  };
 
   return iterator;
 }

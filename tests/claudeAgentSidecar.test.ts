@@ -214,6 +214,7 @@ describe("claude-agent-sdk-server sidecar", () => {
             supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"],
           },
         ],
+        expectedSupportedModelsSettingSources: ["user"],
       },
       { PANES_CLAUDE_CODE_EXECUTABLE: "/tmp/claude-current" },
     );
@@ -720,6 +721,49 @@ describe("claude-agent-sdk-server sidecar", () => {
         disableBypassPermissionsMode: "disable",
       },
     });
+    expect(observations[0]?.result.settingSources).toEqual(["user", "project"]);
+    expect(observations[0]?.result.sandbox).toEqual({
+      enabled: true,
+      failIfUnavailable: process.platform !== "win32",
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      filesystem: {
+        allowWrite: [repoRoot],
+      },
+      network: {
+        allowedDomains: [],
+        allowLocalBinding: false,
+        allowUnixSockets: [],
+      },
+    });
+  });
+
+  it("keeps only supported values when settingSources is explicit", async () => {
+    const harness = await spawnHarness({
+      steps: [],
+      emitObservationResult: true,
+      emitQueryOptions: true,
+    });
+
+    harness.send({
+      id: "query-explicit-setting-sources",
+      method: "query",
+      params: {
+        prompt: "inspect explicit setting sources",
+        cwd: repoRoot,
+        settingSources: ["local", "invalid", "user", "project-invalid"],
+      },
+    });
+
+    await harness.waitFor(
+      (event) =>
+        event.id === "query-explicit-setting-sources" && event.type === "turn_completed",
+    );
+
+    const observations = parseObservationResults(harness, "query-explicit-setting-sources");
+    expect(observations).toHaveLength(1);
+    expect(observations[0]?.type).toBe("query_options");
+    expect(observations[0]?.result.settingSources).toEqual(["local", "user"]);
   });
 
   it("registers Panes computer control as an in-process SDK tool server", async () => {
@@ -790,6 +834,70 @@ describe("claude-agent-sdk-server sidecar", () => {
     expect(observations.some((item) => item.type === "computer_control_result")).toBe(true);
     const options = observations.find((item) => item.type === "query_options");
     expect(options?.result.allowedTools).toContain("mcp__panes-computer-control__*");
+  });
+
+  it("registers Panes thread tools as an in-process SDK tool server", async () => {
+    const harness = await spawnHarness({
+      steps: [],
+      emitObservationResult: true,
+      emitQueryOptions: true,
+    });
+
+    harness.send({
+      id: "query-panes-thread-sdk",
+      method: "query",
+      params: {
+        prompt: "read panes thread",
+        cwd: repoRoot,
+        threadId: "thread-panes-thread",
+        panesThreadTools: [
+          {
+            name: "get_panes_thread_message_count",
+            description: "获取指定 Panes 会话的消息总行数。回答前必须先使用此工具确定分页范围。",
+            inputSchema: {
+              type: "object",
+              properties: {
+                thread_id: { type: "string", description: "Panes 会话 ID" },
+              },
+              required: ["thread_id"],
+              additionalProperties: false,
+            },
+          },
+          {
+            name: "get_panes_thread_messages_page",
+            description: "按创建时间倒序分页读取指定 Panes 会话消息。page 和 page_size 从 1 开始。",
+            inputSchema: {
+              type: "object",
+              properties: {
+                thread_id: { type: "string", description: "Panes 会话 ID" },
+                page: { type: "integer", minimum: 1, description: "页码，从 1 开始" },
+                page_size: { type: "integer", minimum: 1, description: "每页条数，从 1 开始" },
+              },
+              required: ["thread_id", "page", "page_size"],
+              additionalProperties: false,
+            },
+          },
+        ],
+      },
+    });
+
+    await harness.waitFor(
+      (event) => event.id === "query-panes-thread-sdk" && event.type === "turn_completed",
+    );
+
+    const observations = parseObservationResults(harness, "query-panes-thread-sdk");
+    const options = observations.find((item) => item.type === "query_options");
+    expect(options?.result.allowedTools).toContain("mcp__panes-thread__*");
+    expect(options?.result.mcpServers).toEqual({
+      "panes-thread": {
+        name: "panes-thread",
+        version: "1.0.0",
+        tools: [
+          "get_panes_thread_message_count",
+          "get_panes_thread_messages_page",
+        ],
+      },
+    });
   });
 
   it("rejects danger-full-access explicitly for Claude", async () => {

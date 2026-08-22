@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { fromJSONSchema } from "zod/v4";
 
 const [nodeMajorVersion, nodeMinorVersion] = process.versions.node
   .split(".")
@@ -599,6 +600,18 @@ function waitForComputerControlResult(context, callId, toolName, arguments_, sig
   });
 }
 
+function convertToolInputSchemaToZod(toolName, inputSchema) {
+  try {
+    return fromJSONSchema(inputSchema);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `工具 ${toolName} 的 inputSchema 无法转换为 Zod Schema：${detail}`,
+      { cause: error },
+    );
+  }
+}
+
 function createPanesComputerControlServer(context, toolSpecs) {
   if (typeof toolFn !== "function" || typeof createSdkMcpServerFn !== "function") {
     throw new Error("当前 Claude Agent SDK 不支持进程内自定义工具服务器。");
@@ -614,26 +627,33 @@ function createPanesComputerControlServer(context, toolSpecs) {
         !Array.isArray(spec.inputSchema),
     )
     .map(({ name, description, inputSchema }) =>
-      toolFn(name, description, inputSchema, async (arguments_, extra = {}) => {
-        const callId =
-          extra.toolUseID ||
-          extra.toolUseId ||
-          `${context.id}-${name}-${context.pendingComputerControlCalls.size + 1}`;
-        const result = await waitForComputerControlResult(
-          context,
-          callId,
-          name,
-          arguments_,
-          extra.signal,
-        );
-        if (!result.ok) {
-          return {
-            isError: true,
-            content: [{ type: "text", text: result.error }],
-          };
-        }
-        return { content: computerControlCallResultToClaudeContent(result.value) };
-      }),
+      // 旧实现把通用 JSON Schema 直接传给 Claude SDK，当前 SDK 不接受该对象。
+      // toolFn(name, description, inputSchema, async (arguments_, extra = {}) => {
+      toolFn(
+        name,
+        description,
+        convertToolInputSchemaToZod(name, inputSchema),
+        async (arguments_, extra = {}) => {
+          const callId =
+            extra.toolUseID ||
+            extra.toolUseId ||
+            `${context.id}-${name}-${context.pendingComputerControlCalls.size + 1}`;
+          const result = await waitForComputerControlResult(
+            context,
+            callId,
+            name,
+            arguments_,
+            extra.signal,
+          );
+          if (!result.ok) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: result.error }],
+            };
+          }
+          return { content: computerControlCallResultToClaudeContent(result.value) };
+        },
+      ),
     );
 
   if (tools.length === 0) {
@@ -661,26 +681,33 @@ function createPanesThreadServer(context, toolSpecs) {
         !Array.isArray(spec.inputSchema),
     )
     .map(({ name, description, inputSchema }) =>
-      toolFn(name, description, inputSchema, async (arguments_, extra = {}) => {
-        const callId =
-          extra.toolUseID ||
-          extra.toolUseId ||
-          `${context.id}-${name}-${context.pendingComputerControlCalls.size + 1}`;
-        const result = await waitForComputerControlResult(
-          context,
-          callId,
-          name,
-          arguments_,
-          extra.signal,
-        );
-        if (!result.ok) {
-          return {
-            isError: true,
-            content: [{ type: "text", text: result.error }],
-          };
-        }
-        return { content: computerControlCallResultToClaudeContent(result.value) };
-      }),
+      // 旧实现把通用 JSON Schema 直接传给 Claude SDK，当前 SDK 不接受该对象。
+      // toolFn(name, description, inputSchema, async (arguments_, extra = {}) => {
+      toolFn(
+        name,
+        description,
+        convertToolInputSchemaToZod(name, inputSchema),
+        async (arguments_, extra = {}) => {
+          const callId =
+            extra.toolUseID ||
+            extra.toolUseId ||
+            `${context.id}-${name}-${context.pendingComputerControlCalls.size + 1}`;
+          const result = await waitForComputerControlResult(
+            context,
+            callId,
+            name,
+            arguments_,
+            extra.signal,
+          );
+          if (!result.ok) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: result.error }],
+            };
+          }
+          return { content: computerControlCallResultToClaudeContent(result.value) };
+        },
+      ),
     );
   if (tools.length === 0) {
     return null;
@@ -1495,7 +1522,7 @@ async function handleListModels(req) {
   const { id, params = {} } = req;
   const options = applyClaudeRuntime({
     cwd: params.cwd || process.cwd(),
-    settingSources: [],
+    settingSources: ["user"],
   });
   const query = queryFn({ prompt: holdModelDiscoveryOpen(), options });
 
@@ -1628,10 +1655,11 @@ async function handleQuery(req, persistentSession = null) {
       }),
       settingSources: Array.isArray(settingSources)
         ? settingSources.filter((source) => ["user", "project", "local"].includes(source))
-        : ["project"],
+        : ["user", "project"],
       strictMcpConfig: Boolean(strictMcpConfig),
       sandbox: {
         enabled: true,
+        failIfUnavailable: process.platform !== "win32",
         autoAllowBashIfSandboxed: true,
         allowUnsandboxedCommands: false,
         filesystem: {
