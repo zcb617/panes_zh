@@ -1789,6 +1789,46 @@ pub async fn delete_thread(state: State<'_, AppState>, thread_id: String) -> Res
     Ok(())
 }
 
+/// 将 Codex 会话归档的本地会话、引擎会话和执行位置写入既有传输日志，便于开发排查。
+///
+/// `error` 仅在引擎归档失败时写入，内容保留完整 anyhow 错误链；日志失败不改变归档主流程。
+async fn append_codex_thread_archive_log(
+    event: &str,
+    thread: &ThreadDto,
+    context: &CliExecutionContext,
+    engine_thread_id: &str,
+    error: Option<&str>,
+) {
+    // 归档日志只记录稳定的小写位置类型，避免 Debug 输出成为后续检索条件。
+    let location_kind = match context.location_kind {
+        crate::cli_tools::CliLocationKind::Local => "local",
+        crate::cli_tools::CliLocationKind::Ssh => "ssh",
+    };
+    let mut record = json!({
+        // 日志产生时间。
+        "at": Utc::now().to_rfc3339(),
+        // Codex 归档生命周期事件名。
+        "event": event,
+        // Panes 本地会话标识。
+        "panes_thread_id": thread.id,
+        // Codex 引擎会话标识。
+        "engine_thread_id": engine_thread_id,
+        // 会话所属 workspace 标识。
+        "workspace_id": context.workspace_id,
+        // CLI 实际操作的项目根目录。
+        "workspace_root_path": context.root_path,
+        // 项目执行位置：本机或 SSH 远端。
+        "location_kind": location_kind,
+        // SSH 连接标识；本机项目序列化为 null。
+        "ssh_connection_id": context.ssh_connection_id,
+    });
+    if let Some(error) = error {
+        // 引擎失败时保留完整 anyhow 错误链，便于关联既有 rpc_error。
+        record["error"] = Value::String(error.to_owned());
+    }
+    crate::engines::codex::append_codex_transport_log(&record).await;
+}
+
 #[tauri::command]
 pub async fn archive_thread(state: State<'_, AppState>, thread_id: String) -> Result<(), String> {
     state.turns.cancel(&thread_id).await;
@@ -1822,16 +1862,56 @@ pub async fn archive_thread(state: State<'_, AppState>, thread_id: String) -> Re
             {
                 log::warn!("failed to interrupt Codex thread before archive: {error:#}");
             }
+            append_codex_thread_archive_log(
+                "codex_thread_archive_started",
+                &thread,
+                &context,
+                engine_thread_id,
+                None,
+            )
+            .await;
             if thread.engine_thread_id.is_some() {
-                cli.archive_thread(&context, &thread, engine_thread_id)
+                match cli
+                    .archive_thread(&context, &thread, engine_thread_id)
                     .await
-                    .map_err(err_to_string)?;
+                {
+                    Ok(()) => {
+                        append_codex_thread_archive_log(
+                            "codex_thread_archive_engine_completed",
+                            &thread,
+                            &context,
+                            engine_thread_id,
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        let error_text = format!("{error:#}");
+                        append_codex_thread_archive_log(
+                            "codex_thread_archive_engine_failed",
+                            &thread,
+                            &context,
+                            engine_thread_id,
+                            Some(&error_text),
+                        )
+                        .await;
+                        return Err(err_to_string(error));
+                    }
+                }
             }
             run_db(db.clone(), {
                 let thread_id = thread_id.clone();
                 move |db| db::threads::archive_thread(db, &thread_id)
             })
             .await?;
+            append_codex_thread_archive_log(
+                "codex_thread_archive_local_completed",
+                &thread,
+                &context,
+                engine_thread_id,
+                None,
+            )
+            .await;
             return Ok(());
         }
         if thread.engine_id == "claude" {
