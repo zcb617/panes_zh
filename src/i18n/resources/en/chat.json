@@ -620,9 +620,9 @@
       "settled": "The current turn has ended"
     },
     "turnProgress": {
-      "running": "Codex is still running",
+      "running": "{{engine}} is still running",
       "runningAction": "Running: {{summary}}",
-      "runningWithSteer": "Codex is still running; the follow-up is waiting to enter the current processing step",
+      "runningWithSteer": "{{engine}} is still running; the follow-up is waiting to enter the current processing step",
       "waitingForApproval": "Waiting for your confirmation"
     },
     "actionStatus": {

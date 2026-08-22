@@ -169,7 +169,16 @@ function applyRuntimeStateFromEvent(
     return { status: "completed", streaming: false };
   }
 
-  if (event.type === "TurnStarted" || eventHasVisibleAssistantContent(event)) {
+  if (event.type === "TurnStarted") {
+    return { status: "streaming", streaming: true };
+  }
+
+  // 终止事件后的通知仍需写入消息，但不能重新激活已经结束的回合。
+  if (status === "error" || status === "completed") {
+    return { status, streaming: false };
+  }
+
+  if (eventHasVisibleAssistantContent(event)) {
     return { status: "streaming", streaming: true };
   }
 

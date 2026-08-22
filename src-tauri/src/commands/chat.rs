@@ -3446,37 +3446,38 @@ async fn run_turn(
             },
         );
 
-        if !failed_completion_processed {
-            let failed_event = EngineEvent::TurnCompleted {
-                token_usage: None,
-                status: TurnCompletionStatus::Failed,
-            };
-            let failed_progress = process_stream_event(
-                &app,
-                &state,
-                &thread,
-                &assistant_message_id,
-                &stream_event_topic,
-                &approval_event_topic,
-                &failed_event,
-                &mut blocks,
-                &mut action_index,
-                &mut approval_index,
-                max_output_chars,
-            )
-            .await;
-            apply_stream_progress(
-                failed_progress,
-                &mut message_status,
-                &mut thread_status,
-                &mut turn_model_id,
-                &mut token_usage,
-                &mut blocks_dirty,
-                &mut message_state_dirty,
-                &mut thread_status_dirty,
-                &mut turn_model_dirty,
-            );
-        }
+    }
+
+    if engine_failed && !failed_completion_processed {
+        let failed_event = EngineEvent::TurnCompleted {
+            token_usage: None,
+            status: TurnCompletionStatus::Failed,
+        };
+        let failed_progress = process_stream_event(
+            &app,
+            &state,
+            &thread,
+            &assistant_message_id,
+            &stream_event_topic,
+            &approval_event_topic,
+            &failed_event,
+            &mut blocks,
+            &mut action_index,
+            &mut approval_index,
+            max_output_chars,
+        )
+        .await;
+        apply_stream_progress(
+            failed_progress,
+            &mut message_status,
+            &mut thread_status,
+            &mut turn_model_id,
+            &mut token_usage,
+            &mut blocks_dirty,
+            &mut message_state_dirty,
+            &mut thread_status_dirty,
+            &mut turn_model_dirty,
+        );
     }
 
     if cancellation.is_cancelled() && matches!(message_status, MessageStatusDto::Streaming) {

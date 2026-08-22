@@ -620,9 +620,9 @@
       "settled": "当前回合已结束"
     },
     "turnProgress": {
-      "running": "Codex 仍在运行",
+      "running": "{{engine}} 仍在运行",
       "runningAction": "正在执行：{{summary}}",
-      "runningWithSteer": "Codex 仍在运行，追加消息正在等待进入当前处理步骤",
+      "runningWithSteer": "{{engine}} 仍在运行，追加消息正在等待进入当前处理步骤",
       "waitingForApproval": "等待你的确认"
     },
     "actionStatus": {

@@ -1309,6 +1309,8 @@ interface MessageRowProps {
   isHighlighted: boolean;
   assistantLabel: string;
   assistantEngineId: string;
+  /** 当前消息回合实际使用的 CLI 名称，用于运行状态文案。 */
+  assistantEngineName: string;
   preparingLabel?: string;
   onApproval: (approvalId: string, response: ApprovalResponse) => void;
   onLoadActionOutput: (messageId: string, actionId: string) => Promise<void>;
@@ -1410,6 +1412,7 @@ function MessageRowView({
   isHighlighted,
   assistantLabel,
   assistantEngineId,
+  assistantEngineName,
   preparingLabel,
   onApproval,
   onLoadActionOutput,
@@ -1583,7 +1586,7 @@ function MessageRowView({
                             : "messageBlocks.turnProgress.running",
                       runningAction?.type === "action"
                         ? { summary: runningAction.summary }
-                        : undefined,
+                        : { engine: assistantEngineName },
                     )}
                   </span>
                   <span className="chat-streaming-dots" aria-hidden="true">
@@ -1631,6 +1634,7 @@ const MessageRow = memo(
     prev.isHighlighted === next.isHighlighted &&
     prev.assistantLabel === next.assistantLabel &&
     prev.assistantEngineId === next.assistantEngineId &&
+    prev.assistantEngineName === next.assistantEngineName &&
     prev.preparingLabel === next.preparingLabel &&
     prev.onApproval === next.onApproval &&
     prev.onLoadActionOutput === next.onLoadActionOutput &&
@@ -3014,6 +3018,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         messageReasoningEffort,
       ),
       engineId: messageEngineId,
+      engineName: engineInfo?.name ?? messageEngineId,
     };
   }, [activeThread?.engineId, activeThread?.modelId, engines, selectedEngine, selectedEngineId, selectedModel?.id, t]);
 
@@ -6514,7 +6519,10 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }, [messages, virtualWindow, virtualizationEnabled]);
 
   const assistantIdentityByMessageId = useMemo(() => {
-    const identityByMessageId = new Map<string, { label: string; engineId: string }>();
+    const identityByMessageId = new Map<
+      string,
+      { label: string; engineId: string; engineName: string }
+    >();
     for (const message of visibleMessages) {
       if (message.role !== "assistant") {
         continue;
@@ -7087,6 +7095,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                         isHighlighted={message.id === highlightedMessageId}
                         assistantLabel={assistantIdentity?.label ?? ""}
                         assistantEngineId={assistantIdentity?.engineId ?? ""}
+                        assistantEngineName={assistantIdentity?.engineName ?? ""}
                         preparingLabel={
                           activeWorkspace?.locationKind === "ssh" &&
                           preparingAttachments &&
@@ -7124,6 +7133,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                   isHighlighted={message.id === highlightedMessageId}
                   assistantLabel={assistantIdentity?.label ?? ""}
                   assistantEngineId={assistantIdentity?.engineId ?? ""}
+                  assistantEngineName={assistantIdentity?.engineName ?? ""}
                   preparingLabel={
                     activeWorkspace?.locationKind === "ssh" &&
                     preparingAttachments &&
@@ -7178,6 +7188,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
               isHighlighted={false}
               assistantLabel=""
               assistantEngineId=""
+              assistantEngineName=""
               onApproval={handleApproval}
               onLoadActionOutput={handleLoadActionOutput}
             />

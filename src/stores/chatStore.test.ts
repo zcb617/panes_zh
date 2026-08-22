@@ -236,6 +236,125 @@ describe("chatStore send", () => {
     vi.useRealTimers();
   });
 
+  it("keeps a failed turn stopped after the remote interrupt completion notice", async () => {
+    vi.useFakeTimers();
+
+    let streamHandler: ((event: StreamEvent) => void) | null = null;
+    mockListenThreadEvents.mockImplementationOnce(async (_threadId, onEvent) => {
+      streamHandler = onEvent;
+      return () => {};
+    });
+
+    await useChatStore.getState().setActiveThread("thread-1");
+    mockIpc.sendMessage.mockResolvedValueOnce("assistant-message-id");
+    await expect(
+      useChatStore.getState().send("hello", {
+        engineId: "claude",
+        modelId: "sonnet",
+      }),
+    ).resolves.toBe(true);
+
+    const assistantBeforeFailure = useChatStore
+      .getState()
+      .messages.find((message) => message.role === "assistant" && message.clientTurnId);
+    expect(assistantBeforeFailure?.clientTurnId).toBeTruthy();
+    expect(streamHandler).not.toBeNull();
+
+    streamHandler!({
+      type: "TurnStarted",
+      client_turn_id: assistantBeforeFailure?.clientTurnId ?? null,
+    });
+    streamHandler!({
+      type: "TextDelta",
+      content: "先前已经收到的文本。",
+    });
+    streamHandler!({
+      type: "Error",
+      message: "本轮对话执行失败",
+      recoverable: false,
+    });
+    streamHandler!({
+      type: "Notice",
+      kind: "remote_interrupt_completed",
+      level: "info",
+      title: "远端任务已终止",
+      message: "本轮异常对应的远端执行已经取消。",
+    });
+
+    await vi.advanceTimersByTimeAsync(20);
+
+    const state = useChatStore.getState();
+    const assistant = state.messages.find((message) => message.id === assistantBeforeFailure?.id);
+    expect(state.status).toBe("error");
+    expect(state.streaming).toBe(false);
+    expect(state.turnStartedAt).toBeNull();
+    expect(assistant?.status).toBe("error");
+    expect(assistant?.blocks).toHaveLength(2);
+    expect(assistant?.blocks).toEqual(
+      expect.arrayContaining([
+        { type: "text", content: "先前已经收到的文本。" },
+        { type: "error", message: "本轮对话执行失败" },
+      ]),
+    );
+    expect(state.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          blocks: expect.arrayContaining([
+            {
+              type: "notice",
+              kind: "remote_interrupt_completed",
+              level: "info",
+              title: "远端任务已终止",
+              message: "本轮异常对应的远端执行已经取消。",
+            },
+          ]),
+        }),
+      ]),
+    );
+
+    vi.useRealTimers();
+  });
+
+  it("allows a new turn to start after a failed turn reaches its terminal state", async () => {
+    vi.useFakeTimers();
+
+    let streamHandler: ((event: StreamEvent) => void) | null = null;
+    mockListenThreadEvents.mockImplementationOnce(async (_threadId, onEvent) => {
+      streamHandler = onEvent;
+      return () => {};
+    });
+
+    await useChatStore.getState().setActiveThread("thread-1");
+    mockIpc.sendMessage.mockResolvedValueOnce("assistant-message-id");
+    await expect(
+      useChatStore.getState().send("hello", {
+        engineId: "claude",
+        modelId: "sonnet",
+      }),
+    ).resolves.toBe(true);
+
+    expect(streamHandler).not.toBeNull();
+    streamHandler!({
+      type: "Error",
+      message: "本轮对话执行失败",
+      recoverable: false,
+    });
+    await vi.advanceTimersByTimeAsync(20);
+    expect(useChatStore.getState().status).toBe("error");
+    expect(useChatStore.getState().streaming).toBe(false);
+
+    streamHandler!({
+      type: "TurnStarted",
+      client_turn_id: "client-turn-next",
+    });
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(useChatStore.getState().status).toBe("streaming");
+    expect(useChatStore.getState().streaming).toBe(true);
+
+    vi.useRealTimers();
+  });
+
   it("updates the assistant model label and inserts a reroute notice when the model is rerouted", async () => {
     vi.useFakeTimers();
 
