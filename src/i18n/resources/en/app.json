@@ -108,7 +108,7 @@
     "codexRemoteThreadArchivedMessage": "Codex archived thread \"{{name}}\". Archive its local copy from this project?",
     "keepLocalThread": "Keep in project",
     "restoreThreadFailed": "Failed to restore thread.",
-    "archiveThreadFailed": "Failed to archive the thread.",
+    "archiveThreadFailed": "The thread archive was not completed. The thread list in Panes was not changed. Please try again later.",
     "codexThreadArchiveActiveWriter": "Codex thread archiving failed: this thread is being used by Codex App. Close the corresponding thread in Codex App and try again.",
     "codexRemoteThreadArchiveFailed": "Failed to archive the local copy of this conversation.",
     "archive": "Archive",

@@ -115,4 +115,16 @@ describe("i18n resources", () => {
     expect(readNestedString(chatPtBr, "panel.workspaceChatTitle")).toBeTruthy();
     expect(readNestedString(chatPtBr, "panel.repoChatTitle")).toBeTruthy();
   });
+
+  it("describes incomplete thread archiving without exposing internal errors", () => {
+    expect(appZhCn.sidebar.archiveThreadFailed).toBe(
+      "本次会话归档未完成，Panes 中的会话列表未变化。请稍后重试。",
+    );
+    expect(appEn.sidebar.archiveThreadFailed).toBe(
+      "The thread archive was not completed. The thread list in Panes was not changed. Please try again later.",
+    );
+    expect(appPtBr.sidebar.archiveThreadFailed).toBe(
+      "O arquivamento da conversa não foi concluído. A lista de conversas no Panes não foi alterada. Tente novamente mais tarde.",
+    );
+  });
 });

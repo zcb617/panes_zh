@@ -573,6 +573,7 @@ impl CodexTransport {
                 "method": method,
                 "result": "rpc_error",
                 "error": error.message.clone(),
+                "rpc_error": &error,
                 "elapsed_ms": request_started_at.elapsed().as_millis(),
             }))
             .await;
@@ -1110,7 +1111,14 @@ mod tests {
                         "id": request.get("id").cloned().expect("request id"),
                         "error": {
                             "code": -32600,
-                            "message": "thread not loaded: missing-thread"
+                            "message": "thread not loaded: missing-thread",
+                            "data": {
+                                "source": "thread-store",
+                                "details": {
+                                    "path": "state_5.sqlite",
+                                    "os_error": 2
+                                }
+                            }
                         }
                     })
                     .to_string()
@@ -1132,7 +1140,30 @@ mod tests {
             .expect("structured RpcError source should be preserved");
         assert_eq!(rpc_error.code, Some(-32600));
         assert_eq!(rpc_error.message, "thread not loaded: missing-thread");
-        assert!(rpc_error.data.is_none());
+        assert_eq!(
+            rpc_error.data,
+            Some(serde_json::json!({
+                "source": "thread-store",
+                "details": {
+                    "path": "state_5.sqlite",
+                    "os_error": 2
+                }
+            }))
+        );
+        assert_eq!(
+            serde_json::to_value(rpc_error).expect("serialize structured RPC error"),
+            serde_json::json!({
+                "code": -32600,
+                "message": "thread not loaded: missing-thread",
+                "data": {
+                    "source": "thread-store",
+                    "details": {
+                        "path": "state_5.sqlite",
+                        "os_error": 2
+                    }
+                }
+            })
+        );
         server.await.expect("server task");
     }
 }
