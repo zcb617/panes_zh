@@ -523,6 +523,10 @@ export function buildBlockSegments(
       const indices: number[] = [];
       while (i < displayBlocks.length) {
         const hookBlock = displayBlocks[i].block;
+        // 子代理来源 Hook 必须交给后续子代理活动卡，避免被普通 Hooks 分组吞掉。
+        if (getSubagentThreadId(hookBlock)) {
+          break;
+        }
         if (
           hookBlock.type !== "notice" ||
           (!hookBlock.kind.startsWith("hook_") &&

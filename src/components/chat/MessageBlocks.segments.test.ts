@@ -257,6 +257,59 @@ describe("buildBlockSegments", () => {
     });
   });
 
+  it("keeps a subagent activity card when an ordinary hook precedes its marked hook", () => {
+    const blocks: ContentBlock[] = [
+      { type: "text", content: "主代理进度" },
+      {
+        type: "notice",
+        kind: "hook_started_regular",
+        level: "info",
+        title: "Hook started",
+        message: "普通 Hook",
+      },
+      {
+        type: "notice",
+        kind: "hook_started_child::subagent::child-1",
+        level: "info",
+        title: "Hook started",
+        message: "子代理 Hook",
+      },
+      {
+        type: "action",
+        actionId: "command-child-1",
+        actionType: "command",
+        summary: "echo test",
+        details: { subagentThreadId: "child-1" },
+        outputChunks: [],
+        status: "done",
+      },
+      { type: "text", content: "主代理完成" },
+    ];
+
+    const segments = buildBlockSegments(blocks, true, "codex");
+
+    expect(segments.map((segment) => segment.kind)).toEqual([
+      "single",
+      "hook-group",
+      "subagent-card",
+      "single",
+    ]);
+    expect(segments[1]).toMatchObject({
+      kind: "hook-group",
+      indices: [1],
+      blocks: [{ kind: "hook_started_regular" }],
+    });
+    expect(segments[2]).toMatchObject({
+      kind: "subagent-card",
+      threadId: "child-1",
+      indices: [2, 3],
+      blocks: [
+        { kind: "hook_started_child::subagent::child-1" },
+        { actionId: "command-child-1", details: { subagentThreadId: "child-1" } },
+      ],
+    });
+  });
+
   it("keeps malformed subagent metadata in ordinary segments and retains result output", () => {
     const blocks: ContentBlock[] = [
       {
