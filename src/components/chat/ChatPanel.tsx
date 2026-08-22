@@ -2597,9 +2597,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }, [customApprovalPolicyText]);
   const activeThreadHasRemoteSession =
     activeWorkspace?.locationKind === "ssh" && Boolean(activeThread?.engineThreadId);
-  const activeThreadRuntimeLocked =
-    activeWorkspace?.locationKind === "ssh" &&
-    Boolean(activeThread?.engineThreadId || (activeThread?.messageCount ?? 0) > 0);
+  const activeThreadRuntimeLocked = Boolean(
+    activeThread?.engineThreadId || (activeThread?.messageCount ?? 0) > 0,
+  );
   const activeThreadMatchesComposer = useMemo(() => {
     if (!activeThread || !activeWorkspaceId || !selectedModelId) {
       return false;
