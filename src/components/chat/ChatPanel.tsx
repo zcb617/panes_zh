@@ -3368,7 +3368,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       }
       return merged;
     });
-  }, [activeWorkspaceId, selectedEngineId, selectedModel, t]);
+  }, [activeWorkspaceId, selectedEngineId, selectedModel, setAttachments, t]);
 
   const appendPastedImageFiles = useCallback(async (files: File[]) => {
     if (!activeWorkspaceId || files.length === 0) {
@@ -3422,7 +3422,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       console.warn("Failed to attach pasted image", error);
       toast.warning(t("attachments.pasteFailed"));
     }
-  }, [activeWorkspaceId, selectedEngineId, selectedModel, t]);
+  }, [activeWorkspaceId, selectedEngineId, selectedModel, setAttachments, t]);
 
   const handleInputPaste = useCallback((event: ReactClipboardEvent<HTMLElement>) => {
     if (showSpecialInputComposer) {
