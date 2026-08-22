@@ -633,6 +633,7 @@ export const ipc = {
     inputItems?: ChatInputItem[] | null,
     planMode?: boolean | null,
     clientTurnId?: string | null,
+    referencedThreadId?: string | null,
   ) =>
     invoke<string>("send_message", {
       threadId,
@@ -643,6 +644,7 @@ export const ipc = {
       inputItems: inputItems ?? null,
       planMode: planMode ?? null,
       clientTurnId: clientTurnId ?? null,
+      referencedThreadId: referencedThreadId ?? null,
     }),
   steerMessage: (
     threadId: string,
@@ -651,6 +653,7 @@ export const ipc = {
     inputItems?: ChatInputItem[] | null,
     planMode?: boolean | null,
     clientSteerId?: string | null,
+    referencedThreadId?: string | null,
   ) =>
     invoke<SteerReceipt>("steer_message", {
       threadId,
@@ -659,6 +662,7 @@ export const ipc = {
       inputItems: inputItems ?? null,
       planMode: planMode ?? null,
       clientSteerId: clientSteerId ?? null,
+      referencedThreadId: referencedThreadId ?? null,
     }),
   startCodexReview: (
     threadId: string,

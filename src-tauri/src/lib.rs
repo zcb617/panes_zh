@@ -17,6 +17,7 @@ mod locale;
 pub(crate) mod message_notify_helper;
 mod models;
 mod path_utils;
+mod panes_thread_mcp_service;
 mod power;
 mod process_utils;
 mod remote;
@@ -137,6 +138,9 @@ pub fn run() {
     let computer_control_service = Arc::new(computer_control_service::ComputerControlService::new(
         computer_control_sdk.clone(),
     ));
+    let panes_thread_mcp_service = Arc::new(panes_thread_mcp_service::PanesThreadMcpService::new(
+        db.clone(),
+    ));
 
     let app_state = AppState {
         db,
@@ -152,6 +156,7 @@ pub fn run() {
         extension_catalog_refreshes: Arc::new(ExtensionCatalogRefreshManager::default()),
         scheduled_tasks: Arc::new(ScheduledTaskManager::new()),
         computer_control_service,
+        panes_thread_mcp_service,
         remote_access: Arc::new(RemoteTunnelManager::default()),
         ssh_monitor: Arc::new(ssh::monitor::SshConnectionMonitor::default()),
     };
@@ -254,6 +259,9 @@ pub fn run() {
             state
                 .engines
                 .set_computer_control_service(state.computer_control_service.clone());
+            state.engines.set_panes_thread_mcp_service(
+                state.panes_thread_mcp_service.clone(),
+            );
             // 旧调用会移动 resource_dir，导致本地 CLI 生命周期拿不到同一资源根目录：
             // state.engines.set_resource_dir(resource_dir);
             state.engines.set_resource_dir(resource_dir.clone());

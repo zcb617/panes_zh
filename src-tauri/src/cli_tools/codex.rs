@@ -60,6 +60,7 @@ impl CodexCli {
     async fn configure_local_computer_control(&self) -> Result<Arc<CodexEngine>> {
         let engine = self.local_engine().await?;
         engine.set_computer_control_service(self.state.computer_control_service.clone());
+        engine.set_panes_thread_mcp_service(self.state.panes_thread_mcp_service.clone());
         Ok(engine)
     }
 

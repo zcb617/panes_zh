@@ -647,6 +647,51 @@ function createPanesComputerControlServer(context, toolSpecs) {
   });
 }
 
+function createPanesThreadServer(context, toolSpecs) {
+  if (typeof toolFn !== "function" || typeof createSdkMcpServerFn !== "function") {
+    throw new Error("当前 Claude Agent SDK 不支持进程内自定义工具服务器。");
+  }
+  const tools = (Array.isArray(toolSpecs) ? toolSpecs : [])
+    .filter(
+      (spec) =>
+        typeof spec?.name === "string" &&
+        typeof spec?.description === "string" &&
+        spec.inputSchema &&
+        typeof spec.inputSchema === "object" &&
+        !Array.isArray(spec.inputSchema),
+    )
+    .map(({ name, description, inputSchema }) =>
+      toolFn(name, description, inputSchema, async (arguments_, extra = {}) => {
+        const callId =
+          extra.toolUseID ||
+          extra.toolUseId ||
+          `${context.id}-${name}-${context.pendingComputerControlCalls.size + 1}`;
+        const result = await waitForComputerControlResult(
+          context,
+          callId,
+          name,
+          arguments_,
+          extra.signal,
+        );
+        if (!result.ok) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: result.error }],
+          };
+        }
+        return { content: computerControlCallResultToClaudeContent(result.value) };
+      }),
+    );
+  if (tools.length === 0) {
+    return null;
+  }
+  return createSdkMcpServerFn({
+    name: "panes-thread",
+    version: "1.0.0",
+    tools,
+  });
+}
+
 function resolveComputerControlToolResult(params = {}) {
   const requestId = params.requestId || params.request_id || params.id;
   const callId = params.callId || params.call_id;
@@ -1511,6 +1556,7 @@ async function handleQuery(req, persistentSession = null) {
     reasoningEffort,
     threadId,
     computerControlTools = [],
+    panesThreadTools = [],
     settingSources,
     strictMcpConfig,
     enforceApprovalRouting,
@@ -1542,8 +1588,12 @@ async function handleQuery(req, persistentSession = null) {
       context,
       computerControlTools,
     );
+    const panesThreadServer = createPanesThreadServer(context, panesThreadTools);
     if (panesComputerControlServer) {
       toolList.push("mcp__panes-computer-control__*");
+    }
+    if (panesThreadServer) {
+      toolList.push("mcp__panes-thread__*");
     }
     const automaticallyAllowedTools = enforceApprovalRouting
       ? toolList.filter((toolName) => !requiresApproval(permissionMode, toolName))
@@ -1558,10 +1608,13 @@ async function handleQuery(req, persistentSession = null) {
       ),
       permissionMode: planMode ? "plan" : "default",
       allowedTools: automaticallyAllowedTools,
-      ...(panesComputerControlServer
+      ...(panesComputerControlServer || panesThreadServer
         ? {
             mcpServers: {
-              "panes-computer-control": panesComputerControlServer,
+              ...(panesComputerControlServer
+                ? { "panes-computer-control": panesComputerControlServer }
+                : {}),
+              ...(panesThreadServer ? { "panes-thread": panesThreadServer } : {}),
             },
           }
         : {}),

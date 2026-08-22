@@ -10,6 +10,7 @@ use crate::{
     remote::RemoteTunnelManager, scheduled_tasks::ScheduledTaskManager,
     ssh::monitor::SshConnectionMonitor, terminal::TerminalManager,
     terminal_notifications::TerminalNotificationManager,
+    panes_thread_mcp_service::PanesThreadMcpService,
 };
 
 #[derive(Clone)]
@@ -27,6 +28,8 @@ pub struct AppState {
     pub extension_catalog_refreshes: Arc<ExtensionCatalogRefreshManager>,
     pub scheduled_tasks: Arc<ScheduledTaskManager>,
     pub computer_control_service: Arc<ComputerControlService>,
+    /// 读取 Panes 本地会话的 MCP 服务。
+    pub panes_thread_mcp_service: Arc<PanesThreadMcpService>,
     pub remote_access: Arc<RemoteTunnelManager>,
     pub ssh_monitor: Arc<SshConnectionMonitor>,
 }

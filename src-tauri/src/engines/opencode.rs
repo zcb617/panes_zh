@@ -31,7 +31,12 @@ use uuid::Uuid;
 use crate::models::{
     OpenCodeAgentDto, OpenCodeCommandDto, OpenCodeMcpServerDto, OpenCodeRuntimeCatalogDto,
 };
-use crate::{computer_control_service::ComputerControlService, process_utils, runtime_env};
+use crate::{
+    computer_control_service::ComputerControlService,
+    panes_thread_mcp_service::PanesThreadMcpService,
+    process_utils,
+    runtime_env,
+};
 
 use super::{
     normalize_approval_response_for_engine, trim_action_output_delta_content, ActionResult,
@@ -59,6 +64,8 @@ pub struct OpenCodeEngine {
     state: Arc<Mutex<OpenCodeState>>,
     http: reqwest::Client,
     computer_control_service: Arc<std::sync::Mutex<Option<Arc<ComputerControlService>>>>,
+    /// Panes 本地会话读取工具服务。
+    panes_thread_mcp_service: Arc<std::sync::Mutex<Option<Arc<PanesThreadMcpService>>>>,
     target: OpenCodeTransportTarget,
 }
 
@@ -642,6 +649,7 @@ impl Default for OpenCodeEngine {
             state: Arc::new(Mutex::new(OpenCodeState::default())),
             http: reqwest::Client::new(),
             computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            panes_thread_mcp_service: Arc::new(std::sync::Mutex::new(None)),
             target: OpenCodeTransportTarget::Local,
         }
     }
@@ -1080,6 +1088,13 @@ impl OpenCodeEngine {
         }
     }
 
+    /// 设置 Panes 本地会话读取工具服务。
+    pub fn set_panes_thread_mcp_service(&self, service: Arc<PanesThreadMcpService>) {
+        if let Ok(mut current) = self.panes_thread_mcp_service.lock() {
+            *current = Some(service);
+        }
+    }
+
     pub fn new_remote_http(base_url: String, password: String) -> Self {
         let (event_bus, _) =
             broadcast::channel::<OpenCodeBusItem>(OPENCODE_EVENT_BUFFER_CAPACITY);
@@ -1095,6 +1110,7 @@ impl OpenCodeEngine {
             state: Arc::new(Mutex::new(OpenCodeState::default())),
             http: reqwest::Client::new(),
             computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            panes_thread_mcp_service: Arc::new(std::sync::Mutex::new(None)),
             target: OpenCodeTransportTarget::Remote(Arc::new(RemoteOpenCodeEndpoint {
                 base_url,
                 password,
@@ -1120,7 +1136,12 @@ impl OpenCodeEngine {
                     .lock()
                     .ok()
                     .and_then(|service| service.clone());
-                start_server(cwd, service).await?
+                let panes_thread_service = self
+                    .panes_thread_mcp_service
+                    .lock()
+                    .ok()
+                    .and_then(|service| service.clone());
+                start_server(cwd, service, panes_thread_service).await?
             }
             OpenCodeTransportTarget::Remote(endpoint) => OpenCodeServer {
                 cwd: cwd.to_string(),
@@ -2743,10 +2764,41 @@ fn write_opencode_computer_control_tool(
     Ok(())
 }
 
+/// 为 OpenCode 导出 Panes 会话读取工具，复用本机回调服务器。
+fn write_opencode_panes_thread_mcp_tool(
+    run_dir: &Path,
+    callback_url: &str,
+    callback_token: &str,
+    tool_specs: &[Value],
+) -> Result<()> {
+    let tools_dir = run_dir.join(".opencode").join("tools");
+    std::fs::create_dir_all(&tools_dir)
+        .with_context(|| format!("failed to create OpenCode tools directory {}", tools_dir.display()))?;
+    let endpoint = serde_json::to_string(callback_url)?;
+    let token = serde_json::to_string(callback_token)?;
+    let mut source = format!(
+        "const endpoint = {endpoint};\nconst token = {token};\nasync function invoke(tool, args, context) {{\n  const response = await fetch(endpoint, {{ method: \"POST\", headers: {{ \"content-type\": \"application/json\", \"x-panes-computer-control-token\": token }}, body: JSON.stringify({{ tool, toolKind: \"panes_thread\", arguments: args ?? {{}}, threadId: context?.sessionID ?? context?.sessionId ?? context?.session_id, turnId: context?.messageID ?? context?.messageId ?? context?.callID ?? context?.callId, callId: context?.callID ?? context?.callId }}) }});\n  const result = await response.json();\n  if (!response.ok) throw new Error(result?.error || `Panes thread callback failed (HTTP ${{response.status}})`);\n  return result;\n}}\n",
+    );
+    for spec in tool_specs {
+        let Some(name) = spec["name"].as_str() else { continue };
+        let description = serde_json::to_string(&spec["description"])?;
+        let input_schema = serde_json::to_string(&spec["inputSchema"])?;
+        let tool_name = serde_json::to_string(name)?;
+        source.push_str(&format!(
+            "export const {name} = {{ description: {description}, parameters: {input_schema}, execute: (args, context) => invoke({tool_name}, args, context) }};\n",
+        ));
+    }
+    let tool_file = tools_dir.join("panes_thread_mcp.ts");
+    std::fs::write(&tool_file, source)
+        .with_context(|| format!("failed to write OpenCode tool file {}", tool_file.display()))?;
+    Ok(())
+}
+
 async fn run_opencode_callback_server(
     listener: AsyncTcpListener,
     callback_token: String,
     computer_control_service: Option<Arc<ComputerControlService>>,
+    panes_thread_mcp_service: Option<Arc<PanesThreadMcpService>>,
     cancel: CancellationToken,
 ) {
     loop {
@@ -2756,8 +2808,9 @@ async fn run_opencode_callback_server(
                 let Ok((stream, _)) = accepted else { continue };
                 let token = callback_token.clone();
                 let service = computer_control_service.clone();
+                let panes_thread_service = panes_thread_mcp_service.clone();
                 tokio::spawn(async move {
-                    handle_opencode_callback(stream, &token, service).await;
+                    handle_opencode_callback(stream, &token, service, panes_thread_service).await;
                 });
             }
         }
@@ -2768,6 +2821,7 @@ async fn handle_opencode_callback(
     mut stream: tokio::net::TcpStream,
     callback_token: &str,
     computer_control_service: Option<Arc<ComputerControlService>>,
+    panes_thread_mcp_service: Option<Arc<PanesThreadMcpService>>,
 ) {
     let mut buffer = Vec::with_capacity(4096);
     let mut chunk = [0_u8; 4096];
@@ -2825,19 +2879,20 @@ async fn handle_opencode_callback(
             return;
         }
     };
-    let Some(service) = computer_control_service else {
-        write_opencode_http_response(
-            &mut stream,
-            503,
-            json!({"error":"Panes 电脑操作服务尚未绑定到 OpenCode 引擎"}),
-        )
-        .await;
-        return;
-    };
+    let tool_kind = request
+        .get("toolKind")
+        .and_then(Value::as_str)
+        .unwrap_or("computer_control");
     let tool = request
         .get("tool")
         .and_then(Value::as_str)
-        .map(normalize_opencode_tool_name)
+        .map(|tool| {
+            if tool_kind == "panes_thread" {
+                tool.strip_prefix("panes_thread_").unwrap_or(tool)
+            } else {
+                normalize_opencode_tool_name(tool)
+            }
+        })
         .unwrap_or_default();
     let thread_id = request
         .get("threadId")
@@ -2854,17 +2909,29 @@ async fn handle_opencode_callback(
         .and_then(Value::as_str)
         .unwrap_or(turn_id);
     let arguments = request.get("arguments").cloned().unwrap_or_else(|| json!({}));
-    let result = service
-        .invoke_for_engine(
-            "opencode",
-            thread_id,
-            turn_id,
-            tool,
-            call_id,
-            arguments,
-            CancellationToken::new(),
-        )
-        .await;
+    let result = if tool_kind == "panes_thread" {
+        match panes_thread_mcp_service.as_ref() {
+            Some(service) => service
+                .invoke_for_engine("opencode", thread_id, tool, arguments)
+                .await,
+            None => Err("Panes 会话 MCP 服务尚未绑定到 OpenCode 引擎".to_string()),
+        }
+    } else {
+        match computer_control_service.as_ref() {
+            Some(service) => service
+                .invoke_for_engine(
+                    "opencode",
+                    thread_id,
+                    turn_id,
+                    tool,
+                    call_id,
+                    arguments,
+                    CancellationToken::new(),
+                )
+                .await,
+            None => Err("Panes 电脑操作服务尚未绑定到 OpenCode 引擎".to_string()),
+        }
+    };
     match result {
         Ok(value) => write_opencode_http_response(&mut stream, 200, value).await,
         Err(error) => {
@@ -2907,6 +2974,7 @@ async fn write_opencode_http_response(stream: &mut tokio::net::TcpStream, status
 async fn start_server(
     cwd: &str,
     computer_control_service: Option<Arc<ComputerControlService>>,
+    panes_thread_mcp_service: Option<Arc<PanesThreadMcpService>>,
 ) -> Result<OpenCodeServer> {
     let executable = resolve_opencode_executable().context("`opencode` executable not found")?;
     let port = allocate_loopback_port()?;
@@ -2925,6 +2993,18 @@ async fn start_server(
         None => Vec::new(),
     };
     write_opencode_computer_control_tool(&run_dir, &callback_url, &callback_token, &tool_specs)?;
+    if panes_thread_mcp_service.is_some() {
+        let panes_specs = panes_thread_mcp_service
+            .as_ref()
+            .expect("checked Panes 会话服务存在")
+            .tool_specs();
+        write_opencode_panes_thread_mcp_tool(
+            &run_dir,
+            &callback_url,
+            &callback_token,
+            &panes_specs,
+        )?;
+    }
     let callback_cancel = CancellationToken::new();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<String>();
 
@@ -3026,6 +3106,7 @@ async fn start_server(
         callback_listener,
         callback_token,
         computer_control_service,
+        panes_thread_mcp_service,
         callback_cancel,
     ));
 
@@ -3702,6 +3783,7 @@ mod tests {
             state: Arc::new(Mutex::new(OpenCodeState::default())),
             http: reqwest::Client::new(),
             computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            panes_thread_mcp_service: Arc::new(std::sync::Mutex::new(None)),
             target: OpenCodeTransportTarget::Remote(Arc::new(RemoteOpenCodeEndpoint {
                 base_url: format!("http://{address}"),
                 password: "runtime-secret".to_string(),
@@ -3738,6 +3820,7 @@ mod tests {
             state: Arc::new(Mutex::new(OpenCodeState::default())),
             http: reqwest::Client::new(),
             computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            panes_thread_mcp_service: Arc::new(std::sync::Mutex::new(None)),
             target: OpenCodeTransportTarget::Remote(Arc::new(RemoteOpenCodeEndpoint {
                 base_url: format!("http://{address}"),
                 password: "runtime-secret".to_string(),

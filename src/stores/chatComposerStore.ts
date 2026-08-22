@@ -35,6 +35,8 @@ const THREAD_MESSAGE_SEND_MODES_STORAGE_KEY = "panes:threadMessageSendModes";
 const LINK_OPEN_GESTURE_STORAGE_KEY = "panes:linkOpenGesture";
 
 export interface PendingFlexibleMessage {
+  /** 仅用于发送前定位 Panes 会话，不持久化模型隐藏指令。 */
+  panesThreadId: string | null;
   id: string;
   text: string;
   attachments: ChatAttachment[];

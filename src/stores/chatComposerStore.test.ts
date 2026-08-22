@@ -286,12 +286,14 @@ describe("chatComposerStore", () => {
 
   it("isolates pending flexible messages between threads in the same workspace", () => {
     const firstMessage = {
+      panesThreadId: "referenced-thread",
       id: "pending-message-a",
       text: "Wait until I finish the details.",
       attachments: [],
       references: [],
     };
     const secondMessage = {
+      panesThreadId: null,
       id: "pending-message-b",
       text: "This belongs to another thread.",
       attachments: [],
@@ -321,12 +323,14 @@ describe("chatComposerStore", () => {
 
   it("removes only the selected pending flexible message", () => {
     const firstMessage = {
+      panesThreadId: null,
       id: "pending-message-1",
       text: "First held message",
       attachments: [],
       references: [],
     };
     const secondMessage = {
+      panesThreadId: null,
       id: "pending-message-2",
       text: "Second held message",
       attachments: [],

@@ -22,7 +22,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{computer_control_service::ComputerControlService, process_utils, runtime_env};
+use crate::{
+    computer_control_service::ComputerControlService,
+    panes_thread_mcp_service::PanesThreadMcpService,
+    process_utils,
+    runtime_env,
+};
 
 use super::{
     normalize_approval_response_for_engine, trim_action_output_delta_content, ActionResult,
@@ -669,6 +674,8 @@ struct ThreadConfig {
 struct ClaudeState {
     transport: Option<Arc<ClaudeTransport>>,
     computer_control_service: Option<Arc<ComputerControlService>>,
+    /// Panes 本地会话读取工具服务。
+    panes_thread_mcp_service: Option<Arc<PanesThreadMcpService>>,
     threads: HashMap<String, ThreadConfig>,
     resource_dir: Option<PathBuf>,
     runtime_model_cache: Option<Vec<ModelInfo>>,
@@ -707,6 +714,12 @@ impl ClaudeSidecarEngine {
     pub fn set_computer_control_service(&self, service: Arc<ComputerControlService>) {
         let mut state = self.state.blocking_lock();
         state.computer_control_service = Some(service);
+    }
+
+    /// 设置 Panes 本地会话读取工具服务。
+    pub fn set_panes_thread_mcp_service(&self, service: Arc<PanesThreadMcpService>) {
+        let mut state = self.state.blocking_lock();
+        state.panes_thread_mcp_service = Some(service);
     }
 
     pub fn set_resource_dir(&self, resource_dir: Option<PathBuf>) {
@@ -1857,11 +1870,21 @@ impl Engine for ClaudeSidecarEngine {
                 .cloned()
                 .context("no thread config found — was start_thread called?")?
         };
-        let computer_control_service = self.state.lock().await.computer_control_service.clone();
+        let (computer_control_service, panes_thread_mcp_service) = {
+            let state = self.state.lock().await;
+            (
+                state.computer_control_service.clone(),
+                state.panes_thread_mcp_service.clone(),
+            )
+        };
         let computer_control_tools = match computer_control_service.as_ref() {
             Some(service) => service.sdk_tool_specs().map_err(anyhow::Error::msg)?,
             None => Vec::new(),
         };
+        let panes_thread_tools = panes_thread_mcp_service
+            .as_ref()
+            .map(|service| service.tool_specs())
+            .unwrap_or_default();
 
         let request_id = Uuid::new_v4().to_string();
         {
@@ -1911,6 +1934,7 @@ impl Engine for ClaudeSidecarEngine {
             "planMode": plan_mode,
             "threadId": engine_thread_id,
             "computerControlTools": computer_control_tools,
+            "panesThreadTools": panes_thread_tools,
         });
 
         if let Some(ref session_id) = thread_config.agent_session_id {
@@ -2071,7 +2095,32 @@ impl Engine for ClaudeSidecarEngine {
                                     }
                                     let effective_turn_id =
                                         turn_id.unwrap_or_else(|| request_id.clone());
-                                    let result = match computer_control_service.as_ref() {
+                                    let is_panes_thread_tool = panes_thread_mcp_service
+                                        .as_ref()
+                                        .map(|service| {
+                                            service.tool_specs().iter().any(|spec| {
+                                                spec.get("name")
+                                                    .and_then(serde_json::Value::as_str)
+                                                    == Some(tool_name.as_str())
+                                            })
+                                        })
+                                        .unwrap_or(false);
+                                    let result = if is_panes_thread_tool {
+                                        match panes_thread_mcp_service.as_ref() {
+                                            Some(service) => service
+                                                .invoke_for_engine(
+                                                    "claude",
+                                                    &engine_thread_id_owned,
+                                                    &tool_name,
+                                                    arguments,
+                                                )
+                                                .await,
+                                            None => Err(
+                                                "Panes 会话 MCP 服务尚未绑定到 Claude 引擎".to_string(),
+                                            ),
+                                        }
+                                    } else {
+                                        match computer_control_service.as_ref() {
                                         Some(service) => {
                                             service
                                                 .invoke_for_engine(
@@ -2088,6 +2137,7 @@ impl Engine for ClaudeSidecarEngine {
                                         None => Err(
                                             "电脑操作服务尚未绑定到 Claude 引擎".to_string(),
                                         ),
+                                        }
                                     };
                                     let response = match result {
                                         Ok(value) => serde_json::json!({

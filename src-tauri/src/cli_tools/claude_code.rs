@@ -830,6 +830,7 @@ impl CliTool for ClaudeCodeCli {
         }
         let engine = self.local_engine().await?;
         engine.set_computer_control_service(self.state.computer_control_service.clone());
+        engine.set_panes_thread_mcp_service(self.state.panes_thread_mcp_service.clone());
         Engine::start_thread(
             engine.as_ref(),
             scope,
@@ -927,6 +928,7 @@ impl CliTool for ClaudeCodeCli {
         }
         let engine = self.local_engine().await?;
         engine.set_computer_control_service(self.state.computer_control_service.clone());
+        engine.set_panes_thread_mcp_service(self.state.panes_thread_mcp_service.clone());
         Engine::send_message(
             engine.as_ref(),
             engine_thread_id,
@@ -1299,7 +1301,7 @@ mod tests {
         let db = crate::db::Database::open(root.join("workspaces.db"))
             .expect("failed to create test database");
         AppState {
-            db,
+            db: db.clone(),
             config: Arc::new(AppConfig::default()),
             config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             engines: Arc::new(EngineManager::new()),
@@ -1315,6 +1317,9 @@ mod tests {
             scheduled_tasks: Arc::new(crate::scheduled_tasks::ScheduledTaskManager::new()),
             computer_control_service: Arc::new(
                 crate::computer_control_service::ComputerControlService::default(),
+            ),
+            panes_thread_mcp_service: Arc::new(
+                crate::panes_thread_mcp_service::PanesThreadMcpService::new(db.clone()),
             ),
             remote_access: Arc::new(crate::remote::RemoteTunnelManager::default()),
             ssh_monitor: Arc::new(crate::ssh::monitor::SshConnectionMonitor::default()),

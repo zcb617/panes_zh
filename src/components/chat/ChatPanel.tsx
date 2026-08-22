@@ -149,6 +149,7 @@ import { PermissionPicker } from "./PermissionPicker";
 import { OpenCodeAgentPicker } from "./OpenCodeAgentPicker";
 // CodexReviewPicker and CodexThreadPicker replaced by slash commands (ChatSlashMenu + ChatCommandPanel)
 import { ChatSlashMenu } from "./ChatSlashMenu";
+import { ChatThreadMentionMenu } from "./ChatThreadMentionMenu";
 import { ChatCommandPanel, type ActiveSlashCommand } from "./ChatCommandPanel";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { Dropdown } from "../shared/Dropdown";
@@ -1857,6 +1858,15 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashMenuQuery, setSlashMenuQuery] = useState("");
   const [slashMenuActiveIndex, setSlashMenuActiveIndex] = useState(0);
+  const [threadMentionMenuOpen, setThreadMentionMenuOpen] = useState(false);
+  const [threadMentionQuery, setThreadMentionQuery] = useState("");
+  const [threadMentionActiveIndex, setThreadMentionActiveIndex] = useState(0);
+  const [selectedPanesThreadMention, setSelectedPanesThreadMention] = useState<{
+    threadId: string;
+    title: string;
+  } | null>(null);
+  const threadMentionRangeRef = useRef<{ start: number; end: number } | null>(null);
+
   const [activeCommandPanel, setActiveCommandPanel] = useState<ActiveSlashCommand | null>(null);
   const [commandPanelBusy, setCommandPanelBusy] = useState(false);
   const [commandPanelError, setCommandPanelError] = useState<string | null>(null);
@@ -2012,6 +2022,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     setThreadReasoningEffortLocal,
     setThreadLastModelLocal,
     renameThread,
+    threadsByWorkspace,
   } = useThreadStore(
     useShallow((state) => ({
       activeThread: state.threads.find((thread) => thread.id === state.activeThreadId) ?? null,
@@ -2027,6 +2038,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       setThreadReasoningEffortLocal: state.setThreadReasoningEffortLocal,
       setThreadLastModelLocal: state.setThreadLastModelLocal,
       renameThread: state.renameThread,
+      threadsByWorkspace: state.threadsByWorkspace,
     })),
   );
   const activeChatSessionId = activeThread?.id ?? threadId ?? null;
@@ -2041,6 +2053,13 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     : activeWorkspaceId
       ? `new:${activeWorkspaceId}`
       : null;
+  useEffect(() => {
+    setThreadMentionMenuOpen(false);
+    setThreadMentionQuery("");
+    setThreadMentionActiveIndex(0);
+    setSelectedPanesThreadMention(null);
+    threadMentionRangeRef.current = null;
+  }, [activeWorkspaceId, activeThread?.id]);
   const gitStatus = useGitStore((s) => s.status);
   /*
    * 旧项目级读取、getter 和 setter 的完整代码保留如下，不参与编译；它们已由
@@ -2445,6 +2464,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     attachments: ChatAttachment[];
     textAnnotations: ChatTextAnnotation[];
     references: ChatInputReference[];
+    referencedPanesThreadId: string | null;
     inputItems: ChatInputItem[] | null;
     planMode: boolean;
     engineId: string;
@@ -5275,6 +5295,51 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     }
   }
 
+  const threadMentionCandidates = useMemo(() => {
+    const query = threadMentionQuery.toLocaleLowerCase();
+    return (activeWorkspaceId ? threadsByWorkspace[activeWorkspaceId] ?? [] : [])
+      .filter((thread) => thread.id !== activeThread?.id)
+      .filter((thread) => (thread.title || "未命名会话").toLocaleLowerCase().includes(query));
+  }, [activeThread?.id, activeWorkspaceId, threadMentionQuery, threadsByWorkspace]);
+
+  function handleThreadMentionDetection(value: string, cursorPos: number) {
+    const atIndex = value.lastIndexOf("@", Math.max(0, cursorPos - 1));
+    if (atIndex < 0 || (atIndex > 0 && !/\s/.test(value[atIndex - 1] ?? ""))) {
+      setThreadMentionMenuOpen(false);
+      return;
+    }
+    const query = value.slice(atIndex + 1, cursorPos);
+    const selectedTitle = selectedPanesThreadMention?.title ?? "";
+    if (
+      selectedTitle &&
+      value.slice(atIndex + 1, atIndex + 1 + selectedTitle.length) === selectedTitle &&
+      query.length >= selectedTitle.length
+    ) {
+      setThreadMentionMenuOpen(false);
+      return;
+    }
+    threadMentionRangeRef.current = { start: atIndex, end: cursorPos };
+    setThreadMentionQuery(query);
+    setThreadMentionActiveIndex(0);
+    setThreadMentionMenuOpen(true);
+  }
+
+  function handleThreadMentionSelect(thread: Thread) {
+    const range = threadMentionRangeRef.current;
+    if (!range) return;
+    const title = thread.title.trim() || "未命名会话";
+    const mention = `@${title}`;
+    const nextValue = `${input.slice(0, range.start)}${mention}${input.slice(range.end)}`;
+    const nextCursor = range.start + mention.length;
+    setInput(nextValue);
+    setSelectedPanesThreadMention({ threadId: thread.id, title });
+    setThreadMentionMenuOpen(false);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(nextCursor, nextCursor);
+    });
+  }
+
   // async function submitMessage(): Promise<boolean> {
   async function submitMessage(
     submittedText: string,
@@ -5282,6 +5347,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     submittedTextAnnotations: ChatTextAnnotation[],
     submittedReferences: ChatInputReference[],
     submittedPlanMode: boolean,
+    referencedPanesThreadId: string | null = null,
   ): Promise<boolean> {
     // if ((!input.trim() && textAnnotations.length === 0) || !activeWorkspaceId) return false;
     // if ((!submittedText.trim() && submittedTextAnnotations.length === 0) || !activeWorkspaceId) return false;
@@ -5323,6 +5389,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         attachments: transportAttachments.length > 0 ? transportAttachments : undefined,
         inputItems,
         planMode: submittedPlanMode,
+        referencedPanesThreadId,
       });
       if (steered) {
         // const trimmed = input.trim();
@@ -5476,6 +5543,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
           attachments: currentAttachments,
           textAnnotations: currentTextAnnotations,
           references: currentReferences,
+          referencedPanesThreadId,
           inputItems: inputItems ?? null,
           planMode: submitPlanMode,
           engineId: submitEngineId,
@@ -5543,6 +5611,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       ),
       remoteAttachmentUpload:
         activeWorkspace?.locationKind === "ssh" && currentAttachments.length > 0,
+      referencedPanesThreadId,
     });
     if (sent) {
       pendingPlanImplementationThreadIdRef.current = submitPlanMode ? targetThreadId : null;
@@ -5575,6 +5644,11 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     }
 
     const submittedText = input.trim();
+    const referencedPanesThreadId =
+      selectedPanesThreadMention &&
+      submittedText.includes(`@${selectedPanesThreadMention.title}`)
+        ? selectedPanesThreadMention.threadId
+        : null;
     const submittedAttachments = [...attachments];
     const submittedTextAnnotations = [...textAnnotations];
     const submittedReferences = [...references];
@@ -5594,6 +5668,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         setPendingMessageSendMode(activeWorkspaceId, sessionMessageSendMode);
       }
       addPendingFlexibleMessage(flexibleMessageSessionKey, {
+        panesThreadId: referencedPanesThreadId,
         id: crypto.randomUUID(),
         text: submittedMessage,
         attachments: submittedAttachments,
@@ -5603,6 +5678,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       setAttachments([]);
       setTextAnnotations([]);
       setReferences([]);
+      setSelectedPanesThreadMention(null);
       return;
     }
     if (!streaming) {
@@ -5627,6 +5703,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       submittedTextAnnotations,
       submittedReferences,
       planMode,
+      referencedPanesThreadId,
     );
     setInput("");
     setAttachments([]);
@@ -5645,6 +5722,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
             submittedReferences,
           );
         }
+      }
+      if (accepted) {
+        setSelectedPanesThreadMention(null);
       }
     } catch (error) {
       const restoreSessionKey = activeSubmissionSessionKeyRef.current;
@@ -5686,6 +5766,9 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     const submittedReferences = pendingFlexibleMessages.flatMap(
       (message) => message.references,
     );
+    const referencedPanesThreadId =
+      pendingFlexibleMessages.find((message) => Boolean(message.panesThreadId))?.panesThreadId ??
+      null;
     setPendingSubmission(
       createPendingSubmissionMessage(
         threadId ?? activeThread?.id ?? "pending",
@@ -5705,6 +5788,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
         [],
         submittedReferences,
         planMode,
+        referencedPanesThreadId,
       );
       if (accepted) {
         clearPendingFlexibleMessages(flexibleMessageSessionKey);
@@ -5781,6 +5865,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
           : undefined,
         inputItems: prompt.inputItems ?? undefined,
         planMode: promptPlanMode,
+        referencedPanesThreadId: prompt.referencedPanesThreadId,
       });
       if (!sent) {
         restoreComposerContent(
@@ -5850,6 +5935,7 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
           attachments: [],
           textAnnotations: [],
           references: [],
+          referencedPanesThreadId: null,
           inputItems: null,
           planMode: false,
           engineId: prompt.engineId,
@@ -7758,8 +7844,40 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                       e.target.value,
                       e.target.selectionStart ?? e.target.value.length,
                     );
+                    handleThreadMentionDetection(
+                      e.target.value,
+                      e.target.selectionStart ?? e.target.value.length,
+                    );
                   }}
                   onKeyDown={(e) => {
+                    /* ── Panes 会话 @ 菜单键盘导航 ── */
+                    if (threadMentionMenuOpen && threadMentionCandidates.length > 0) {
+                      if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        setThreadMentionActiveIndex((index) =>
+                          Math.min(index + 1, threadMentionCandidates.length - 1),
+                        );
+                        return;
+                      }
+                      if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        setThreadMentionActiveIndex((index) => Math.max(index - 1, 0));
+                        return;
+                      }
+                      if (e.key === "Enter" || e.key === "Tab") {
+                        e.preventDefault();
+                        const thread = threadMentionCandidates[
+                          Math.min(threadMentionActiveIndex, threadMentionCandidates.length - 1)
+                        ];
+                        if (thread) handleThreadMentionSelect(thread);
+                        return;
+                      }
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        setThreadMentionMenuOpen(false);
+                        return;
+                      }
+                    }
                     /* ── Slash menu keyboard nav ── */
                     if (slashMenuOpen) {
                       if (e.key === "ArrowDown") {
@@ -7853,6 +7971,16 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
                     fontFamily: "inherit",
                     caretColor: activePlanMode ? "var(--accent-2)" : "var(--accent)",
                   }}
+                />
+
+                <ChatThreadMentionMenu
+                  visible={threadMentionMenuOpen && threadMentionCandidates.length > 0}
+                  threads={threadMentionCandidates}
+                  anchorRef={inputRef}
+                  activeIndex={threadMentionActiveIndex}
+                  onSelect={handleThreadMentionSelect}
+                  onDismiss={() => setThreadMentionMenuOpen(false)}
+                  onActiveChange={setThreadMentionActiveIndex}
                 />
 
                 {/* Slash command menu (portal) */}

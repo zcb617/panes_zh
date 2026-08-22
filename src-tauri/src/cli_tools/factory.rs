@@ -46,9 +46,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("panes-cli-tool-factory-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).expect("failed to create test root");
 
+        let db = crate::db::Database::open(root.join("workspaces.db"))
+            .expect("failed to create test database");
         AppState {
-            db: crate::db::Database::open(root.join("workspaces.db"))
-                .expect("failed to create test database"),
+            db: db.clone(),
             config: Arc::new(AppConfig::default()),
             config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             engines: Arc::new(EngineManager::new()),
@@ -69,6 +70,9 @@ mod tests {
             */
             computer_control_service: Arc::new(
                 crate::computer_control_service::ComputerControlService::default(),
+            ),
+            panes_thread_mcp_service: Arc::new(
+                crate::panes_thread_mcp_service::PanesThreadMcpService::new(db),
             ),
             remote_access: Arc::new(crate::remote::RemoteTunnelManager::default()),
             ssh_monitor: Arc::new(crate::ssh::monitor::SshConnectionMonitor::default()),

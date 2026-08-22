@@ -56,6 +56,8 @@ interface ChatState {
       sendMethod?: string | null;
       /** 权限状态的整包 JSON，前端给什么写什么、读时整个取回。 */
       permissionModeJson?: string | null;
+      /** 发送时临时引用的 Panes 会话 ID，不进入可见消息。 */
+      referencedPanesThreadId?: string | null;
     },
   ) => Promise<boolean>;
   steer: (
@@ -65,6 +67,8 @@ interface ChatState {
       attachments?: ChatAttachment[];
       inputItems?: ChatInputItem[];
       planMode?: boolean;
+      /** steer 时临时引用的 Panes 会话 ID，不进入可见消息。 */
+      referencedPanesThreadId?: string | null;
     },
   ) => Promise<boolean>;
   cancel: () => Promise<void>;
@@ -2374,6 +2378,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         inputItems.length > 0 ? inputItems : null,
         planMode,
         clientTurnId,
+        options?.referencedPanesThreadId ?? null,
       );
       set({ preparingEngineId: null, preparingAttachments: false });
 
@@ -2463,6 +2468,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         inputItems.length > 0 ? inputItems : null,
         planMode,
         steerBlock.steerId,
+        options?.referencedPanesThreadId ?? null,
       );
       if (receipt.clientSteerId !== steerBlock.steerId) {
         throw new Error(

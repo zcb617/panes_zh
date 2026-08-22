@@ -1965,6 +1965,7 @@ impl RemoteTunnelManager {
                                                                                         Some(false),
                                                                                         Some(request.id.clone()),
                                                                                         None,
+                                                                                        None,
                                                                                     )
                                                                                     .await;
                                                                                     match send_result {
@@ -2037,6 +2038,7 @@ impl RemoteTunnelManager {
                                                                             None,
                                                                             Some(false),
                                                                             Some(request.id.clone()),
+                                                                            None,
                                                                             None,
                                                                         )
                                                                         .await

@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     computer_control_service::ComputerControlService,
+    panes_thread_mcp_service::PanesThreadMcpService,
     engines::{
         claude_sidecar::ClaudeSidecarEngine,
         codex::{CodexEngine, CodexForkedThread, CodexReviewStarted},
@@ -499,6 +500,13 @@ impl EngineManager {
 
     pub fn set_computer_control_service(&self, service: Arc<ComputerControlService>) {
         self.claude.set_computer_control_service(service);
+    }
+
+    /// 将 Panes 本地会话工具配置到三个本机引擎。
+    pub fn set_panes_thread_mcp_service(&self, service: Arc<PanesThreadMcpService>) {
+        self.codex.set_panes_thread_mcp_service(service.clone());
+        self.claude.set_panes_thread_mcp_service(service.clone());
+        self.opencode.set_panes_thread_mcp_service(service);
     }
 
     pub fn set_local_codex_computer_control_service(&self, service: Arc<ComputerControlService>) {

@@ -1367,6 +1367,7 @@ describe("chatStore send", () => {
       [{ type: "mention", name: "Docs", path: "app://docs" }],
       false,
       expect.any(String),
+      null,
     );
     expect(useChatStore.getState().messages).toHaveLength(1);
     expect(useChatStore.getState().messages[0]).toMatchObject({

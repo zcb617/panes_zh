@@ -29,6 +29,19 @@ pub struct ImportedMessageRecord {
     pub created_at: Option<String>,
 }
 
+/// 供 Panes 会话 MCP 返回的最小消息记录。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct PanesThreadMessageRecord {
+    /// 消息主键。
+    pub id: String,
+    /// 消息角色。
+    pub role: String,
+    /// 消息文本；部分块消息没有文本内容。
+    pub content: Option<String>,
+    /// 消息创建时间。
+    pub created_at: String,
+}
+
 pub fn insert_user_message(
     db: &Database,
     thread_id: &str,
@@ -622,6 +635,56 @@ pub fn get_thread_messages(db: &Database, thread_id: &str) -> anyhow::Result<Vec
     reconcile_answered_approvals_for_messages(&conn, &mut out)?;
 
     Ok(out)
+}
+
+/// 查询指定 Panes 会话中的消息行数。
+pub fn count_thread_messages(db: &Database, thread_id: &str) -> anyhow::Result<u64> {
+    let conn = db.connect()?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE thread_id = ?1",
+        params![thread_id],
+        |row| row.get(0),
+    )?;
+    u64::try_from(count).context("message count is negative")
+}
+
+/// 按创建时间倒序读取消息页；同一时间使用 SQLite rowid 倒序保证稳定顺序。
+pub fn get_thread_messages_page_desc(
+    db: &Database,
+    thread_id: &str,
+    page: u64,
+    page_size: u64,
+) -> anyhow::Result<Vec<PanesThreadMessageRecord>> {
+    if page == 0 || page_size == 0 {
+        anyhow::bail!("page and page_size must be greater than zero");
+    }
+    let offset = page
+        .checked_sub(1)
+        .and_then(|value| value.checked_mul(page_size))
+        .context("message page offset overflow")?;
+    let limit = i64::try_from(page_size).context("message page size is too large")?;
+    let offset = i64::try_from(offset).context("message page offset is too large")?;
+    let conn = db.connect()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, role, content, created_at
+         FROM messages
+         WHERE thread_id = ?1
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT ?2 OFFSET ?3",
+    )?;
+    let rows = stmt.query_map(params![thread_id, limit, offset], |row| {
+        Ok(PanesThreadMessageRecord {
+            id: row.get(0)?,
+            role: row.get(1)?,
+            content: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
+    let mut records = Vec::new();
+    for row in rows {
+        records.push(row?);
+    }
+    Ok(records)
 }
 
 pub fn get_thread_messages_window(

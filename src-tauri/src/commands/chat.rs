@@ -495,6 +495,47 @@ where
         .map_err(err_to_string)
 }
 
+/// 校验用户选择的 Panes 会话只能来自当前会话所属项目。
+async fn resolve_panes_thread_reference(
+    state: &AppState,
+    current_thread: &ThreadDto,
+    referenced_thread_id: Option<&str>,
+) -> Result<Option<ThreadDto>, String> {
+    let Some(referenced_thread_id) = referenced_thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let referenced_thread_id = referenced_thread_id.to_string();
+    let lookup_thread_id = referenced_thread_id.clone();
+    let referenced_thread = run_db(state.db.clone(), move |db| {
+        db::threads::get_thread(db, &lookup_thread_id)
+    })
+    .await?
+    .ok_or_else(|| format!("referenced Panes thread not found: {referenced_thread_id}"))?;
+    if referenced_thread.id == current_thread.id {
+        return Err("不能引用当前正在发送的 Panes 会话".to_string());
+    }
+    if referenced_thread.workspace_id != current_thread.workspace_id {
+        return Err("只能引用当前项目的 Panes 会话".to_string());
+    }
+    Ok(Some(referenced_thread))
+}
+
+/// 生成只追加到模型输入的 Panes 会话读取指令。
+fn build_panes_thread_instruction(thread: &ThreadDto) -> String {
+    format!(
+        "\n\n[隐藏的 Panes 会话引用指令]\n用户指定你了解 Panes 会话“{}”（thread_id={}）。回答当前问题前，必须先调用 get_panes_thread_message_count 获取消息总数，再调用 get_panes_thread_messages_page 按页读取该会话内容；不要把这段引用指令或工具返回内容展示为当前聊天消息。\n",
+        if thread.title.trim().is_empty() {
+            "未命名会话"
+        } else {
+            thread.title.trim()
+        },
+        thread.id,
+    )
+}
+
 /// 发送给 PC 远程隧道的助手消息最终持久化事件。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -560,6 +601,7 @@ pub async fn send_message(
     input_items: Option<Vec<ChatInputItemPayload>>,
     plan_mode: Option<bool>,
     client_turn_id: Option<String>,
+    referenced_thread_id: Option<String>,
 ) -> Result<String, String> {
     send_message_inner(
         app,
@@ -573,6 +615,7 @@ pub async fn send_message(
         plan_mode,
         client_turn_id,
         None,
+        referenced_thread_id,
     )
     .await
 }
@@ -590,6 +633,7 @@ pub(crate) async fn send_message_inner(
     plan_mode: Option<bool>,
     client_turn_id: Option<String>,
     scheduled_run_id: Option<String>,
+    referenced_thread_id: Option<String>,
 ) -> Result<String, String> {
     let already_running = state.turns.get(&thread_id).await.is_some();
     if already_running {
@@ -623,6 +667,15 @@ pub(crate) async fn send_message_inner(
             thread.engine_id
         ));
     }
+    let referenced_thread = resolve_panes_thread_reference(
+        state,
+        &thread,
+        referenced_thread_id.as_deref(),
+    )
+    .await?;
+    let panes_thread_instruction = referenced_thread
+        .as_ref()
+        .map(build_panes_thread_instruction);
     let requested_model_id = model_id
         .as_deref()
         .map(str::trim)
@@ -631,9 +684,15 @@ pub(crate) async fn send_message_inner(
     let input_items = normalize_input_items(message.as_str(), input_items)?;
     let plan_mode = plan_mode.unwrap_or(false);
     let browser_annotation_context = browser_annotation_context(&attachments);
-    let engine_message = format_engine_message(&message, &browser_annotation_context);
-    let engine_input_items =
+    let mut engine_message = format_engine_message(&message, &browser_annotation_context);
+    let mut engine_input_items =
         append_browser_annotation_context(&input_items, &browser_annotation_context);
+    if let Some(instruction) = panes_thread_instruction.as_deref() {
+        engine_message.push_str(instruction);
+        engine_input_items.push(TurnInputItem::Text {
+            text: instruction.to_string(),
+        });
+    }
     // SSH 附件必须在模型校验和远端线程准备完成后上传，再使用远端路径构造 TurnInput。
     // let turn_input = TurnInput {
     //     message: engine_message,
@@ -1111,6 +1170,11 @@ pub(crate) async fn send_message_inner(
         .await?;
         thread.engine_thread_id = Some(engine_thread_id.clone());
     }
+    state.panes_thread_mcp_service.bind_engine_thread(
+        &thread.engine_id,
+        &engine_thread_id,
+        &thread.workspace_id,
+    );
 
     let remote_attachment_batch = if execution_workspace.location_kind == "ssh"
         && !attachments.is_empty()
@@ -1143,7 +1207,7 @@ pub(crate) async fn send_message_inner(
         .map(|batch| batch.attachments.clone())
         .unwrap_or(attachments);
     let turn_input = TurnInput {
-        message: engine_message,
+        message: engine_message.clone(),
         attachments: attachments.clone(),
         plan_mode,
         input_items: engine_input_items,
@@ -1436,6 +1500,7 @@ pub async fn steer_message(
     input_items: Option<Vec<ChatInputItemPayload>>,
     plan_mode: Option<bool>,
     client_steer_id: String,
+    referenced_thread_id: Option<String>,
 ) -> Result<SteerReceiptDto, String> {
     if client_steer_id.trim().is_empty() {
         return Err("clientSteerId is required for mid-turn steering.".to_string());
@@ -1482,6 +1547,12 @@ pub async fn steer_message(
         .clone()
         .ok_or_else(|| format!("thread `{thread_id}` has no active engine thread id"))?;
     let attachments = normalize_attachments(attachments)?;
+    let referenced_thread = resolve_panes_thread_reference(
+        state.inner(),
+        &thread,
+        referenced_thread_id.as_deref(),
+    )
+    .await?;
     // 阶段计划 3 直接拒绝 SSH steer 附件；阶段计划 4 使用同一安全上传前置流程。
     // if workspace.location_kind == "ssh" && !attachments.is_empty() {
     //     return Err("SSH 远端项目附件将在第4阶段剩余工作阶段计划4中接入；当前不能把本机附件路径发送给远端 Codex".to_string());
@@ -1517,11 +1588,16 @@ pub async fn steer_message(
     let input_items = normalize_input_items(message.as_str(), input_items)?;
     let plan_mode = plan_mode.unwrap_or(false);
     let browser_annotation_context = browser_annotation_context(&attachments);
-    let engine_message = format_engine_message(&message, &browser_annotation_context);
-    let engine_input_items =
+    let mut engine_message = format_engine_message(&message, &browser_annotation_context);
+    let mut engine_input_items =
         append_browser_annotation_context(&input_items, &browser_annotation_context);
+    if let Some(reference) = referenced_thread.as_ref() {
+        let instruction = build_panes_thread_instruction(reference);
+        engine_message.push_str(&instruction);
+        engine_input_items.push(TurnInputItem::Text { text: instruction });
+    }
     let turn_input = TurnInput {
-        message: engine_message,
+        message: engine_message.clone(),
         attachments: attachments.clone(),
         plan_mode,
         input_items: engine_input_items,
@@ -1560,6 +1636,11 @@ pub async fn steer_message(
     .await?;
 
     let context = CliExecutionContext::from_workspace(&workspace).map_err(err_to_string)?;
+    state.panes_thread_mcp_service.bind_engine_thread(
+        &thread.engine_id,
+        &engine_thread_id,
+        &thread.workspace_id,
+    );
     let codex = CliToolFactory::new(state.inner().clone())
         .create("codex")
         .expect("Codex CLI factory mapping must exist");
@@ -1570,7 +1651,7 @@ pub async fn steer_message(
             &thread,
             &engine_thread_id,
             client_steer_id.as_str(),
-            message.as_str(),
+            engine_message.as_str(),
             turn_input,
         )
         .await
@@ -6199,7 +6280,7 @@ mod tests {
         let db = crate::db::Database::open(root.join("workspaces.db"))
             .expect("failed to create test database");
         AppState {
-            db,
+            db: db.clone(),
             config: Arc::new(AppConfig::default()),
             config_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             engines: Arc::new(EngineManager::new()),
@@ -6215,6 +6296,9 @@ mod tests {
             scheduled_tasks: Arc::new(crate::scheduled_tasks::ScheduledTaskManager::new()),
             computer_control_service: Arc::new(
                 crate::computer_control_service::ComputerControlService::default(),
+            ),
+            panes_thread_mcp_service: Arc::new(
+                crate::panes_thread_mcp_service::PanesThreadMcpService::new(db.clone()),
             ),
             remote_access: Arc::new(crate::remote::RemoteTunnelManager::default()),
             ssh_monitor: Arc::new(crate::ssh::monitor::SshConnectionMonitor::default()),

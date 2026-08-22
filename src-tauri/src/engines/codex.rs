@@ -315,6 +315,9 @@ pub struct CodexEngine {
     runtime_events: broadcast::Sender<CodexRuntimeEvent>,
     computer_control_service:
         Arc<std::sync::Mutex<Option<Arc<crate::computer_control_service::ComputerControlService>>>>,
+    /// Panes 本地会话读取工具服务。
+    panes_thread_mcp_service:
+        Arc<std::sync::Mutex<Option<Arc<crate::panes_thread_mcp_service::PanesThreadMcpService>>>>,
     transport_target: CodexTransportTarget,
 }
 
@@ -389,6 +392,7 @@ impl Default for CodexEngine {
             transport_spawn_lock: Arc::new(Mutex::new(())),
             runtime_events,
             computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            panes_thread_mcp_service: Arc::new(std::sync::Mutex::new(None)),
             transport_target: CodexTransportTarget::Local,
         }
     }
@@ -724,10 +728,18 @@ impl Engine for CodexEngine {
             }
         }
 
-        let dynamic_tools = match self.computer_control_service() {
+        let mut dynamic_tools = match self.computer_control_service() {
             Some(service) => service.dynamic_tools_spec().map_err(anyhow::Error::msg)?,
             None => serde_json::Value::Array(Vec::new()),
         };
+        if let Some(service) = self.panes_thread_mcp_service() {
+            let panes_tools = service.dynamic_tools_spec();
+            if let (serde_json::Value::Array(existing), serde_json::Value::Array(panes)) =
+                (&mut dynamic_tools, panes_tools)
+            {
+                existing.extend(panes);
+            }
+        }
         let start_params = build_thread_start_params(
             model,
             &cwd,
@@ -1218,10 +1230,12 @@ impl Engine for CodexEngine {
                         let call_turn_id = extract_any_string(&params, &["turnId", "turn_id"])
                             .or_else(|| expected_turn_id.clone())
                             .unwrap_or_default();
-                        if let Some(namespace) =
-                            extract_any_string(&params, &["namespace", "toolNamespace"])
-                        {
-                            if namespace != "panes_computer_control" {
+                        let namespace =
+                            extract_any_string(&params, &["namespace", "toolNamespace"]);
+                        if let Some(namespace) = namespace.as_deref() {
+                            if namespace != "panes_computer_control"
+                                && namespace != crate::panes_thread_mcp_service::PANES_THREAD_NAMESPACE
+                            {
                                 transport
                                     .respond_success(
                                         &raw_id,
@@ -1238,6 +1252,32 @@ impl Engine for CodexEngine {
                         }
                         let raw_tool = extract_any_string(&params, &["tool", "name"])
                             .unwrap_or_default();
+                        if namespace.as_deref()
+                            == Some(crate::panes_thread_mcp_service::PANES_THREAD_NAMESPACE)
+                        {
+                            let tool = raw_tool
+                                .strip_prefix("panes_thread.")
+                                .unwrap_or(&raw_tool)
+                                .to_string();
+                            let arguments = params
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            let response = match self.panes_thread_mcp_service() {
+                                Some(service) => match service
+                                    .invoke_for_engine("codex", &thread_id, &tool, arguments)
+                                    .await
+                                {
+                                    Ok(value) => crate::computer_control_service::dynamic_tool_success(value),
+                                    Err(error) => crate::computer_control_service::dynamic_tool_failure(error),
+                                },
+                                None => crate::computer_control_service::dynamic_tool_failure(
+                                    "Panes 会话 MCP 服务尚未就绪",
+                                ),
+                            };
+                            transport.respond_success(&raw_id, response).await.ok();
+                            continue;
+                        }
                         let tool = raw_tool
                             .strip_prefix("panes_computer_control.")
                             .unwrap_or(&raw_tool)
@@ -1654,10 +1694,30 @@ impl CodexEngine {
         }
     }
 
+    /// 设置 Panes 本地会话读取工具服务。
+    pub fn set_panes_thread_mcp_service(
+        &self,
+        service: Arc<crate::panes_thread_mcp_service::PanesThreadMcpService>,
+    ) {
+        if let Ok(mut current) = self.panes_thread_mcp_service.lock() {
+            *current = Some(service);
+        }
+    }
+
     fn computer_control_service(
         &self,
     ) -> Option<Arc<crate::computer_control_service::ComputerControlService>> {
         self.computer_control_service
+            .lock()
+            .ok()
+            .and_then(|service| service.clone())
+    }
+
+    /// 获取当前配置的 Panes 本地会话读取工具服务。
+    fn panes_thread_mcp_service(
+        &self,
+    ) -> Option<Arc<crate::panes_thread_mcp_service::PanesThreadMcpService>> {
+        self.panes_thread_mcp_service
             .lock()
             .ok()
             .and_then(|service| service.clone())
@@ -1670,6 +1730,7 @@ impl CodexEngine {
             transport_spawn_lock: Arc::new(Mutex::new(())),
             runtime_events,
             computer_control_service: Arc::new(std::sync::Mutex::new(None)),
+            panes_thread_mcp_service: Arc::new(std::sync::Mutex::new(None)),
             transport_target: CodexTransportTarget::WebSocket(url),
         }
     }

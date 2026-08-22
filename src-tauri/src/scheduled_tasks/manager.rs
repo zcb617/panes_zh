@@ -240,6 +240,7 @@ async fn execute_claimed_task_inner(
         Some(false),
         Some(format!("scheduled:{}", run.id)),
         Some(run.id.clone()),
+        None,
     )
     .await?;
     emit_task_updated(app, &task.id);
