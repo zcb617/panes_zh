@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ContentBlock } from "../../types";
-import { buildBlockSegments } from "./MessageBlocks";
+import { buildBlockSegments, getSubagentCardTitle } from "./MessageBlocks";
 
 describe("buildBlockSegments", () => {
   it("keeps non-Codex hooks at their stream positions", () => {
@@ -316,6 +316,26 @@ describe("buildBlockSegments", () => {
         { actionId: "command-child-1", details: { subagentThreadId: "child-1" } },
       ],
     });
+  });
+
+  it("labels subagent cards with an explicit identity prefix", () => {
+    const blocks: ContentBlock[] = [
+      {
+        type: "action",
+        actionId: "activity-child-1",
+        actionType: "other",
+        summary: "子代理活动",
+        details: {
+          subagentActivity: "started",
+          agentPath: "/root/archive_logging",
+        },
+        outputChunks: [],
+        status: "done",
+      },
+    ];
+
+    expect(getSubagentCardTitle(blocks, "child-thread-id")).toBe("子代理：/root/archive_logging");
+    expect(getSubagentCardTitle([], "child-thread-id")).toBe("子代理：child-th");
   });
 
   it("keeps malformed subagent metadata in ordinary segments and retains result output", () => {

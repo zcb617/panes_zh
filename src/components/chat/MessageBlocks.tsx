@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -1192,15 +1193,15 @@ function getSubagentCardStatus(blocks: ContentBlock[]): "running" | "error" | "d
   return "done";
 }
 
-function getSubagentCardTitle(blocks: ContentBlock[], threadId: string): string {
+export function getSubagentCardTitle(blocks: ContentBlock[], threadId: string): string {
   for (const block of blocks) {
     const details = getSubagentActivityDetails(block);
     const agentPath = details?.agentPath;
     if (typeof agentPath === "string" && agentPath.trim()) {
-      return agentPath.trim();
+      return `子代理：${agentPath.trim()}`;
     }
   }
-  return `子代理 ${threadId.slice(0, 8)}`;
+  return `子代理：${threadId.slice(0, 8)}`;
 }
 
 function SubagentCardView({
@@ -1218,11 +1219,17 @@ function SubagentCardView({
   /** 延迟加载动作完整输出的回调。 */
   onLoadActionOutput?: (actionId: string) => Promise<void>;
 }) {
+  const { t } = useTranslation("chat");
   const status = getSubagentCardStatus(blocks);
   const [expanded, setExpanded] = useState(status !== "done");
+  const [hooksExpanded, setHooksExpanded] = useState(false);
+  const hooksContentId = useId();
   const title = getSubagentCardTitle(blocks, threadId);
   const actionCount = blocks.filter((block) => block.type === "action").length;
-  const hookCount = blocks.filter((block) => block.type === "notice").length;
+  const hookEntries = blocks.flatMap((block, blockIndex) =>
+    block.type === "notice" ? [{ block, index: indices[blockIndex] }] : [],
+  );
+  const hookCount = hookEntries.length;
   const statusLabel = status === "error" ? "错误" : status === "running" ? "执行中" : "已完成";
 
   return (
@@ -1243,31 +1250,45 @@ function SubagentCardView({
       {expanded && (
         <div className="action-group-body action-group-body--expanded">
           <div className="action-group-body-inner" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            {blocks.map((block, blockIndex) => {
-              if (block.type === "notice") {
-                return (
-                  <NoticeBlockView
-                    key={`${threadId}-hook-${indices[blockIndex]}`}
-                    block={block}
-                  />
-                );
+            {blocks.map((block) => {
+              if (block.type !== "action") return null;
+              if (isSubagentActivityBlock(block)) {
+                return <SubagentActivityRow key={block.actionId} block={block} />;
               }
-              if (block.type === "action") {
-                if (isSubagentActivityBlock(block)) {
-                  return <SubagentActivityRow key={block.actionId} block={block} />;
-                }
-                return (
-                  <ActionBlockView
-                    key={block.actionId}
-                    block={block}
-                    onLoadDeferredOutput={
-                      onLoadActionOutput ? () => onLoadActionOutput(block.actionId) : undefined
-                    }
-                  />
-                );
-              }
-              return null;
+              return (
+                <ActionBlockView
+                  key={block.actionId}
+                  block={block}
+                  onLoadDeferredOutput={
+                    onLoadActionOutput ? () => onLoadActionOutput(block.actionId) : undefined
+                  }
+                />
+              );
             })}
+            {hookEntries.length > 0 && (
+              <div className="msg-hook-notices">
+                <button
+                  type="button"
+                  className="msg-hooks-toggle"
+                  aria-expanded={hooksExpanded}
+                  aria-controls={hooksContentId}
+                  onClick={() => setHooksExpanded((value) => !value)}
+                >
+                  <span>{t("messageBlocks.hooks", { count: hookEntries.length })}</span>
+                  {hooksExpanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                </button>
+                {hooksExpanded && (
+                  <div id={hooksContentId} className="msg-hooks-content">
+                    {hookEntries.map(({ block, index }) => (
+                      <NoticeBlockView
+                        key={`${threadId}-hook-${index}`}
+                        block={block}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
