@@ -112,6 +112,7 @@ import {
   shouldPromptToImplementPlan,
 } from "./planModePrompt";
 import { buildComposerRuntimeSnapshot } from "./composerRuntime";
+import { canChangeUnstartedThreadEngine } from "./threadRuntimeState";
 import { resolveReasoningEffortForModel } from "./reasoningEffort";
 import { resolveUsageStatusKey } from "./usageStatus";
 import { formatWorkingDuration } from "./workingDuration";
@@ -2643,9 +2644,14 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
   }, [customApprovalPolicyText]);
   const activeThreadHasRemoteSession =
     activeWorkspace?.locationKind === "ssh" && Boolean(activeThread?.engineThreadId);
-  const activeThreadRuntimeLocked = Boolean(
-    activeThread?.engineThreadId || (activeThread?.messageCount ?? 0) > 0,
-  );
+  /*
+   * 旧逻辑只按 CLI 会话 ID或消息数锁定运行目标；该表达式由统一的空会话判断接管。
+   * const activeThreadRuntimeLocked = Boolean(
+   *   activeThread?.engineThreadId || (activeThread?.messageCount ?? 0) > 0,
+   * );
+   */
+  const activeThreadRuntimeLocked =
+    Boolean(activeThread) && !canChangeUnstartedThreadEngine(activeThread);
   const activeThreadMatchesComposer = useMemo(() => {
     if (!activeThread || !activeWorkspaceId || !selectedModelId) {
       return false;
@@ -5441,11 +5447,16 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     const activeThreadEngineMatch = activeThread
       ? activeThread.engineId === submitEngineId
       : false;
+    /*
+     * 旧逻辑只允许 SSH 空会话更换 CLI，会使本机空会话另建“工作区对话”；
+     * const activeThreadCanChangeEngine =
+     *   activeWorkspace?.locationKind === "ssh" &&
+     *   Boolean(activeThread) &&
+     *   activeThread?.engineThreadId === null &&
+     *   activeThread?.messageCount === 0;
+     */
     const activeThreadCanChangeEngine =
-      activeWorkspace?.locationKind === "ssh" &&
-      Boolean(activeThread) &&
-      activeThread?.engineThreadId === null &&
-      activeThread?.messageCount === 0;
+      canChangeUnstartedThreadEngine(activeThread);
 
     let targetThreadId =
       threadId &&
