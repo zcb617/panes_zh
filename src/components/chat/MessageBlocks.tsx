@@ -1238,12 +1238,13 @@ function SubagentCardView({
 
   return (
     <div className="msg-action-card">
+      {/* 局部动作或 Hook 错误不将整张子代理卡标为警示色；保留原选择逻辑供追溯：tileTone={status === "error" ? "amber" : "info"}。 */}
       <MessageBlockHeader
         icon={<Layers size={11} />}
         label={title}
         expanded={expanded}
         onToggle={() => setExpanded((value) => !value)}
-        tileTone={status === "error" ? "amber" : "info"}
+        tileTone="info"
         meta={
           <>
             <span>{statusLabel}</span>
