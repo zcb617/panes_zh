@@ -498,7 +498,7 @@ describe("buildBlockSegments", () => {
       },
     ];
 
-    expect(getSubagentCardTitle(blocks, "child-thread-id")).toBe("子代理：/root/archive_logging");
+    expect(getSubagentCardTitle(blocks, "child-thread-id")).toBe("子代理：archive_logging");
     expect(getSubagentCardTitle([], "child-thread-id")).toBe("子代理：child-th");
   });
 

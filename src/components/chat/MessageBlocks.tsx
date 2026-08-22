@@ -1202,7 +1202,13 @@ export function getSubagentCardTitle(blocks: ContentBlock[], threadId: string): 
     const details = getSubagentActivityDetails(block);
     const agentPath = details?.agentPath;
     if (typeof agentPath === "string" && agentPath.trim()) {
-      return `子代理：${agentPath.trim()}`;
+      const normalizedPath = agentPath.trim();
+      // 子代理标题优先显示路径末段；协议未提供可关联任务标题时，以此作为稳定回退名称。
+      // return `子代理：${agentPath.trim()}`;
+      const agentName = normalizedPath.split("/").filter(Boolean).at(-1);
+      if (agentName) {
+        return `子代理：${agentName}`;
+      }
     }
   }
   return `子代理：${threadId.slice(0, 8)}`;
