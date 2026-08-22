@@ -156,7 +156,10 @@ const codexRemoteThreadDiscoveryInFlight = new Map<string, Promise<void>>();
 //   )?.id ?? null;
 // }
 
-async function discoverCodexRemoteThreads(workspaceId: string): Promise<void> {
+async function discoverCodexRemoteThreads(
+  workspaceId: string,
+  localThreads: Thread[],
+): Promise<void> {
   const pending = codexRemoteThreadDiscoveryInFlight.get(workspaceId);
   if (pending) {
     return pending;
@@ -167,6 +170,7 @@ async function discoverCodexRemoteThreads(workspaceId: string): Promise<void> {
   //   return;
   // }
 
+  const localThreadsById = new Map(localThreads.map((thread) => [thread.id, thread]));
   const discovery = (async () => {
     // 旧实现每条 attach 失败只写一句无上下文的 console.warn，发布版无从排查；
     // 现在逐条记录工作区与完整错误文本，并在结束时输出导入汇总。
@@ -184,7 +188,14 @@ async function discoverCodexRemoteThreads(workspaceId: string): Promise<void> {
         });
 
         for (const remoteThread of page.threads) {
-          if (remoteThread.localThreadId != null) {
+          // 旧逻辑：if (remoteThread.localThreadId != null) continue; // 忽略远端更新时间，禁止执行
+          const localThread = remoteThread.localThreadId
+            ? localThreadsById.get(remoteThread.localThreadId)
+            : undefined;
+          const isSameActivityTime =
+            localThread !== undefined &&
+            Date.parse(localThread.lastActivityAt) === Date.parse(remoteThread.updatedAt);
+          if (remoteThread.localThreadId !== null && isSameActivityTime) {
             continue;
           }
 
@@ -404,7 +415,10 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
   refreshThreads: async (workspaceId) => {
     set({ loading: true, error: undefined });
     try {
-      await discoverCodexRemoteThreads(workspaceId);
+      const localThreads = await ipc.listThreads(workspaceId);
+      // 旧逻辑先发现、后读取本地会话，无法按刷新前快照判断远端更新时间；顺序错误，禁止执行。
+      // await discoverCodexRemoteThreads(workspaceId);
+      await discoverCodexRemoteThreads(workspaceId, localThreads);
       const workspaceThreads = await ipc.listThreads(workspaceId);
       const threadsByWorkspace = mergeWorkspaceThreads(get().threadsByWorkspace, workspaceId, workspaceThreads);
       const threads = flattenThreadsByWorkspace(threadsByWorkspace);
@@ -474,7 +488,10 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
     try {
       const results = await Promise.all(
         workspaceIds.map(async (workspaceId) => {
-          await discoverCodexRemoteThreads(workspaceId);
+          const localThreads = await ipc.listThreads(workspaceId);
+          // 旧逻辑先发现、后读取本地会话，无法按刷新前快照判断远端更新时间；顺序错误，禁止执行。
+          // await discoverCodexRemoteThreads(workspaceId);
+          await discoverCodexRemoteThreads(workspaceId, localThreads);
           return {
             workspaceId,
             threads: await ipc.listThreads(workspaceId),

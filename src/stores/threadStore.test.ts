@@ -25,7 +25,7 @@ vi.mock("./engineStore", () => ({
 
 import { useThreadStore } from "./threadStore";
 
-function makeThread(id: string): Thread {
+function makeThread(id: string, lastActivityAt = new Date(0).toISOString()): Thread {
   return {
     id,
     workspaceId: "workspace-1",
@@ -38,7 +38,7 @@ function makeThread(id: string): Thread {
     messageCount: 0,
     totalTokens: 0,
     createdAt: new Date(0).toISOString(),
-    lastActivityAt: new Date(0).toISOString(),
+    lastActivityAt,
   };
 }
 
@@ -125,7 +125,7 @@ describe("threadStore remote Codex discovery", () => {
             statusType: "idle",
             activeFlags: [],
             archived: false,
-            localThreadId: "local-existing",
+            localThreadId: "local",
           },
         ],
         nextCursor: "page-2",
@@ -167,6 +167,38 @@ describe("threadStore remote Codex discovery", () => {
     expect(mockIpc.attachCodexRemoteThread).toHaveBeenCalledTimes(2);
     expect(mockIpc.listThreads).toHaveBeenCalledWith("workspace-1");
     expect(useThreadStore.getState().threads).toEqual([makeThread("local")]);
+  });
+
+  it("attaches an existing local Codex thread when the remote activity time changes", async () => {
+    mockIpc.listCodexRemoteThreads.mockResolvedValueOnce({
+      threads: [
+        {
+          engineThreadId: "remote-updated",
+          title: "Remote updated",
+          preview: "",
+          cwd: "/workspace",
+          createdAt: new Date(0).toISOString(),
+          updatedAt: new Date(1000).toISOString(),
+          modelId: "gpt-5.6-terra",
+          reasoningEffort: "high",
+          modelProvider: "openai",
+          sourceKind: "appServer",
+          statusType: "idle",
+          activeFlags: [],
+          archived: false,
+          localThreadId: "local",
+        },
+      ],
+      nextCursor: null,
+    });
+
+    await useThreadStore.getState().refreshThreads("workspace-1");
+
+    expect(mockIpc.attachCodexRemoteThread).toHaveBeenCalledTimes(1);
+    expect(mockIpc.attachCodexRemoteThread).toHaveBeenCalledWith(
+      "workspace-1",
+      "remote-updated",
+    );
   });
 
   it("keeps the explicit new-conversation selection during a workspace refresh", async () => {
