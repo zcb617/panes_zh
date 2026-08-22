@@ -59,6 +59,7 @@ import {
   useChatComposerStore,
 } from "../../stores/chatComposerStore";
 import type { PendingFlexibleMessage } from "../../stores/chatComposerStore";
+import { isMessageSendMode } from "../../lib/chatInputSettings";
 import { useEngineStore } from "../../stores/engineStore";
 import { useFileStore } from "../../stores/fileStore";
 import { useOnboardingStore } from "../../stores/onboardingStore";
@@ -968,6 +969,31 @@ function readThreadExecutionPolicyState(thread: Thread | null): {
   sandboxMode: ThreadSandboxModeValue;
   networkPolicy: ThreadNetworkPolicyValue;
 } {
+  // 权限优先读独立字段 permissionMode 的整包 JSON；解析失败回退到 engineMetadata 逐键读取。
+  if (typeof thread?.permissionMode === "string" && thread.permissionMode) {
+    try {
+      const parsed = JSON.parse(thread.permissionMode) as {
+        approvalPolicy?: ThreadApprovalPolicyStateValue;
+        sandboxMode?: ThreadSandboxModeValue;
+        networkPolicy?: ThreadNetworkPolicyValue;
+      };
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        parsed.approvalPolicy !== undefined &&
+        parsed.sandboxMode !== undefined &&
+        parsed.networkPolicy !== undefined
+      ) {
+        return {
+          approvalPolicy: parsed.approvalPolicy,
+          sandboxMode: parsed.sandboxMode,
+          networkPolicy: parsed.networkPolicy,
+        };
+      }
+    } catch {
+      // 落入下面的回退读取。
+    }
+  }
   const rawApprovalPolicy = thread?.engineMetadata?.sandboxApprovalPolicy;
   return {
     approvalPolicy:
@@ -2900,10 +2926,13 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     () => selectedModel?.supportedReasoningEfforts ?? [],
     [selectedModel],
   );
+  // 思考强度优先读独立字段，历史数据回退到 engineMetadata。
   const activeThreadReasoningEffort =
-    typeof activeThread?.engineMetadata?.reasoningEffort === "string"
-      ? activeThread.engineMetadata.reasoningEffort
-      : undefined;
+    typeof activeThread?.reasoningEffort === "string"
+      ? activeThread.reasoningEffort
+      : typeof activeThread?.engineMetadata?.reasoningEffort === "string"
+        ? activeThread.engineMetadata.reasoningEffort
+        : undefined;
   const activeThreadInCurrentWorkspace =
     activeThread?.workspaceId === activeWorkspaceId;
   const modelPickerLabel = useMemo(() => {
@@ -3908,6 +3937,27 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
     selectedEffort,
     supportedEfforts,
   ]);
+
+  // 切换会话时，从 threads 表独立字段恢复计划与发送方法。
+  // 计划默认 false，发送方法默认沿用全局；字段为 NULL（历史数据）时不动本地状态。
+  const lastSelectionSyncThreadIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const threadId = activeThread?.id ?? null;
+    if (lastSelectionSyncThreadIdRef.current === threadId) {
+      return;
+    }
+    lastSelectionSyncThreadIdRef.current = threadId;
+    if (!activeThread) {
+      return;
+    }
+    if (typeof activeThread.planMode === "boolean") {
+      setPlanMode(activeThread.engineId === "opencode" ? false : activeThread.planMode);
+    }
+    if (typeof activeThread.sendMethod === "string" && isMessageSendMode(activeThread.sendMethod)) {
+      setThreadMessageSendMode(activeThread.id, activeThread.sendMethod);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeThread?.id]);
 
   const composerRuntimeSnapshot = useMemo(
     () =>
@@ -5487,6 +5537,10 @@ export function ChatPanel({ embedded = false }: ChatPanelProps = {}) {
       attachments: transportAttachments.length > 0 ? transportAttachments : undefined,
       inputItems,
       planMode: submitPlanMode,
+      sendMethod: sessionMessageSendMode,
+      permissionModeJson: JSON.stringify(
+        readThreadExecutionPolicyState(currentThread ?? activeThread ?? null),
+      ),
       remoteAttachmentUpload:
         activeWorkspace?.locationKind === "ssh" && currentAttachments.length > 0,
     });

@@ -376,6 +376,10 @@ mod tests {
                 "reasoningEffort": "high",
                 "serviceTier": "fast"
             })),
+            plan_mode: None,
+            send_method: None,
+            reasoning_effort: None,
+            permission_mode: None,
             title: "Existing".to_string(),
             status: ThreadStatusDto::Idle,
             message_count: 0,

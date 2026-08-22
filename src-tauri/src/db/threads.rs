@@ -39,7 +39,8 @@ pub fn get_thread(db: &Database, thread_id: &str) -> anyhow::Result<Option<Threa
     let conn = db.connect()?;
     conn.query_row(
     "SELECT id, workspace_id, repo_id, engine_id, model_id, engine_thread_id, engine_metadata_json,
-            COALESCE(title, ''), status, message_count, total_tokens, created_at, last_activity_at
+            COALESCE(title, ''), status, message_count, total_tokens, created_at, last_activity_at,
+            plan_mode, send_method, reasoning_effort, permission_mode
      FROM threads WHERE id = ?1",
     params![thread_id],
     map_thread_row,
@@ -56,7 +57,8 @@ pub fn find_thread_by_engine_thread_id(
     let conn = db.connect()?;
     conn.query_row(
         "SELECT id, workspace_id, repo_id, engine_id, model_id, engine_thread_id, engine_metadata_json,
-                COALESCE(title, ''), status, message_count, total_tokens, created_at, last_activity_at
+                COALESCE(title, ''), status, message_count, total_tokens, created_at, last_activity_at,
+                plan_mode, send_method, reasoning_effort, permission_mode
          FROM threads
          WHERE engine_id = ?1
            AND engine_thread_id = ?2
@@ -82,7 +84,8 @@ pub fn find_thread_by_workspace_engine_thread_id(
     conn.query_row(
         "SELECT id, workspace_id, repo_id, engine_id, model_id, engine_thread_id,
                 engine_metadata_json, COALESCE(title, ''), status, message_count,
-                total_tokens, created_at, last_activity_at
+                total_tokens, created_at, last_activity_at,
+                plan_mode, send_method, reasoning_effort, permission_mode
          FROM threads
          WHERE workspace_id = ?1 AND engine_id = ?2 AND engine_thread_id = ?3
          LIMIT 1",
@@ -173,14 +176,30 @@ pub fn upsert_ssh_remote_thread_snapshot(
             ],
         )
         .context("failed update SSH remote thread snapshot")?;
+        // CLI 服务端真实返回的模型与思考强度写入独立字段，其余底部项服务端不提供。
+        let remote_reasoning_effort = metadata
+            .get("reasoningEffort")
+            .and_then(serde_json::Value::as_str);
+        tx.execute(
+            "UPDATE threads
+             SET reasoning_effort = ?1
+             WHERE id = ?2",
+            params![remote_reasoning_effort, thread_id],
+        )
+        .context("failed update SSH remote thread runtime selection")?;
     } else {
         let thread_id = Uuid::new_v4().to_string();
+        // CLI 服务端真实返回的模型与思考强度写入独立字段，其余底部项服务端不提供。
+        let remote_reasoning_effort = metadata
+            .get("reasoningEffort")
+            .and_then(serde_json::Value::as_str);
         tx.execute(
             "INSERT INTO threads (
                 id, workspace_id, repo_id, engine_id, model_id, engine_thread_id,
-                engine_metadata_json, title, status, last_activity_at, created_at
+                engine_metadata_json, title, status, last_activity_at, created_at,
+                reasoning_effort
              ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8,
-                       CASE WHEN ?9 <> '' THEN ?9 ELSE ?10 END, ?10)",
+                       CASE WHEN ?9 <> '' THEN ?9 ELSE ?10 END, ?10, ?11)",
             params![
                 thread_id,
                 workspace_id,
@@ -192,6 +211,7 @@ pub fn upsert_ssh_remote_thread_snapshot(
                 status.as_str(),
                 last_activity,
                 runtime_env::system_time_rfc3339(),
+                remote_reasoning_effort,
             ],
         )
         .context("failed insert SSH remote thread snapshot")?;
@@ -209,7 +229,8 @@ pub fn list_threads_for_workspace(
     let conn = db.connect()?;
     let mut stmt = conn.prepare(
     "SELECT id, workspace_id, repo_id, engine_id, model_id, engine_thread_id, engine_metadata_json,
-            COALESCE(title, ''), status, message_count, total_tokens, created_at, last_activity_at
+            COALESCE(title, ''), status, message_count, total_tokens, created_at, last_activity_at,
+            plan_mode, send_method, reasoning_effort, permission_mode
      FROM threads
      WHERE workspace_id = ?1
        AND archived_at IS NULL
@@ -238,7 +259,8 @@ pub fn list_archived_threads_for_workspace(
     let conn = db.connect()?;
     let mut stmt = conn.prepare(
     "SELECT id, workspace_id, repo_id, engine_id, model_id, engine_thread_id, engine_metadata_json,
-            COALESCE(title, ''), status, message_count, total_tokens, created_at, last_activity_at
+            COALESCE(title, ''), status, message_count, total_tokens, created_at, last_activity_at,
+            plan_mode, send_method, reasoning_effort, permission_mode
      FROM threads
      WHERE workspace_id = ?1
        AND archived_at IS NOT NULL
@@ -369,7 +391,8 @@ pub fn reconfigure_unstarted_thread_runtime(
         .query_row(
             "SELECT id, workspace_id, repo_id, engine_id, model_id, engine_thread_id,
                     engine_metadata_json, COALESCE(title, ''), status, message_count,
-                    total_tokens, created_at, last_activity_at
+                    total_tokens, created_at, last_activity_at,
+                    plan_mode, send_method, reasoning_effort, permission_mode
              FROM threads
              WHERE id = ?1",
             params![thread_id],
@@ -447,6 +470,52 @@ pub fn update_engine_metadata(
     )
     .context("failed to update engine metadata")?;
     Ok(())
+}
+
+/// 持久化会话底部 6 项运行时选择。
+///
+/// 调用方传入什么就写入什么，不做回退、不与 engine_metadata_json 合并，
+/// 保证底部状态以独立字段为唯一数据源。
+#[allow(clippy::too_many_arguments)]
+pub fn update_thread_runtime_selection(
+    db: &Database,
+    thread_id: &str,
+    engine_id: &str,
+    model_id: &str,
+    plan_mode: Option<bool>,
+    send_method: Option<&str>,
+    reasoning_effort: Option<&str>,
+    permission_mode: Option<&str>,
+) -> anyhow::Result<ThreadDto> {
+    let conn = db.connect()?;
+    let affected = conn
+        .execute(
+            "UPDATE threads
+             SET engine_id = ?1,
+                 model_id = ?2,
+                 plan_mode = ?3,
+                 send_method = ?4,
+                 reasoning_effort = ?5,
+                 permission_mode = ?6
+             WHERE id = ?7",
+            params![
+                engine_id,
+                model_id,
+                plan_mode,
+                send_method,
+                reasoning_effort,
+                permission_mode,
+                thread_id
+            ],
+        )
+        .context("failed to update thread runtime selection")?;
+
+    if affected == 0 {
+        anyhow::bail!("thread not found: {thread_id}");
+    }
+
+    get_thread(db, thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("thread not found after runtime selection update: {thread_id}"))
 }
 
 pub fn bump_message_counters(
@@ -660,6 +729,10 @@ fn map_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadDto> {
         model_id: row.get(4)?,
         engine_thread_id: row.get(5)?,
         engine_metadata: metadata,
+        plan_mode: row.get(13)?,
+        send_method: row.get(14)?,
+        reasoning_effort: row.get(15)?,
+        permission_mode: row.get(16)?,
         title: row.get(7)?,
         status: ThreadStatusDto::from_str(&row.get::<_, String>(8)?),
         message_count: row.get(9)?,

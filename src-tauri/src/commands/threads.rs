@@ -72,6 +72,36 @@ pub async fn list_archived_threads(
     .await
 }
 
+/// 持久化会话底部 6 项运行时选择。
+///
+/// 前端传什么就写什么，不做回退、不与 engine_metadata_json 合并，
+/// 让底部状态以独立字段为唯一数据源。
+#[tauri::command]
+pub async fn update_thread_runtime_selection(
+    state: State<'_, AppState>,
+    thread_id: String,
+    engine_id: String,
+    model_id: String,
+    plan_mode: Option<bool>,
+    send_method: Option<String>,
+    reasoning_effort: Option<String>,
+    permission_mode: Option<String>,
+) -> Result<ThreadDto, String> {
+    run_db(state.db.clone(), move |db| {
+        db::threads::update_thread_runtime_selection(
+            db,
+            &thread_id,
+            &engine_id,
+            &model_id,
+            plan_mode,
+            send_method.as_deref(),
+            reasoning_effort.as_deref(),
+            permission_mode.as_deref(),
+        )
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn list_codex_remote_threads(
     state: State<'_, AppState>,
@@ -316,6 +346,10 @@ pub async fn attach_codex_remote_thread(
             model_id: normalized_model_id.clone(),
             engine_thread_id: Some(engine_thread_id.clone()),
             engine_metadata: None,
+            plan_mode: None,
+            send_method: None,
+            reasoning_effort: None,
+            permission_mode: None,
             title: remote_thread
                 .title
                 .clone()
@@ -360,6 +394,17 @@ pub async fn attach_codex_remote_thread(
                 ),
                 Some(&metadata),
             )?;
+            // CLI 服务端不返回计划/发送方法/权限，仅按其真实返回的模型与思考强度落库。
+            db::threads::update_thread_runtime_selection(
+                db,
+                &updated.id,
+                "codex",
+                &normalized_model_id,
+                None,
+                None,
+                validated_reasoning_effort.as_deref(),
+                None,
+            )?;
             match existing_last_activity_at.as_deref() {
                 Some(last_activity_at) => {
                     db::threads::update_thread_last_activity(db, &updated.id, last_activity_at)
@@ -390,6 +435,17 @@ pub async fn attach_codex_remote_thread(
                 false,
             ),
             Some(&metadata),
+        )?;
+        // CLI 服务端不返回计划/发送方法/权限，仅按其真实返回的模型与思考强度落库。
+        db::threads::update_thread_runtime_selection(
+            db,
+            &updated.id,
+            "codex",
+            &normalized_model_id,
+            None,
+            None,
+            validated_reasoning_effort.as_deref(),
+            None,
         )?;
         match remote_last_activity_at.as_deref() {
             Some(last_activity_at) => {
@@ -560,6 +616,10 @@ pub async fn attach_opencode_remote_session(
             model_id: normalized_model_id.clone(),
             engine_thread_id: Some(engine_thread_id.clone()),
             engine_metadata: Some(json!({ "opencodeRemoteCwd": cwd })),
+            plan_mode: None,
+            send_method: None,
+            reasoning_effort: None,
+            permission_mode: None,
             title: remote_session
                 .title
                 .clone()
@@ -601,6 +661,17 @@ pub async fn attach_opencode_remote_session(
                 Some(ThreadStatusDto::Idle),
                 Some(&metadata),
             )?;
+            // OpenCode 远端会话只返回模型，其余底部项服务端不提供，按真实返回值落库。
+            db::threads::update_thread_runtime_selection(
+                db,
+                &updated.id,
+                "opencode",
+                &normalized_model_id,
+                None,
+                None,
+                None,
+                None,
+            )?;
             match existing_last_activity_at.as_deref() {
                 Some(last_activity_at) => {
                     db::threads::update_thread_last_activity(db, &updated.id, last_activity_at)
@@ -629,6 +700,17 @@ pub async fn attach_opencode_remote_session(
             Some(&title),
             Some(ThreadStatusDto::Idle),
             Some(&metadata),
+        )?;
+        // OpenCode 远端会话只返回模型，其余底部项服务端不提供，按真实返回值落库。
+        db::threads::update_thread_runtime_selection(
+            db,
+            &updated.id,
+            "opencode",
+            &normalized_model_id,
+            None,
+            None,
+            None,
+            None,
         )?;
         match remote_last_activity_at.as_deref() {
             Some(last_activity_at) => {
@@ -4760,6 +4842,10 @@ mod tests {
             engine_metadata: Some(json!({
                 "codexSyncRequired": false,
             })),
+            plan_mode: None,
+            send_method: None,
+            reasoning_effort: None,
+            permission_mode: None,
             title: "Thread".to_string(),
             status: ThreadStatusDto::Idle,
             message_count: 2,

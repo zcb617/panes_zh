@@ -52,6 +52,10 @@ interface ChatState {
       inputItems?: ChatInputItem[];
       planMode?: boolean;
       remoteAttachmentUpload?: boolean;
+      /** 发送方法（messageSendMode），发送时持久化到会话。 */
+      sendMethod?: string | null;
+      /** 权限状态的整包 JSON，前端给什么写什么、读时整个取回。 */
+      permissionModeJson?: string | null;
     },
   ) => Promise<boolean>;
   steer: (
@@ -2372,6 +2376,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
         clientTurnId,
       );
       set({ preparingEngineId: null, preparingAttachments: false });
+
+      // 发送成功后，把本轮选择的底部 6 项原样写入会话独立字段。
+      // 拿到什么写什么，不做回退合并。只有用户主发送流程（明确带了发送方法与权限整包、
+      // 且引擎与模型齐全）才写入；程序自动续跑（计划提示/计划实现）不传这两项，自然跳过，
+      // 避免用 null 覆盖用户已选的值。
+      if (
+        options?.engineId &&
+        options?.modelId &&
+        options?.sendMethod !== undefined &&
+        options?.permissionModeJson !== undefined
+      ) {
+        try {
+          await ipc.updateThreadRuntimeSelection(threadId, {
+            engineId: options.engineId,
+            modelId: options.modelId,
+            planMode,
+            sendMethod: options.sendMethod ?? null,
+            reasoningEffort: options.reasoningEffort ?? null,
+            permissionMode: options.permissionModeJson ?? null,
+          });
+        } catch (selectionError) {
+          console.warn(
+            `Failed to persist runtime selection for thread ${threadId}:`,
+            selectionError,
+          );
+        }
+      }
       return true;
     } catch (error) {
       pendingTurnMetaByThread.delete(threadId);

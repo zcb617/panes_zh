@@ -260,6 +260,12 @@ export interface Thread {
   modelId: string;
   engineThreadId: string | null;
   engineMetadata?: Record<string, unknown>;
+  /** 底部 6 项运行时选择的独立字段，唯一数据源。 */
+  planMode?: boolean | null;
+  sendMethod?: string | null;
+  reasoningEffort?: string | null;
+  /** 权限状态的整包 JSON 字符串，前端写入什么就取回什么。 */
+  permissionMode?: string | null;
   title: string;
   status: ThreadStatus;
   messageCount: number;

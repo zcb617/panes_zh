@@ -415,7 +415,8 @@ pub fn active_thread_for_task(
     conn.query_row(
         "SELECT id, workspace_id, repo_id, engine_id, model_id, engine_thread_id,
                 engine_metadata_json, title, status, message_count, total_tokens,
-                created_at, last_activity_at
+                created_at, last_activity_at,
+                plan_mode, send_method, reasoning_effort, permission_mode
          FROM threads
          WHERE id = ?1 AND workspace_id = ?2 AND archived_at IS NULL",
         params![thread_id, task.workspace_id],
@@ -429,6 +430,10 @@ pub fn active_thread_for_task(
                 model_id: row.get(4)?,
                 engine_thread_id: row.get(5)?,
                 engine_metadata: metadata.and_then(|value| serde_json::from_str(&value).ok()),
+                plan_mode: row.get(13)?,
+                send_method: row.get(14)?,
+                reasoning_effort: row.get(15)?,
+                permission_mode: row.get(16)?,
                 title: row.get::<_, Option<String>>(7)?.unwrap_or_default(),
                 status: ThreadStatusDto::from_str(&row.get::<_, String>(8)?),
                 message_count: row.get(9)?,

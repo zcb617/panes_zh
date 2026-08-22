@@ -538,6 +538,7 @@ pub fn run() {
             commands::extensions::perform_extension_action,
             commands::threads::list_threads,
             commands::threads::list_archived_threads,
+            commands::threads::update_thread_runtime_selection,
             commands::threads::list_codex_remote_threads,
             commands::threads::attach_codex_remote_thread,
             commands::threads::list_opencode_remote_sessions,

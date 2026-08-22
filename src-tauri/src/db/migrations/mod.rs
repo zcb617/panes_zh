@@ -11,7 +11,7 @@ pub struct Migration {
 pub const BASELINE_VERSION: u64 = 100;
 
 // 当前程序版本明确支持的数据库版本，不通过迁移清单最后一项推断。
-pub const SUPPORTED_DATABASE_VERSION: u64 = 105;
+pub const SUPPORTED_DATABASE_VERSION: u64 = 106;
 
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -48,6 +48,13 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("105.sql"),
         reason: "ssh-remote-project",
         requires_foreign_keys_off: true,
+    },
+    Migration {
+        version: 106,
+        file: "106.sql",
+        sql: include_str!("106.sql"),
+        reason: "thread-runtime-selection-columns",
+        requires_foreign_keys_off: false,
     },
 ];
 

@@ -297,6 +297,26 @@ export const ipc = {
   listThreads: (workspaceId: string) => invoke<Thread[]>("list_threads", { workspaceId }),
   listArchivedThreads: (workspaceId: string) =>
     invoke<Thread[]>("list_archived_threads", { workspaceId }),
+  updateThreadRuntimeSelection: (
+    threadId: string,
+    selection: {
+      engineId: string;
+      modelId: string;
+      planMode?: boolean | null;
+      sendMethod?: string | null;
+      reasoningEffort?: string | null;
+      permissionMode?: string | null;
+    },
+  ) =>
+    invoke<Thread>("update_thread_runtime_selection", {
+      threadId,
+      engineId: selection.engineId,
+      modelId: selection.modelId,
+      planMode: selection.planMode ?? null,
+      sendMethod: selection.sendMethod ?? null,
+      reasoningEffort: selection.reasoningEffort ?? null,
+      permissionMode: selection.permissionMode ?? null,
+    }),
   listCodexRemoteThreads: (
     workspaceId: string,
     options?: {
