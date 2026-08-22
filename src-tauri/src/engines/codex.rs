@@ -146,6 +146,20 @@ impl CodexThreadSubscription {
         if agent_thread_id == self.primary_thread_id {
             return false;
         }
+
+        let Some(source_thread_id) = extract_thread_id_from_params(params)
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return false;
+        };
+        if source_thread_id != self.primary_thread_id
+            && !self.subagent_thread_ids.contains(&source_thread_id)
+        {
+            return false;
+        }
+
+        // 旧逻辑会直接登记共享广播中的任意子代理，导致不同会话相互接收消息；该逻辑保留但不执行。
+        // self.subagent_thread_ids.insert(agent_thread_id)
         self.subagent_thread_ids.insert(agent_thread_id)
     }
 }
@@ -7957,6 +7971,7 @@ mod tests {
         assert!(!subscription.allows(&json!({ "threadId": "unrelated" })));
 
         assert!(subscription.register_subagent_activity(&json!({
+            "threadId": "parent",
             "item": {
                 "type": "subAgentActivity",
                 "agentThreadId": "child"
@@ -7964,6 +7979,55 @@ mod tests {
         })));
         assert!(subscription.allows(&json!({ "threadId": "child" })));
         assert!(!subscription.allows(&json!({ "threadId": "unrelated" })));
+    }
+
+    #[test]
+    fn codex_thread_subscription_accepts_only_same_session_subagent_activity() {
+        let mut subscription_a = CodexThreadSubscription::new("primary-a".to_string());
+        let mut subscription_b = CodexThreadSubscription::new("primary-b".to_string());
+
+        let child_b_activity = json!({
+            "threadId": "primary-b",
+            "item": {
+                "type": "subAgentActivity",
+                "agentThreadId": "child-b"
+            }
+        });
+        assert!(!subscription_a.register_subagent_activity(&child_b_activity));
+        assert!(!subscription_a.allows(&json!({ "threadId": "child-b" })));
+        assert!(subscription_b.register_subagent_activity(&child_b_activity));
+        assert!(subscription_b.allows(&json!({ "threadId": "child-b" })));
+
+        let missing_source_activity = json!({
+            "item": {
+                "type": "subAgentActivity",
+                "agentThreadId": "child-without-source"
+            }
+        });
+        assert!(!subscription_a.register_subagent_activity(&missing_source_activity));
+        assert!(!subscription_a.allows(&json!({
+            "threadId": "child-without-source"
+        })));
+
+        let child_a_activity = json!({
+            "threadId": "primary-a",
+            "item": {
+                "type": "subAgentActivity",
+                "agentThreadId": "child-a"
+            }
+        });
+        assert!(subscription_a.register_subagent_activity(&child_a_activity));
+        assert!(subscription_a.allows(&json!({ "threadId": "child-a" })));
+
+        let grandchild_a_activity = json!({
+            "threadId": "child-a",
+            "item": {
+                "type": "subAgentActivity",
+                "agentThreadId": "grandchild-a"
+            }
+        });
+        assert!(subscription_a.register_subagent_activity(&grandchild_a_activity));
+        assert!(subscription_a.allows(&json!({ "threadId": "grandchild-a" })));
     }
 
     #[tokio::test]
