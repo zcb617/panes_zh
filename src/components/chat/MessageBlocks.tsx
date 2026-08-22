@@ -292,7 +292,47 @@ type InnerSegment =
 type BlockSegment =
   | InnerSegment
   | { kind: "hook-group"; blocks: NoticeBlock[]; indices: number[] }
-  | { kind: "action-card"; segments: InnerSegment[] };
+  // 旧逻辑保留，不执行，已由子代理来源分支替代：
+  // | { kind: "action-card"; segments: InnerSegment[] };
+  | { kind: "action-card"; segments: InnerSegment[] }
+  | {
+      kind: "subagent-card";
+      /** 子代理线程标识。 */
+      threadId: string;
+      /** 子代理动作与 Hook 内容块。 */
+      blocks: ContentBlock[];
+      /** 内容块在原始消息中的索引。 */
+      indices: number[];
+    };
+
+function getSubagentThreadId(block: ContentBlock): string | null {
+  if (block.type === "action") {
+    const value = block.details?.subagentThreadId;
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  }
+  if (block.type !== "notice") {
+    return null;
+  }
+  const marker = "::subagent::";
+  const markerIndex = block.kind.lastIndexOf(marker);
+  if (markerIndex < 0) {
+    return null;
+  }
+  const threadId = block.kind.slice(markerIndex + marker.length).trim();
+  return threadId || null;
+}
+
+function getSubagentActivityDetails(block: ContentBlock): Record<string, unknown> | null {
+  if (block.type !== "action") {
+    return null;
+  }
+  const activity = block.details?.subagentActivity;
+  return typeof activity === "string" && activity.trim() ? block.details : null;
+}
+
+function isSubagentActivityBlock(block: ContentBlock): boolean {
+  return getSubagentActivityDetails(block) != null;
+}
 
 function isCardSegment(seg: BlockSegment): seg is InnerSegment {
   if (seg.kind === "action-group") return true;
@@ -422,10 +462,57 @@ export function buildBlockSegments(
     }
   }
 
+  // 子代理动作与带来源 Hook 在分段阶段先集中，保证后续普通 action/Hooks 逻辑不会拆散活动卡。
+  const subagentGroups = new Map<
+    string,
+    { blocks: ContentBlock[]; indices: number[]; firstPosition: number }
+  >();
+  const subagentDisplayPositions = new Set<number>();
+  displayBlocks.forEach((entry, position) => {
+    const threadId = getSubagentThreadId(entry.block);
+    if (!threadId) {
+      return;
+    }
+    const group = subagentGroups.get(threadId);
+    if (group) {
+      group.blocks.push(entry.block);
+      group.indices.push(entry.index);
+      subagentDisplayPositions.add(position);
+      return;
+    }
+    subagentGroups.set(threadId, {
+      blocks: [entry.block],
+      indices: [entry.index],
+      firstPosition: position,
+    });
+  });
+
   // Phase 1: build flat inner segments
   const flat: BlockSegment[] = [];
   let i = 0;
   while (i < displayBlocks.length) {
+    const firstSubagentGroup = [...subagentGroups.values()].find(
+      (group) => group.firstPosition === i,
+    );
+    if (firstSubagentGroup) {
+      const threadId = [...subagentGroups.entries()].find(
+        ([, group]) => group === firstSubagentGroup,
+      )?.[0];
+      if (threadId) {
+        flat.push({
+          kind: "subagent-card",
+          threadId,
+          blocks: firstSubagentGroup.blocks,
+          indices: firstSubagentGroup.indices,
+        });
+      }
+      i++;
+      continue;
+    }
+    if (subagentDisplayPositions.has(i)) {
+      i++;
+      continue;
+    }
     const displayBlock = displayBlocks[i];
     const block = displayBlock.block;
     if (
@@ -795,13 +882,22 @@ function ActionBlockView({
   const { t } = useTranslation("chat");
   const outputChunks = Array.isArray(block.outputChunks) ? block.outputChunks : [];
   const outputDeferred = block.outputDeferred === true;
+  const resultOutput = typeof block.result?.output === "string" ? block.result.output : "";
+  const hasResultOutput = resultOutput.trim().length > 0;
   const outputText = useMemo(
     () => {
       let raw: string;
       if (outputChunks.length === 0) {
-        return "";
-      }
-      if (outputChunks.length === 1) {
+        // 旧逻辑保留，不执行，已由子代理来源分支替代：return "";
+        raw = resultOutput;
+      } else if (outputChunks.length === 1) {
+        // 旧逻辑保留，不执行，已由子代理来源分支替代：
+        // if (outputChunks.length === 1) {
+        //   const firstContent = outputChunks[0].content;
+        //   raw = typeof firstContent === "string" ? firstContent : String(firstContent ?? "");
+        // } else {
+        //   raw = outputChunks.map((chunk) => String(chunk.content ?? "")).join("");
+        // }
         const firstContent = outputChunks[0].content;
         raw = typeof firstContent === "string" ? firstContent : String(firstContent ?? "");
       } else {
@@ -813,12 +909,15 @@ function ActionBlockView({
       }
       return raw;
     },
-    [outputChunks],
+    // 旧逻辑保留，不执行，已由子代理来源分支替代：[outputChunks],
+    [outputChunks, resultOutput],
   );
   const Icon = actionIcons[block.actionType] ?? Terminal;
   const isRunning = block.status === "running";
   const isPending = block.status === "pending";
-  const hasBody = outputChunks.length > 0 || Boolean(block.result?.error) || outputDeferred;
+  // 旧逻辑保留，不执行，已由子代理来源分支替代：
+  // const hasBody = outputChunks.length > 0 || Boolean(block.result?.error) || outputDeferred;
+  const hasBody = outputChunks.length > 0 || hasResultOutput || Boolean(block.result?.error) || outputDeferred;
   const actionDetails = (block.details ?? {}) as Record<string, unknown>;
   const outputTruncated =
     "outputTruncated" in actionDetails && actionDetails.outputTruncated === true;
@@ -909,7 +1008,10 @@ function ActionBlockView({
         </div>
       )}
 
-      {expanded && (outputChunks.length > 0 || block.result?.error || outputDeferred) && (
+      {/* 旧逻辑保留，不执行，已由子代理来源分支替代：
+          expanded && (outputChunks.length > 0 || block.result?.error || outputDeferred)
+      */}
+      {expanded && (outputChunks.length > 0 || hasResultOutput || block.result?.error || outputDeferred) && (
         <div style={{
           margin: "2px 12px 4px",
           borderRadius: "var(--radius-sm)",
@@ -965,7 +1067,8 @@ function ActionBlockView({
             </div>
           )}
 
-          {outputChunks.length > 0 && (
+          {/* 旧逻辑保留，不执行，已由子代理来源分支替代：outputChunks.length > 0 */}
+          {(outputChunks.length > 0 || hasResultOutput) && (
             <>
               <div className="action-output-well-header">
                 <span>{t("messageBlocks.output")}</span>
@@ -1015,7 +1118,9 @@ function ActionBlockView({
           {outputTruncated && (
             <div style={{
               margin: 0, padding: "5px 12px",
-              borderTop: outputChunks.length > 0 ? "1px solid var(--border)" : undefined,
+              // 旧逻辑保留，不执行，已由子代理来源分支替代：
+              // borderTop: outputChunks.length > 0 ? "1px solid var(--border)" : undefined,
+              borderTop: outputChunks.length > 0 || hasResultOutput ? "1px solid var(--border)" : undefined,
               background: "var(--neutral-surface)",
               fontSize: 10.5, color: "var(--text-3)",
             }}>
@@ -1027,13 +1132,134 @@ function ActionBlockView({
             <pre
               className="action-output-error"
               style={{
-                borderTop: outputChunks.length > 0 || outputTruncated
+                // 旧逻辑保留，不执行，已由子代理来源分支替代：
+                // borderTop: outputChunks.length > 0 || outputTruncated ? "1px solid var(--danger-border)" : undefined,
+                borderTop: outputChunks.length > 0 || hasResultOutput || outputTruncated
                   ? "1px solid var(--danger-border)" : undefined,
               }}
             >
               <LinkifiedPlainText text={String(block.result.error)} />
             </pre>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SubagentActivityRow({ block }: { block: ActionBlock }) {
+  return (
+    <div className="msg-notice">
+      <span className="msg-block-tile msg-block-tile--info">
+        <Info size={11} />
+      </span>
+      <div className="msg-notice-content">
+        <div className="msg-notice-title">{block.summary}</div>
+        <div className="msg-notice-message">
+          <ActionStatusBadge status={block.status} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function getSubagentCardStatus(blocks: ContentBlock[]): "running" | "error" | "done" {
+  if (
+    blocks.some(
+      (block) =>
+        (block.type === "action" && block.status === "error") ||
+        (block.type === "notice" && block.level === "error"),
+    )
+  ) {
+    return "error";
+  }
+  if (
+    blocks.some(
+      (block) => block.type === "action" && (block.status === "running" || block.status === "pending"),
+    )
+  ) {
+    return "running";
+  }
+  return "done";
+}
+
+function getSubagentCardTitle(blocks: ContentBlock[], threadId: string): string {
+  for (const block of blocks) {
+    const details = getSubagentActivityDetails(block);
+    const agentPath = details?.agentPath;
+    if (typeof agentPath === "string" && agentPath.trim()) {
+      return agentPath.trim();
+    }
+  }
+  return `子代理 ${threadId.slice(0, 8)}`;
+}
+
+function SubagentCardView({
+  threadId,
+  blocks,
+  indices,
+  onLoadActionOutput,
+}: {
+  /** 子代理线程标识。 */
+  threadId: string;
+  /** 该子代理的动作和 Hook 块。 */
+  blocks: ContentBlock[];
+  /** 对应原消息块索引。 */
+  indices: number[];
+  /** 延迟加载动作完整输出的回调。 */
+  onLoadActionOutput?: (actionId: string) => Promise<void>;
+}) {
+  const status = getSubagentCardStatus(blocks);
+  const [expanded, setExpanded] = useState(status !== "done");
+  const title = getSubagentCardTitle(blocks, threadId);
+  const actionCount = blocks.filter((block) => block.type === "action").length;
+  const hookCount = blocks.filter((block) => block.type === "notice").length;
+  const statusLabel = status === "error" ? "错误" : status === "running" ? "执行中" : "已完成";
+
+  return (
+    <div className="msg-action-card">
+      <MessageBlockHeader
+        icon={<Layers size={11} />}
+        label={title}
+        expanded={expanded}
+        onToggle={() => setExpanded((value) => !value)}
+        tileTone={status === "error" ? "amber" : "info"}
+        meta={
+          <>
+            <span>{statusLabel}</span>
+            <span>{actionCount} 个动作 · {hookCount} 个 Hook</span>
+          </>
+        }
+      />
+      {expanded && (
+        <div className="action-group-body action-group-body--expanded">
+          <div className="action-group-body-inner" style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            {blocks.map((block, blockIndex) => {
+              if (block.type === "notice") {
+                return (
+                  <NoticeBlockView
+                    key={`${threadId}-hook-${indices[blockIndex]}`}
+                    block={block}
+                  />
+                );
+              }
+              if (block.type === "action") {
+                if (isSubagentActivityBlock(block)) {
+                  return <SubagentActivityRow key={block.actionId} block={block} />;
+                }
+                return (
+                  <ActionBlockView
+                    key={block.actionId}
+                    block={block}
+                    onLoadDeferredOutput={
+                      onLoadActionOutput ? () => onLoadActionOutput(block.actionId) : undefined
+                    }
+                  />
+                );
+              }
+              return null;
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -1874,6 +2100,17 @@ function MessageBlocksView({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       {blockSegments.map((segment, segIdx) => {
+        if (segment.kind === "subagent-card") {
+          return (
+            <SubagentCardView
+              key={`subagent-card-${messageId}-${segment.threadId}`}
+              threadId={segment.threadId}
+              blocks={segment.blocks}
+              indices={segment.indices}
+              onLoadActionOutput={onLoadActionOutput}
+            />
+          );
+        }
         if (segment.kind === "hook-group") {
           const groupKey = getMessageBlockKey(
             segment.blocks[0],

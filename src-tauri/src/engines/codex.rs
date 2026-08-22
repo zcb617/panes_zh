@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
-    collections::HashMap,
+    // 旧逻辑保留，不执行，已由子代理来源分支替代：collections::HashMap,
+    collections::{HashMap, HashSet},
     collections::VecDeque,
     env,
     // 旧 codex_augmented_path 实现保留在注释中：
@@ -103,16 +104,67 @@ enum CodexIncomingQueueItem {
     },
 }
 
+/// 当前 Codex turn 允许接收入站事件的线程范围。
+#[derive(Debug, Clone)]
+struct CodexThreadSubscription {
+    /// 当前 Panes 主会话对应的线程标识。
+    primary_thread_id: String,
+    /// 已由主会话明确登记的子代理线程标识集合。
+    subagent_thread_ids: HashSet<String>,
+}
+
+impl CodexThreadSubscription {
+    /// 创建只允许主线程的订阅状态。
+    fn new(primary_thread_id: String) -> Self {
+        Self {
+            primary_thread_id,
+            subagent_thread_ids: HashSet::new(),
+        }
+    }
+
+    /// 只放行主线程或已登记的子代理线程；缺失线程标识保持原有放行语义。
+    fn allows(&self, params: &serde_json::Value) -> bool {
+        let Some(thread_id) = extract_thread_id_from_params(params) else {
+            return true;
+        };
+        thread_id == self.primary_thread_id || self.subagent_thread_ids.contains(&thread_id)
+    }
+
+    /// 登记协议明确报告的子代理线程，返回本次是否新增。
+    fn register_subagent_activity(&mut self, params: &serde_json::Value) -> bool {
+        let Some(item) = params.get("item") else {
+            return false;
+        };
+        if extract_any_string(item, &["type"]).as_deref() != Some("subAgentActivity") {
+            return false;
+        }
+        let Some(agent_thread_id) = extract_any_string(item, &["agentThreadId", "agent_thread_id"])
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return false;
+        };
+        if agent_thread_id == self.primary_thread_id {
+            return false;
+        }
+        self.subagent_thread_ids.insert(agent_thread_id)
+    }
+}
+
 fn spawn_codex_incoming_pump(
     transport: Arc<CodexTransport>,
     consumer: &'static str,
-    mut thread_filter: Option<watch::Receiver<String>>,
+    // 旧逻辑保留，不执行，已由子代理来源分支替代：
+    // mut thread_filter: Option<watch::Receiver<String>>,
+    mut thread_filter: Option<watch::Receiver<CodexThreadSubscription>>,
 ) -> mpsc::Receiver<CodexIncomingQueueItem> {
     let (queue_tx, queue_rx) = mpsc::channel(CODEX_INCOMING_QUEUE_CAPACITY);
     let mut subscription = transport.subscribe();
 
     tokio::spawn(async move {
         let mut last_received_sequence: Option<u64> = None;
+        let mut local_thread_subscription = thread_filter
+            .as_ref()
+            .map(|filter| filter.borrow().clone());
 
         loop {
             tokio::select! {
@@ -123,11 +175,31 @@ fn spawn_codex_incoming_pump(
                             log_transport_subscription_receive(&message, consumer).await;
                             last_received_sequence = Some(message.sequence);
                             if let Some(thread_filter) = thread_filter.as_mut() {
-                                let thread_id = thread_filter.borrow().clone();
+                                // 旧逻辑保留，不执行，已由子代理来源分支替代：
+                                // let thread_id = thread_filter.borrow().clone();
+                                // let belongs_to_thread = match &message.message {
+                                //     IncomingMessage::Request { params, .. }
+                                //     | IncomingMessage::Notification { params, .. } => {
+                                //         belongs_to_thread(&raw_value_to_value(params), &thread_id)
+                                //     }
+                                //     IncomingMessage::Response(_) => true,
+                                // };
+                                if thread_filter.has_changed().unwrap_or(false) {
+                                    local_thread_subscription =
+                                        Some(thread_filter.borrow_and_update().clone());
+                                }
                                 let belongs_to_thread = match &message.message {
                                     IncomingMessage::Request { params, .. }
                                     | IncomingMessage::Notification { params, .. } => {
-                                        belongs_to_thread(&raw_value_to_value(params), &thread_id)
+                                        let params = raw_value_to_value(params);
+                                        if let Some(subscription) = local_thread_subscription.as_mut() {
+                                            // 泵在父事件入队时同步登记子代理，避免父事件与子事件
+                                            // 连续到达时因 run 循环尚未调度而丢失子事件。
+                                            subscription.register_subagent_activity(&params);
+                                            subscription.allows(&params)
+                                        } else {
+                                            true
+                                        }
                                     }
                                     IncomingMessage::Response(_) => true,
                                 };
@@ -707,7 +779,10 @@ impl Engine for CodexEngine {
         }
 
         let thread_id = engine_thread_id.to_string();
-        let (_, thread_filter) = watch::channel(thread_id.clone());
+        // 旧逻辑保留，不执行，已由子代理来源分支替代：
+        // let (_, thread_filter) = watch::channel(thread_id.clone());
+        let mut subscription = CodexThreadSubscription::new(thread_id.clone());
+        let (thread_filter_tx, thread_filter) = watch::channel(subscription.clone());
         let mut mapper = TurnEventMapper::default();
         let mut incoming_rx =
             spawn_codex_incoming_pump(transport.clone(), "turn", Some(thread_filter));
@@ -904,10 +979,30 @@ impl Engine for CodexEngine {
                     }
 
                     // Thread ownership is filtered before messages enter the incoming queue.
+                    // The subscription also admits only child threads explicitly reported by
+                    // the parent `subAgentActivity` item.
+                    // 旧逻辑保留，不执行，已由子代理来源分支替代：
+                    // Thread ownership is filtered before messages enter the incoming queue.
                     // if !belongs_to_thread(&params, &thread_id) {
                     //   continue;
                     // }
+                    let source_thread_id = extract_thread_id_from_params(&params);
+                    let is_subagent_event = source_thread_id
+                      .as_deref()
+                      .is_some_and(|source| source != thread_id);
+                    if normalized_method == "item/started"
+                      || normalized_method == "item/completed"
+                    {
+                      if subscription.register_subagent_activity(&params) {
+                        let _ = thread_filter_tx.send(subscription.clone());
+                      }
+                    }
+
                     if normalized_method == "turn/started" {
+                      if is_subagent_event {
+                        // 子代理 turn 生命周期只用于接收其 item/hook 事件，不能结束主 turn。
+                        continue;
+                      }
                       if let Some(turn_id) = extract_turn_id(&params) {
                         rebind_expected_turn_id(
                           &mut expected_turn_id,
@@ -925,6 +1020,12 @@ impl Engine for CodexEngine {
                           &thread_id,
                           "turn_started_notification",
                         ).await;
+                      }
+                    } else if is_subagent_event {
+                      if !normalized_method.starts_with("item/")
+                        && !normalized_method.starts_with("hook/")
+                      {
+                        continue;
                       }
                     } else if !belongs_to_turn(&params, expected_turn_id.as_deref()) {
                       continue;
@@ -989,7 +1090,15 @@ impl Engine for CodexEngine {
                       }
                     }
 
-                    let mapped_events = mapper.map_notification(&method, &params);
+                    // 旧逻辑保留，不执行，已由子代理来源分支替代：
+                    // let mapped_events = mapper.map_notification(&method, &params);
+                    let mapped_events = mapper.map_notification_with_subagent_source(
+                      &method,
+                      &params,
+                      source_thread_id
+                        .as_deref()
+                        .filter(|source| *source != thread_id),
+                    );
                     if mapped_events.is_empty()
                         && !is_known_codex_notification_method(&normalized_method)
                     {
@@ -1028,11 +1137,18 @@ impl Engine for CodexEngine {
                       "codex server request: method={method}, id={id}, raw_id={raw_id}, params_keys={:?}",
                       params.as_object().map(|o| o.keys().collect::<Vec<_>>())
                     );
-                    // Thread ownership is filtered before messages enter the incoming queue.
+                    // 子代理授权请求不在 Panes 中独立管理，只处理主线程请求。
+                    // 旧逻辑保留，不执行，已由子代理来源分支替代：
                     // if !belongs_to_thread(&params, &thread_id) {
                     //   log::warn!("codex server request dropped by belongs_to_thread: method={method}");
                     //   continue;
                     // }
+                    if extract_thread_id_from_params(&params)
+                      .as_deref()
+                      .is_some_and(|source| source != thread_id)
+                    {
+                      continue;
+                    }
                     if !belongs_to_turn(&params, expected_turn_id.as_deref()) {
                       log::warn!("codex server request dropped by belongs_to_turn: method={method}");
                       continue;
@@ -1769,8 +1885,12 @@ impl CodexEngine {
         }
 
         let source_thread_id = source_engine_thread_id.to_string();
+        let review_subscription = CodexThreadSubscription::new(source_thread_id.clone());
+        // 旧逻辑保留，不执行，已由子代理来源分支替代：
+        // let (review_thread_filter_tx, review_thread_filter) =
+        //     watch::channel(source_thread_id.clone());
         let (review_thread_filter_tx, review_thread_filter) =
-            watch::channel(source_thread_id.clone());
+            watch::channel(review_subscription);
         let mut mapper = TurnEventMapper::default();
         let mut incoming_rx = spawn_codex_incoming_pump(
             transport.clone(),
@@ -1879,7 +1999,11 @@ impl CodexEngine {
                     }
                 };
                 active_thread_id = review_thread_id.clone();
-                let _ = review_thread_filter_tx.send(active_thread_id.clone());
+                // 旧逻辑保留，不执行，已由子代理来源分支替代：
+                // let _ = review_thread_filter_tx.send(active_thread_id.clone());
+                let _ = review_thread_filter_tx.send(CodexThreadSubscription::new(
+                    active_thread_id.clone(),
+                ));
                 if let Some(started_tx) = started_tx.take() {
                     let _ = started_tx.send(CodexReviewStarted {
                         review_thread_id: review_thread_id.clone(),
@@ -7328,6 +7452,36 @@ fn belongs_to_thread(params: &serde_json::Value, thread_id: &str) -> bool {
     true
 }
 
+/// 从通知或请求参数中读取协议提供的线程标识，用于父子线程订阅判断。
+fn extract_thread_id_from_params(params: &serde_json::Value) -> Option<String> {
+    let candidates = [
+        "threadId",
+        "thread_id",
+        "engineThreadId",
+        "engine_thread_id",
+        "conversationId",
+        "conversation_id",
+        "sessionId",
+        "session_id",
+    ];
+
+    if let Some(found) = extract_any_string(params, &candidates) {
+        return Some(found);
+    }
+
+    for key in [
+        "thread", "turn", "session", "context", "meta", "metadata", "item",
+    ] {
+        if let Some(nested) = params.get(key) {
+            if let Some(found) = extract_any_string(nested, &candidates) {
+                return Some(found);
+            }
+        }
+    }
+
+    None
+}
+
 fn codex_transport_reset_category(reason: &str) -> &'static str {
     let reason = reason.to_ascii_lowercase();
     if reason.contains("lagged") {
@@ -7794,6 +7948,23 @@ mod tests {
     use super::*;
     use crate::engines::ActionResult;
     use serde_json::{json, Value};
+
+    #[test]
+    fn codex_thread_subscription_allows_primary_and_registered_subagent_only() {
+        let mut subscription = CodexThreadSubscription::new("parent".to_string());
+        assert!(subscription.allows(&json!({ "threadId": "parent" })));
+        assert!(subscription.allows(&json!({ "event": "without-thread-id" })));
+        assert!(!subscription.allows(&json!({ "threadId": "unrelated" })));
+
+        assert!(subscription.register_subagent_activity(&json!({
+            "item": {
+                "type": "subAgentActivity",
+                "agentThreadId": "child"
+            }
+        })));
+        assert!(subscription.allows(&json!({ "threadId": "child" })));
+        assert!(!subscription.allows(&json!({ "threadId": "unrelated" })));
+    }
 
     #[tokio::test]
     async fn remote_text_attachment_uses_remote_path_without_local_file_read() {

@@ -31,6 +31,18 @@ pub struct ApprovalRequest {
 
 impl TurnEventMapper {
     pub fn map_notification(&mut self, method: &str, params: &Value) -> Vec<EngineEvent> {
+        // 旧逻辑保留，不执行，已由子代理来源分支替代：原方法体直接按 method_key
+        // 映射主线程事件；现在统一转入来源感知入口，None 表示主线程。
+        self.map_notification_with_subagent_source(method, params, None)
+    }
+
+    /// 映射通知，并在事件来自已登记子代理时保留其来源标识。
+    pub fn map_notification_with_subagent_source(
+        &mut self,
+        method: &str,
+        params: &Value,
+        subagent_thread_id: Option<&str>,
+    ) -> Vec<EngineEvent> {
         let method_key = method_signature(method);
 
         match method_key.as_str() {
@@ -89,15 +101,53 @@ impl TurnEventMapper {
                 }
             }
             "itemagentmessagedelta" => {
-                if let Some(item_id) = extract_any_string(params, &["itemId", "item_id", "id"]) {
+                // 旧逻辑保留，不执行，已由子代理来源分支替代：
+                // if let Some(item_id) = extract_any_string(params, &["itemId", "item_id", "id"]) {
+                //     self.streamed_agent_message_items.insert(item_id);
+                // }
+                // let content = extract_any_string(params, &["delta", "text", "content"])
+                //     .unwrap_or_default();
+                // if content.is_empty() {
+                //     Vec::new()
+                // } else {
+                //     vec![EngineEvent::TextDelta { content }]
+                // }
+                if let Some(subagent_thread_id) = subagent_thread_id {
+                    let Some(item_id) =
+                        extract_any_string(params, &["itemId", "item_id", "id"])
+                    else {
+                        return Vec::new();
+                    };
+                    let Some(action_id) = self.engine_action_to_internal.get(&item_id).cloned()
+                    else {
+                        return Vec::new();
+                    };
                     self.streamed_agent_message_items.insert(item_id);
-                }
-                let content =
-                    extract_any_string(params, &["delta", "text", "content"]).unwrap_or_default();
-                if content.is_empty() {
-                    Vec::new()
+                    let content = extract_any_string(
+                        params,
+                        &["delta", "text", "content"],
+                    )
+                    .unwrap_or_default();
+                    if content.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![EngineEvent::ActionOutputDelta {
+                            action_id,
+                            stream: OutputStream::Stdout,
+                            content: trim_action_output_delta_content(&content),
+                        }]
+                    }
                 } else {
-                    vec![EngineEvent::TextDelta { content }]
+                    if let Some(item_id) = extract_any_string(params, &["itemId", "item_id", "id"]) {
+                        self.streamed_agent_message_items.insert(item_id);
+                    }
+                    let content =
+                        extract_any_string(params, &["delta", "text", "content"]).unwrap_or_default();
+                    if content.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![EngineEvent::TextDelta { content }]
+                    }
                 }
             }
             "itemplandelta" => {
@@ -217,11 +267,21 @@ impl TurnEventMapper {
             }
             "threadrealtimeitemadded" => self.map_realtime_item_added(params),
             "deprecationnotice" => map_deprecation_notice(params).into_iter().collect(),
-            "hookstarted" | "hookcompleted" => map_hook_notification(method_key.as_str(), params)
-                .into_iter()
-                .collect(),
-            "itemstarted" => self.map_item_started(params),
-            "itemcompleted" => self.map_item_completed(params),
+            // 旧逻辑保留，不执行，已由子代理来源分支替代：
+            // "hookstarted" | "hookcompleted" => map_hook_notification(method_key.as_str(), params)
+            //     .into_iter()
+            //     .collect(),
+            // "itemstarted" => self.map_item_started(params),
+            // "itemcompleted" => self.map_item_completed(params),
+            "hookstarted" | "hookcompleted" => map_hook_notification(
+                method_key.as_str(),
+                params,
+                subagent_thread_id,
+            )
+            .into_iter()
+            .collect(),
+            "itemstarted" => self.map_item_started(params, subagent_thread_id),
+            "itemcompleted" => self.map_item_completed(params, subagent_thread_id),
             "itemcommandexecutionoutputdelta"
             | "commandexecoutputdelta"
             | "itemfilechangeoutputdelta" => self.map_output_delta(params).into_iter().collect(),
@@ -395,13 +455,26 @@ impl TurnEventMapper {
         })
     }
 
-    fn map_item_started(&mut self, params: &Value) -> Vec<EngineEvent> {
+    // 旧逻辑保留，不执行，已由子代理来源分支替代：
+    // fn map_item_started(&mut self, params: &Value) -> Vec<EngineEvent> {
+    fn map_item_started(
+        &mut self,
+        params: &Value,
+        subagent_thread_id: Option<&str>,
+    ) -> Vec<EngineEvent> {
         let Some(item) = params.get("item") else {
             return Vec::new();
         };
 
         let item_type =
             extract_any_string(item, &["type"]).unwrap_or_else(|| "unknown".to_string());
+
+        if item_type == "collabAgentToolCall"
+            && extract_any_string(item, &["tool"])
+                .is_some_and(|tool| tool.eq_ignore_ascii_case("wait"))
+        {
+            return Vec::new();
+        }
 
         match item_type.as_str() {
             "commandExecution" => {
@@ -415,7 +488,8 @@ impl TurnEventMapper {
                     engine_action_id: engine_item_id,
                     action_type: ActionType::Command,
                     summary,
-                    details: item.clone(),
+                    // 旧逻辑保留，不执行，已由子代理来源分支替代：details: item.clone(),
+                    details: annotate_subagent_details(item.clone(), subagent_thread_id, None),
                 }]
             }
             "fileChange" => {
@@ -430,7 +504,8 @@ impl TurnEventMapper {
                     engine_action_id: engine_item_id,
                     action_type: ActionType::FileEdit,
                     summary,
-                    details: item.clone(),
+                    // 旧逻辑保留，不执行，已由子代理来源分支替代：details: item.clone(),
+                    details: annotate_subagent_details(item.clone(), subagent_thread_id, None),
                 }]
             }
             "webSearch" => {
@@ -442,7 +517,8 @@ impl TurnEventMapper {
                     engine_action_id: engine_item_id,
                     action_type: ActionType::Search,
                     summary: "Web search".to_string(),
-                    details: item.clone(),
+                    // 旧逻辑保留，不执行，已由子代理来源分支替代：details: item.clone(),
+                    details: annotate_subagent_details(item.clone(), subagent_thread_id, None),
                 }]
             }
             "mcpToolCall" => {
@@ -454,7 +530,8 @@ impl TurnEventMapper {
                     action_type: ActionType::Other,
                     summary: extract_any_string(item, &["name", "toolName"])
                         .unwrap_or_else(|| "Tool call".to_string()),
-                    details: item.clone(),
+                    // 旧逻辑保留，不执行，已由子代理来源分支替代：details: item.clone(),
+                    details: annotate_subagent_details(item.clone(), subagent_thread_id, None),
                 }];
 
                 if let Some(engine_item_id) = extract_any_string(item, &["id"]) {
@@ -473,6 +550,31 @@ impl TurnEventMapper {
 
                 events
             }
+            "subAgentActivity" => {
+                let engine_item_id = extract_any_string(item, &["id"]);
+                let action_id = self.resolve_or_register_action(engine_item_id.as_deref());
+                let activity_kind = extract_any_string(item, &["kind"])
+                    .unwrap_or_else(|| "updated".to_string());
+                let activity_thread_id = extract_any_string(
+                    item,
+                    &["agentThreadId", "agent_thread_id"],
+                );
+                let details = annotate_subagent_details(
+                    item.clone(),
+                    activity_thread_id.as_deref().or(subagent_thread_id),
+                    Some((
+                        activity_kind.as_str(),
+                        extract_any_string(item, &["agentPath", "agent_path"]),
+                    )),
+                );
+                vec![EngineEvent::ActionStarted {
+                    action_id,
+                    engine_action_id: engine_item_id,
+                    action_type: ActionType::Other,
+                    summary: summarize_subagent_activity(&activity_kind),
+                    details,
+                }]
+            }
             "collabAgentToolCall" => {
                 let engine_item_id = extract_any_string(item, &["id"]);
                 let action_id = self.resolve_or_register_action(engine_item_id.as_deref());
@@ -482,10 +584,34 @@ impl TurnEventMapper {
                     engine_action_id: engine_item_id,
                     action_type: ActionType::Other,
                     summary: summarize_collab_agent_tool_call(item),
-                    details: item.clone(),
+                    // 旧逻辑保留，不执行，已由子代理来源分支替代：details: item.clone(),
+                    details: annotate_subagent_details(item.clone(), subagent_thread_id, None),
                 }]
             }
-            "agentMessage" => Vec::new(),
+            // 旧逻辑保留，不执行，已由子代理来源分支替代："agentMessage" => Vec::new(),
+            "agentMessage" => {
+                if let Some(subagent_thread_id) = subagent_thread_id {
+                    let engine_item_id = extract_any_string(item, &["id"]);
+                    let action_id = self.resolve_or_register_action(engine_item_id.as_deref());
+                    let mut details = annotate_subagent_details(
+                        item.clone(),
+                        Some(subagent_thread_id),
+                        None,
+                    );
+                    if let Some(object) = details.as_object_mut() {
+                        object.insert("subagentMessage".to_string(), Value::Bool(true));
+                    }
+                    vec![EngineEvent::ActionStarted {
+                        action_id,
+                        engine_action_id: engine_item_id,
+                        action_type: ActionType::Other,
+                        summary: "子代理进度".to_string(),
+                        details,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
             "plan" => {
                 let text = extract_any_string(item, &["text"]).unwrap_or_default();
                 if text.is_empty() {
@@ -508,7 +634,13 @@ impl TurnEventMapper {
         }
     }
 
-    fn map_item_completed(&mut self, params: &Value) -> Vec<EngineEvent> {
+    // 旧逻辑保留，不执行，已由子代理来源分支替代：
+    // fn map_item_completed(&mut self, params: &Value) -> Vec<EngineEvent> {
+    fn map_item_completed(
+        &mut self,
+        params: &Value,
+        subagent_thread_id: Option<&str>,
+    ) -> Vec<EngineEvent> {
         let Some(item) = params.get("item") else {
             return Vec::new();
         };
@@ -516,12 +648,21 @@ impl TurnEventMapper {
         let item_type =
             extract_any_string(item, &["type"]).unwrap_or_else(|| "unknown".to_string());
 
+        if item_type == "collabAgentToolCall"
+            && extract_any_string(item, &["tool"])
+                .is_some_and(|tool| tool.eq_ignore_ascii_case("wait"))
+        {
+            return Vec::new();
+        }
+
         match item_type.as_str() {
             "commandExecution"
             | "fileChange"
             | "webSearch"
             | "mcpToolCall"
-            | "collabAgentToolCall" => {
+            // 旧逻辑保留，不执行，已由子代理来源分支替代：| "collabAgentToolCall" => {
+            | "collabAgentToolCall"
+            | "subAgentActivity" => {
                 let engine_item_id = extract_any_string(item, &["id"]);
                 let Some(action_id) = self.resolve_action_for_completion(engine_item_id.as_deref())
                 else {
@@ -584,6 +725,30 @@ impl TurnEventMapper {
                 }]
             }
             "agentMessage" => {
+                if subagent_thread_id.is_some() {
+                    if let Some(item_id) = extract_any_string(item, &["id"]) {
+                        let Some(action_id) = self.resolve_action_for_completion(Some(&item_id)) else {
+                            return Vec::new();
+                        };
+                        let streamed = self.streamed_agent_message_items.remove(&item_id);
+                        let text = extract_any_string(item, &["text"]).unwrap_or_default();
+                        return vec![EngineEvent::ActionCompleted {
+                            action_id,
+                            result: ActionResult {
+                                success: true,
+                                output: if streamed || text.is_empty() {
+                                    None
+                                } else {
+                                    Some(trim_action_output_delta_content(&text))
+                                },
+                                error: None,
+                                diff: None,
+                                duration_ms: extract_any_u64(item, &["durationMs", "duration_ms"])
+                                    .unwrap_or(0),
+                            },
+                        }];
+                    }
+                }
                 if let Some(item_id) = extract_any_string(item, &["id"]) {
                     if self.streamed_agent_message_items.remove(&item_id) {
                         return Vec::new();
@@ -605,8 +770,11 @@ impl TurnEventMapper {
             return Vec::new();
         };
         let item_params = serde_json::json!({ "item": item });
-        let mut events = self.map_item_started(&item_params);
-        events.extend(self.map_item_completed(&item_params));
+        // 旧逻辑保留，不执行，已由子代理来源分支替代：
+        // let mut events = self.map_item_started(&item_params);
+        // events.extend(self.map_item_completed(&item_params));
+        let mut events = self.map_item_started(&item_params, None);
+        events.extend(self.map_item_completed(&item_params, None));
         events
     }
 
@@ -999,7 +1167,13 @@ fn map_realtime_transcript_done(params: &Value, already_streamed: bool) -> Optio
     }
 }
 
-fn map_hook_notification(method_key: &str, params: &Value) -> Option<EngineEvent> {
+// 旧逻辑保留，不执行，已由子代理来源分支替代：
+// fn map_hook_notification(method_key: &str, params: &Value) -> Option<EngineEvent> {
+fn map_hook_notification(
+    method_key: &str,
+    params: &Value,
+    subagent_thread_id: Option<&str>,
+) -> Option<EngineEvent> {
     let run = params.get("run")?;
     let hook_id = extract_any_string(run, &["id"]).unwrap_or_else(|| "unknown".to_string());
     let event_name =
@@ -1060,12 +1234,62 @@ fn map_hook_notification(method_key: &str, params: &Value) -> Option<EngineEvent
         _ => "info",
     };
 
+    // 旧逻辑保留，不执行，已由子代理来源分支替代：
+    // kind: format!("{kind_prefix}_{hook_id}"),
+    let kind = match subagent_thread_id {
+        Some(thread_id) => format!("{kind_prefix}_{hook_id}::subagent::{thread_id}"),
+        None => format!("{kind_prefix}_{hook_id}"),
+    };
+
     Some(EngineEvent::Notice {
-        kind: format!("{kind_prefix}_{hook_id}"),
+        kind,
         level: level.to_string(),
         title: title.to_string(),
         message: message_lines.join("\n"),
     })
+}
+
+/// 为子代理动作保留来源字段，同时不丢失协议原始 details。
+fn annotate_subagent_details(
+    mut details: Value,
+    subagent_thread_id: Option<&str>,
+    activity: Option<(&str, Option<String>)>,
+) -> Value {
+    let Some(thread_id) = subagent_thread_id else {
+        return details;
+    };
+    let Some(object) = details.as_object_mut() else {
+        return details;
+    };
+    object.insert(
+        "subagentThreadId".to_string(),
+        Value::String(thread_id.to_string()),
+    );
+    let is_message_activity = activity
+        .as_ref()
+        .is_some_and(|(kind, _)| *kind == "message");
+    if let Some((kind, agent_path)) = activity {
+        object.insert(
+            "subagentActivity".to_string(),
+            Value::String(kind.to_string()),
+        );
+        if let Some(agent_path) = agent_path {
+            object.insert("agentPath".to_string(), Value::String(agent_path));
+        }
+    }
+    if is_message_activity {
+        object.insert("subagentMessage".to_string(), Value::Bool(true));
+    }
+    details
+}
+
+fn summarize_subagent_activity(kind: &str) -> String {
+    match kind {
+        "started" => "子代理已开始".to_string(),
+        "interacted" => "子代理有新进展".to_string(),
+        "interrupted" => "子代理已中断".to_string(),
+        _ => "子代理状态更新".to_string(),
+    }
 }
 
 fn summarize_permissions_request(params: &Value) -> String {
@@ -2140,6 +2364,151 @@ mod tests {
             }
             other => panic!("expected action started event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn map_subagent_actions_and_messages_keep_source_metadata() {
+        let mut mapper = TurnEventMapper::default();
+        let started = mapper.map_notification_with_subagent_source(
+            "item/started",
+            &json!({
+                "item": {
+                    "id": "child_cmd",
+                    "type": "commandExecution",
+                    "command": "echo test"
+                }
+            }),
+            Some("child_thread"),
+        );
+        assert_eq!(started.len(), 1);
+        match &started[0] {
+            EngineEvent::ActionStarted { details, .. } => {
+                assert_eq!(details.get("subagentThreadId"), Some(&json!("child_thread")));
+            }
+            other => panic!("expected child action started event; received {other:?}"),
+        }
+
+        let message_started = mapper.map_notification_with_subagent_source(
+            "item/started",
+            &json!({
+                "item": {
+                    "id": "child_message",
+                    "type": "agentMessage"
+                }
+            }),
+            Some("child_thread"),
+        );
+        assert_eq!(message_started.len(), 1);
+        let message_action_id = match &message_started[0] {
+            EngineEvent::ActionStarted {
+                action_id, details, summary, ..
+            } => {
+                assert_eq!(summary, "子代理进度");
+                assert_eq!(details.get("subagentMessage"), Some(&json!(true)));
+                action_id.clone()
+            }
+            other => panic!("expected child progress action; received {other:?}"),
+        };
+
+        let delta = mapper.map_notification_with_subagent_source(
+            "item/agentMessage/delta",
+            &json!({ "itemId": "child_message", "delta": "正在执行" }),
+            Some("child_thread"),
+        );
+        assert!(matches!(
+            delta.first(),
+            Some(EngineEvent::ActionOutputDelta { action_id, .. }) if action_id == &message_action_id
+        ));
+
+        let completed = mapper.map_notification_with_subagent_source(
+            "item/completed",
+            &json!({
+                "item": {
+                    "id": "child_message",
+                    "type": "agentMessage",
+                    "text": "正在执行",
+                    "status": "completed"
+                }
+            }),
+            Some("child_thread"),
+        );
+        assert!(matches!(
+            completed.first(),
+            Some(EngineEvent::ActionCompleted { action_id, .. }) if action_id == &message_action_id
+        ));
+    }
+
+    #[test]
+    fn map_subagent_activity_and_hook_use_card_markers() {
+        let mut mapper = TurnEventMapper::default();
+        let activity = mapper.map_notification_with_subagent_source(
+            "item/started",
+            &json!({
+                "item": {
+                    "id": "activity_1",
+                    "type": "subAgentActivity",
+                    "agentThreadId": "child_thread",
+                    "agentPath": "编码任务",
+                    "kind": "started"
+                }
+            }),
+            Some("parent_thread"),
+        );
+        match &activity[0] {
+            EngineEvent::ActionStarted { summary, details, .. } => {
+                assert_eq!(summary, "子代理已开始");
+                assert_eq!(details.get("subagentThreadId"), Some(&json!("child_thread")));
+                assert_eq!(details.get("subagentActivity"), Some(&json!("started")));
+                assert_eq!(details.get("agentPath"), Some(&json!("编码任务")));
+            }
+            other => panic!("expected subagent activity event; received {other:?}"),
+        }
+
+        let hook = mapper.map_notification_with_subagent_source(
+            "hook/completed",
+            &json!({
+                "run": {
+                    "id": "hook_1",
+                    "eventName": "sessionStart",
+                    "handlerType": "command",
+                    "status": "completed"
+                }
+            }),
+            Some("child_thread"),
+        );
+        assert!(matches!(
+            hook.first(),
+            Some(EngineEvent::Notice { kind, .. })
+                if kind == "hook_completed_hook_1::subagent::child_thread"
+        ));
+    }
+
+    #[test]
+    fn map_collab_wait_is_suppressed() {
+        let mut mapper = TurnEventMapper::default();
+        let started = mapper.map_notification(
+            "item/started",
+            &json!({
+                "item": {
+                    "id": "wait_1",
+                    "type": "collabAgentToolCall",
+                    "tool": "wait"
+                }
+            }),
+        );
+        assert!(started.is_empty());
+        let completed = mapper.map_notification(
+            "item/completed",
+            &json!({
+                "item": {
+                    "id": "wait_1",
+                    "type": "collabAgentToolCall",
+                    "tool": "wait",
+                    "status": "completed"
+                }
+            }),
+        );
+        assert!(completed.is_empty());
     }
 
     #[test]
